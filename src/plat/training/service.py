@@ -61,7 +61,6 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
         s.commit()
         brief = {"id": task.id, "uid": task.uid, "name": task.name, "source": task.source,
                  "status": task.status, "base_model": task.base_model}
-    manager.notify()
     return brief
 
 
@@ -132,9 +131,26 @@ def get_run(manager, uid: str) -> dict:
         return {"uid": r.uid, "task_id": r.task_id, "task_name": task.name if task else "",
                 "round_no": r.round_no, "status": r.status, "primary_metric": r.primary_metric,
                 "metrics": metrics, "run_dir": r.run_dir,
+                "progress": manager.current_progress.get(r.id),
                 "artifacts": {"best_pt": r.best_pt, "last_pt": r.last_pt,
                               "training_log": str(run_dir / "training.log") if run_dir else None,
                               "results_csv": str(run_dir / "results.csv") if run_dir else None}}
+
+
+def stop_run(manager, uid: str) -> str:
+    try:
+        return manager.request_stop(uid)
+    except KeyError:
+        raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+
+
+def resume_run(manager, uid: str) -> str:
+    try:
+        return manager.resume(uid)
+    except KeyError:
+        raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+    except ValueError as exc:
+        raise _http_err("state_conflict", str(exc), 409)
 
 
 def run_logs(manager, uid: str, tail: int = 200) -> list[str]:

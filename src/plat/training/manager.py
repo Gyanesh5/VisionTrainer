@@ -77,7 +77,7 @@ def get_manager() -> "TrainingManager":
 @dataclass
 class ManagerSettings:
     training_python: str
-    worker_script: str
+    trainer_entry: str
     runs_dir: Path
     poll_interval: float = 1.0
     stop_timeout: float = 10.0
@@ -105,6 +105,7 @@ class TrainingManager:
         self.s = settings
         self.current: CurrentRun | None = None
         self.block_reason: str | None = None
+        self.current_progress: dict[int, dict] = {}
         self._started = False
 
     # ------------------------------------------------------------ 生命周期
@@ -154,10 +155,6 @@ class TrainingManager:
                                     "queued_uids": [], "block_reason": f"队列异常：{exc}"})
             time.sleep(self.s.poll_interval)
 
-    def notify(self) -> None:
-        """有新 Run 入队时唤醒（轮询兜底，无需精确唤醒）。"""
-        return
-
     def _try_launch_next(self) -> None:
         with self.Session() as s:
             run = (
@@ -171,6 +168,7 @@ class TrainingManager:
                     self.block_reason = None
                     self._publish_queue(s)
                 return
+            run_id = run.id
 
         if self.s.check_occupancy:
             occupied, reason = gpu_externally_occupied()
@@ -181,7 +179,7 @@ class TrainingManager:
                 return
 
         self.block_reason = None
-        self._launch(run.id)
+        self._launch(run_id)
 
     def _launch(self, run_id: int) -> None:
         with self.Session() as s:
@@ -205,7 +203,7 @@ class TrainingManager:
         payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
         log_f = (run_dir / "training.log").open("wb")
-        proc = _popen([self.s.training_python, self.s.worker_script, str(payload_path)], log_f)
+        proc = SubprocessHandle([self.s.training_python, self.s.trainer_entry, str(payload_path)], log_f)
 
         with self.Session() as s:
             run = s.get(Run, run_id)
@@ -232,7 +230,7 @@ class TrainingManager:
             self.current = CurrentRun(run_id=run_id, uid=run.uid, task_id=run.task_id,
                                       pid=run.pid, proc=proc,
                                       metrics_offset=(Path(run.run_dir) / "metrics.jsonl").stat().st_size
-                                      if (Path(run.run_dir) / "metrics.jsonl").exists() else 0)
+                                      if run.run_dir and (Path(run.run_dir) / "metrics.jsonl").exists() else 0)
         w = threading.Thread(target=self._watchdog, args=(self.current,), daemon=True, name=f"adopt-{run.uid}")
         self.current.watchdog = w
         w.start()
@@ -258,7 +256,10 @@ class TrainingManager:
                             rec = json.loads(line)
                         except json.JSONDecodeError:
                             continue
-                        self._record_metric(cur, rec)
+                        if "progress" in rec:
+                            self._record_progress(cur, rec)
+                        elif "metrics" in rec:
+                            self._record_metric(cur, rec)
                     cur.metrics_offset = f.tell()
 
             # 2) 优雅停止升级：SIGTERM 超时 → killpg SIGKILL
@@ -277,6 +278,27 @@ class TrainingManager:
             # 3) 进程退出 → 终态
             self._finalize(cur, ret)
             return
+
+    def _record_progress(self, cur: CurrentRun, rec: dict) -> None:
+        """batch 级进度（1Hz 节流，worker 侧节流）：WS 推送 + 内存快照，不入库。"""
+        prog = rec["progress"]
+        self.current_progress[cur.run_id] = prog
+        publish_threadsafe({"type": "run.progress", "run_uid": cur.uid, **prog})
+
+    def _fallback_from_results_csv(self, s, run) -> None:
+        """兜底：metrics.jsonl 缺失（回调没跑/DDP）时，从 ultralytics results.csv 补齐逐 epoch 指标。"""
+        if not run.run_dir:
+            return
+        csv_path = Path(run.run_dir) / "results.csv"
+        if not csv_path.exists():
+            return
+        import csv as _csv
+
+        with csv_path.open("r", encoding="utf-8") as f:
+            for i, row in enumerate(_csv.DictReader(f), start=1):
+                metrics = {k.strip(): float(v) for k, v in row.items() if v not in ("", None)}
+                metrics.pop("epoch", None)
+                s.merge(EpochMetric(run_id=run.id, epoch=i, metrics=metrics))
 
     def _record_metric(self, cur: CurrentRun, rec: dict) -> None:
         epoch = int(rec.get("epoch", 0))
@@ -307,6 +329,8 @@ class TrainingManager:
             else:
                 run.status = "failed"
                 run.error = f"训练进程退出码 {ret}（详见 training.log）"
+            if s.query(EpochMetric).filter(EpochMetric.run_id == cur.run_id).count() == 0:
+                self._fallback_from_results_csv(s, run)
             s.commit()
             status = run.status
             error = run.error
@@ -349,6 +373,8 @@ class TrainingManager:
             old = s.query(Run).filter(Run.uid == run_uid).one_or_none()
             if old is None:
                 raise KeyError(run_uid)
+            if old.status not in ("done", "failed", "cancelled"):
+                raise ValueError(f"仅已结束的 Run 可续训（当前 {old.status}）")
             task = s.get(Task, old.task_id)
             new = Run(uid=new_uid(), task_id=task.id, round_no=old.round_no + 1, status="queued")
             s.add(new)
@@ -407,11 +433,7 @@ class TrainingManager:
 
 # ---------------------------------------------------------------- 进程抽象
 
-def _popen(cmd: list[str], log_f) -> object:
-    return PopenSession(cmd, log_f)
-
-
-class PopenSession:
+class SubprocessHandle:
     """subprocess.Popen 的薄封装（可被测试替换）。"""
 
     def __init__(self, cmd: list[str], log_f):

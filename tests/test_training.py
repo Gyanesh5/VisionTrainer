@@ -14,7 +14,7 @@ from conftest import make_annotation, make_image, rect
 from plat.datasets import service as svc
 from plat.main import create_app
 
-STUB = str(Path(__file__).parent / "stub_worker.py")
+STUB = str(Path(__file__).parent / "stub_trainer.py")
 
 
 def _wait_status(client: TestClient, run_uid: str, statuses: set[str], timeout: float = 20.0) -> dict:
@@ -35,7 +35,7 @@ def training_client(tmp_path: Path, datasets_root, detect_source, monkeypatch: p
     cfg = {
         "training": {
             "python": sys.executable,
-            "worker_script": STUB,
+            "trainer_entry": STUB,
             "runs_dir": str(tmp_path / "runs"),
             "db_url": f"sqlite:///{tmp_path / 'platform.db'}",
             "check_occupancy": False,
@@ -145,7 +145,7 @@ def test_gpu_occupied_blocks_queue(tmp_path, datasets_root, detect_source, monke
 
     svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     monkeypatch.setattr(mgr, "gpu_externally_occupied", lambda: (True, "GPU0 被外部进程占用"))
-    cfg = {"training": {"python": sys.executable, "worker_script": STUB,
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": True}}
     app = create_app(cfg=cfg, with_ui=False)
@@ -165,6 +165,34 @@ def test_gpu_occupied_blocks_queue(tmp_path, datasets_root, detect_source, monke
         # 解除占用后应自动开跑（队列自动唤醒）
         monkeypatch.setattr(mgr, "gpu_externally_occupied", lambda: (False, ""))
         _wait_task(c, task_uid, {"running", "done"})
+
+
+def test_resume_running_rejected(training_client):
+    """spec §2.2：仅已结束的 Run 可续训（从不自动续训，也不对未结束任务续训）。"""
+    c = training_client
+    task_uid = _create_task(c, epochs=100, name="running-resume")
+    task = _wait_task(c, task_uid, {"running"})
+    run_uid = task["runs"][0]["uid"]
+    r = c.post(f"/api/v1/runs/{run_uid}/resume")
+    assert r.status_code == 409
+    c.post(f"/api/v1/runs/{run_uid}/stop")
+    _wait_status(c, run_uid, {"cancelled"})
+
+
+def test_run_progress_event_streamed(training_client):
+    c = training_client
+    with c.websocket_connect("/ws/events") as ws:
+        c.post("/api/v1/tasks", json={"name": "prog", "base_model": "stub", "dataset": "plate", "epochs": 2})
+        seen = False
+        for _ in range(60):
+            msg = ws.receive_json()
+            if msg["type"] == "run.progress":
+                seen = True
+                assert msg["epochs_total"] == 2
+                break
+            if msg["type"] == "run.status" and msg["status"] == "done":
+                break
+        assert seen, "未收到 run.progress 事件"
 
 
 def test_delete_task_with_files(training_client):

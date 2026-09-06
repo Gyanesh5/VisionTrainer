@@ -19,10 +19,6 @@ def _err(exc: tsvc.TaskError):
                          detail={"error": {"code": exc.code, "message": exc.message, "detail": {}}})
 
 
-def _not_found(msg: str):
-    return HTTPException(status_code=404, detail={"error": {"code": "not_found", "message": msg, "detail": {}}})
-
-
 class AgentConfig(BaseModel):
     max_rounds: int = 5
     approval: str = "manual"
@@ -97,17 +93,17 @@ def run_logs(uid: str, request: Request, tail: int = 200):
 @router.post("/runs/{uid}/stop")
 def stop_run(uid: str, request: Request):
     try:
-        return {"run_uid": uid, "state": _manager(request).request_stop(uid)}
-    except KeyError:
-        raise _not_found(f"Run 不存在：{uid}")
+        return {"run_uid": uid, "state": tsvc.stop_run(_manager(request), uid)}
+    except tsvc.TaskError as exc:
+        raise _err(exc)
 
 
 @router.post("/runs/{uid}/resume")
 def resume_run(uid: str, request: Request):
     try:
-        return {"new_run_uid": _manager(request).resume(uid)}
-    except KeyError:
-        raise _not_found(f"Run 不存在：{uid}")
+        return {"new_run_uid": tsvc.resume_run(_manager(request), uid)}
+    except tsvc.TaskError as exc:
+        raise _err(exc)
 
 
 @router.post("/runs/{uid}/report")

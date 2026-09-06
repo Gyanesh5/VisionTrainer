@@ -19,6 +19,27 @@ NAV_ITEMS = [
 ]
 
 
+def _loss_options(metrics: list[dict]) -> dict:
+    """loss 分项与学习率曲线（07 号票监控视图内容）。"""
+    first = metrics[0] if metrics else {}
+    loss_keys = sorted((first.get("loss") or {}).keys())
+    series = [
+        {"name": k, "type": "line", "smooth": True,
+         "data": [(m.get("loss") or {}).get(k) for m in metrics]} for k in loss_keys
+    ]
+    if any(m.get("lr") for m in metrics):
+        series.append({"name": "lr", "type": "line", "yAxisIndex": 1 if False else 0,
+                       "data": [(m.get("lr") or [None])[0] for m in metrics]})
+    return {
+        "backgroundColor": "transparent",
+        "grid": {"left": 42, "right": 14, "top": 28, "bottom": 26},
+        "legend": {"top": 0},
+        "xAxis": {"type": "category", "data": [m["epoch"] for m in metrics]},
+        "yAxis": {"type": "value"},
+        "series": series,
+    }
+
+
 def _chart_options(metrics: list[dict]) -> dict:
     """Run 详情实时曲线（07 号票：loss 分项 + P/R/mAP 曲线的核心两线）。"""
     return {
@@ -138,7 +159,23 @@ def mount() -> None:
                             ui.button("续训", on_click=lambda: do_resume(uid)).props("outline dense")
                     if run.get("error"):
                         ui.label(run["error"]).classes("text-xs").style("color:#b91c1c")
-                    chart = ui.echart(_chart_options(run["metrics"])).classes("w-full h-56")
+                    prog = run.get("progress")
+                    prog_label = ui.label("")
+                    if prog:
+                        prog_label.set_text(
+                            f"epoch {prog.get('epoch')}/{prog.get('epochs_total')} · "
+                            f"batch {prog.get('batch')}/{prog.get('batches_total')}"
+                        )
+                    chart = ui.echart(_chart_options(run["metrics"])).classes("w-full h-52")
+                    chart_loss = ui.echart(_loss_options(run["metrics"])).classes("w-full h-44")
+                    with ui.expansion("产物与日志", icon="folder").classes("w-full"):
+                        art = run.get("artifacts") or {}
+                        ui.label(f"best.pt：{art.get('best_pt') or '—'}").classes("text-xs")
+                        ui.label(f"last.pt：{art.get('last_pt') or '—'}").classes("text-xs")
+                        ui.label(f"results.csv：{art.get('results_csv') or '—'}").classes("text-xs")
+                        log_box = ui.log(max_lines=12).classes("w-full h-32 text-xs")
+                        for line in tsvc.run_logs(get_manager(), uid, tail=12):
+                            log_box.push(line)
                     if run["status"] == "running":
 
                         def poll() -> None:
@@ -147,14 +184,21 @@ def mount() -> None:
                             except Exception:  # noqa: BLE001
                                 return
                             chart.options = _chart_options(r["metrics"])
+                            chart_loss.options = _loss_options(r["metrics"])
+                            pg = r.get("progress")
+                            if pg:
+                                prog_label.set_text(
+                                    f"epoch {pg.get('epoch')}/{pg.get('epochs_total')} · "
+                                    f"batch {pg.get('batch')}/{pg.get('batches_total')}"
+                                )
                         ui.timer(1.0, poll)
 
             def do_stop(uid: str) -> None:
-                get_manager().request_stop(uid)
+                tsvc.stop_run(get_manager(), uid)
                 ui.notify(f"停止请求已发出：{uid}")
 
             def do_resume(uid: str) -> None:
-                new_uid_ = get_manager().resume(uid)
+                new_uid_ = tsvc.resume_run(get_manager(), uid)
                 ui.notify(f"续训 Run {new_uid_} 已排队")
                 refresh()  # state["selected"] 仍是 task_id，详情会显示最新一轮
                 render_detail()
@@ -173,15 +217,19 @@ def mount() -> None:
                     c_epochs = ui.number("epochs", value=50, precision=0)
                     c_imgsz = ui.number("imgsz", value=640, precision=0)
                     c_batch = ui.number("batch", value=16, precision=0)
+                c_device = ui.input("device", value="0")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=create_dialog.close).props("flat")
                     ui.button("创建", on_click=lambda: do_create()).props("unelevated")
 
                 def do_create() -> None:
+                    if "," in (c_device.value or ""):
+                        ui.notify("多卡 DDP 未测试，仅作透传（04 号票）", type="warning")
                     try:
                         brief = tsvc.create_task(get_manager(), name=c_name.value, base_model=c_model.value,
                                                  dataset=c_ds.value, epochs=int(c_epochs.value or 50),
-                                                 imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16))
+                                                 imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16),
+                                                 device=c_device.value or "0")
                         create_dialog.close()
                         ui.notify(f"任务已排队：{brief['uid']}")
                         refresh()

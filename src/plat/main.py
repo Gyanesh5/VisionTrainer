@@ -20,11 +20,11 @@ from .config import load_config
 from .db.models import init_db
 from .training.manager import ManagerSettings, TrainingManager, set_manager
 from .ui.pages import mount as mount_ui
-from .ws import bind_loop, history, stream, subscribe, unsubscribe
+from .ws import bind_loop, stream, subscribe, unsubscribe
 
 
-def _default_worker_script() -> str:
-    return str(__import__("pathlib").Path(__file__).parent / "training" / "worker.py")
+def _default_trainer_entry() -> str:
+    return str(__import__("pathlib").Path(__file__).parent / "training" / "trainer_entry.py")
 
 
 def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
@@ -33,7 +33,7 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     training = cfg.get("training", {})
     settings = ManagerSettings(
         training_python=training.get("python", __import__("sys").executable),
-        worker_script=training.get("worker_script", _default_worker_script()),
+        trainer_entry=training.get("trainer_entry", _default_trainer_entry()),
         runs_dir=__import__("pathlib").Path(training.get("runs_dir", "~/datasets/runs")).expanduser(),
         check_occupancy=training.get("check_occupancy", True),
     )
@@ -53,25 +53,15 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
 
     @app.websocket("/ws/events")
     async def ws_events(websocket: WebSocket):
-        """五事件增量推送；最近历史先行补一帧（契约：全量补齐走 REST）。"""
+        """五事件增量推送（契约：不做历史回放，断线补齐走 REST）。"""
         await websocket.accept()
         q = subscribe()
         try:
-            for event in history()[-50:]:
-                await websocket.send_text(__import__("json").dumps(event, ensure_ascii=False))
-            await stream(q, lambda m: websocket.send_text(m))
+            await stream(q, websocket.send_text)
         except WebSocketDisconnect:
             pass
         finally:
             unsubscribe(q)
-
-    @app.websocket("/ws/echo")
-    async def ws_echo(websocket: WebSocket):
-        """骨架期占位，保留给连通性测试。"""
-        await websocket.accept()
-        while True:
-            msg = await websocket.receive_text()
-            await websocket.send_text(f"echo: {msg}")
 
     if with_ui:
         mount_ui()

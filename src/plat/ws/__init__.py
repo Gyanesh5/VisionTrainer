@@ -8,11 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import deque
-
-# 每个已连接客户端一个队列；最近 500 条历史供新连接快速回看（契约仍以 REST 补齐为准）
+# 每个已连接客户端一个队列（增量推送；断线补齐走 REST，见 docs/api.md）
 _subscribers: set[asyncio.Queue] = set()
-_history: deque[dict] = deque(maxlen=500)
 _main_loop: asyncio.AbstractEventLoop | None = None
 
 
@@ -32,7 +29,6 @@ def unsubscribe(q: asyncio.Queue) -> None:
 
 
 def publish(event: dict) -> None:
-    _history.append(event)
     for q in list(_subscribers):
         try:
             q.put_nowait(event)
@@ -52,12 +48,8 @@ def publish_threadsafe(event: dict) -> None:
     _main_loop.call_soon_threadsafe(publish, event)
 
 
-def history() -> list[dict]:
-    return list(_history)
-
-
-async def stream(q: asyncio.Queue, send_json):
-    """把队列里的事件持续发给一个 WS 连接。"""
+async def stream(q: asyncio.Queue, send_text):
+    """把队列里的事件序列化为 JSON 文本持续发给一个 WS 连接。"""
     while True:
         event = await q.get()
-        await send_json(event)
+        await send_text(json.dumps(event, ensure_ascii=False))

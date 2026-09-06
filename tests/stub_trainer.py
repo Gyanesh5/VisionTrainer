@@ -19,6 +19,10 @@ metrics_path = run_dir / "metrics.jsonl"
 epochs = int((payload.get("args") or {}).get("epochs", 3))
 for e in range(1, epochs + 1):
     time.sleep(0.15)
+    with metrics_path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"progress": {"epoch": e, "epochs_total": epochs,
+                                          "batch": 1, "batches_total": 2}}) + "\n")
+    time.sleep(0.15)
     rec = {
         "epoch": e,
         "metrics": {
