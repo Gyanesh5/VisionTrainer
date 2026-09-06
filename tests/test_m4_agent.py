@@ -168,3 +168,18 @@ def test_agent_llm_failure_pauses(agent_client, monkeypatch):
     task_id = r.json()["id"]
     task = _wait_agent_state(agent_client, task_id, {"paused"})
     assert "端点不可达" in (task["agent_config"].get("pause_reason") or "")
+
+
+def test_agent_no_improve_terminates(agent_client, monkeypatch):
+    """终止条件：连续 2 轮主指标无提升（stub 每轮主指标恒定 0.1）→ 自动收官。"""
+    flat = json.dumps({"analysis": "指标平台期", "action": "tune", "hyperparameters": {"lr0": 0.01}})
+    monkeypatch.setattr("plat.agent.tuner.chat", _scripted_chat([flat]))
+
+    r = agent_client.post("/api/v1/tasks", json={
+        "name": "agent-flat", "base_model": "stub", "dataset": "plate", "epochs": 2,
+        "agent": {"max_rounds": 5, "approval": "auto", "objective": "测试无提升终止"},
+    })
+    task_id = r.json()["id"]
+    task = _wait_agent_state(agent_client, task_id, {"done"}, timeout=40)
+    assert task["agent_config"]["stop_reason"] == "连续 2 轮无提升"
+    assert len(task["runs"]) == 3  # 轮 1 建立基线，轮 2、3 无提升 → 终止
