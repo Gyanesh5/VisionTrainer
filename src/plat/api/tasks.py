@@ -108,6 +108,25 @@ def resume_run(uid: str, request: Request):
 
 @router.post("/runs/{uid}/report")
 def generate_report(uid: str, request: Request):
-    """M3 实装：复用 Agent 多模态管线生成 markdown 复盘报告。"""
-    raise HTTPException(status_code=409, detail={"error": {"code": "state_conflict",
-                         "message": "复盘报告将在 M3 实装", "detail": {}}})
+    """复盘报告：指标 + 图 → LLM → report.md（07 号票，多模态管线复用）。"""
+    try:
+        return tsvc.generate_report(_manager(request), uid)
+    except tsvc.TaskError as exc:
+        raise _err(exc)
+
+
+@router.get("/tasks/{task_id}/comparison")
+def compare_runs(task_id: int, request: Request):
+    try:
+        return tsvc.compare_runs(_manager(request), task_id)
+    except tsvc.TaskError as exc:
+        raise _err(exc)
+
+
+@router.get("/compare")
+def compare_tasks(request: Request, tasks: str):
+    """跨任务对比：tasks=1,2,3（逗号分隔 id）。"""
+    uids = [int(x) for x in tasks.split(",") if x.strip().isdigit()]
+    if not uids:
+        raise _err(tsvc.TaskError("invalid_args", "tasks 参数为空或非法", 400))
+    return tsvc.compare_tasks(_manager(request), uids)

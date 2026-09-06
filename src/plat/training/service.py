@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from ..datasets import service as ds
@@ -164,3 +165,118 @@ def run_logs(manager, uid: str, tail: int = 200) -> list[str]:
     if not log_path.exists():
         return []
     return log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
+
+
+# ---------------------------------------------------------------- M3：对比与复盘报告
+
+PRIMARY_BY_TASK = {
+    "detect": "metrics/mAP50-95(B)",
+    "segment": "metrics/mAP50-95(B)",
+    "obb": "metrics/mAP50-95(B)",
+    "pose": "metrics/mAP50-95(P)",
+    "classify": "metrics/accuracy_top1",
+}
+
+
+def compare_runs(manager, task_id: int) -> dict:
+    """Task 内跨 Run 对比：各轮主指标 + 超参 diff（07 号票对比视图数据）。"""
+    from plat.db.models import EpochMetric, Run, Task
+
+    with manager.Session() as s:
+        task = s.get(Task, task_id)
+        if task is None:
+            raise _http_err("not_found", f"任务不存在：{task_id}", 404)
+        runs = s.query(Run).filter(Run.task_id == task_id).order_by(Run.round_no).all()
+        task_type = None
+        if task.dataset_manifest_path:  # <root>/<name>/derived/<uid>/data.yaml → 数据集元数据
+            dataset_dir = Path(task.dataset_manifest_path).parent.parent.parent
+            meta_path = dataset_dir / "dataset.json"
+            if meta_path.exists():
+                task_type = json.loads(meta_path.read_text(encoding="utf-8")).get("task_type")
+        primary_key = PRIMARY_BY_TASK.get(task_type or "", "")
+        rounds = []
+        metric_keys = ("metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/mAP50-95(P)", "metrics/accuracy_top1")
+        for r in runs:
+            best_val, best_epoch, curve = None, None, []
+            for m in s.query(EpochMetric).filter(EpochMetric.run_id == r.id).order_by(EpochMetric.epoch).all():
+                rec = m.metrics or {}
+                mm = rec.get("metrics") or {}
+                vals = {k: mm[k] for k in metric_keys if k in mm}
+                v = vals.get(primary_key, max(vals.values()) if vals else None)
+                if v is not None and (best_val is None or v > best_val):
+                    best_val, best_epoch = float(v), m.epoch
+                curve.append({"epoch": m.epoch, "primary": v})
+            rounds.append({"uid": r.uid, "round_no": r.round_no, "status": r.status,
+                           "primary_metric": r.primary_metric, "best_epoch": best_epoch,
+                           "best_val": best_val, "curve": curve})
+        diff: dict[str, dict] = {}
+        for key in (task.train_args or {}):
+            values = {rounds[i]["round_no"]: (runs[i].__dict__.get("_args") or task.train_args.get(key)) for i in range(len(runs))}
+            # train_args 每轮同源；真正分轮的超参来自 agent_config 变更记录，这里展示任务级参数
+            diff[key] = task.train_args.get(key)
+        return {"task": {"id": task.id, "uid": task.uid, "name": task.name, "task_type": task_type},
+                "rounds": rounds, "train_args": task.train_args}
+
+
+def compare_tasks(manager, task_ids: list[int]) -> dict:
+    """跨 Task 对比：各任务最优主指标终值（07 号票）。"""
+    from plat.db.models import Run, Task
+
+    with manager.Session() as s:
+        items = []
+        for tid in task_ids:
+            t = s.get(Task, tid)
+            if t is None:
+                continue
+            runs = s.query(Run).filter(Run.task_id == tid).all()
+            best = max((r.primary_metric or 0) for r in runs) if runs else None
+            items.append({"id": t.id, "uid": t.uid, "name": t.name, "status": t.status,
+                          "base_model": t.base_model, "runs": len(runs), "best_primary_metric": best})
+        items.sort(key=lambda x: -(x["best_primary_metric"] or 0))
+        return {"tasks": items}
+
+
+def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> dict:
+    """复盘报告（07 号票）：指标 JSON + 渲染图 → LLM → report.md 存 Run 目录。"""
+    from pathlib import Path as _P
+
+    from ..agent.llm import LLMError, build_client, chat, llm_config
+    from ..charts.render import confusion_matrix_png, render_run_charts
+
+    detail = get_run(manager, uid)
+    if detail["status"] not in ("done", "failed", "cancelled"):
+        raise _http_err("state_conflict", "仅已结束的运行可生成复盘报告", 409)
+    if not detail["run_dir"]:
+        raise _http_err("invalid_args", "运行目录缺失", 400)
+    run_dir = _P(detail["run_dir"])
+
+    charts = render_run_charts(detail["metrics"], run_dir / "report_assets")
+    cm = confusion_matrix_png(run_dir)
+    if cm:
+        charts = [cm] + charts
+
+    content: list[dict] = [{"type": "text", "text": json.dumps({
+        "task_name": detail["task_name"], "round": detail["round_no"], "status": detail["status"],
+        "primary_metric": detail["primary_metric"], "epochs": detail["metrics"],
+    }, ensure_ascii=False)}]
+    for png in charts:
+        content.append({"type": "image_url", "image_url": {"url": "file://" + str(png)}})
+
+    messages = [
+        {"role": "system", "content": "你是 YOLO 训练复盘分析师。基于指标与曲线图输出 markdown 复盘报告，"
+                                      "包含：总体结论、指标解读、loss 分析、改进建议。中文输出。"},
+        {"role": "user", "content": content},
+    ]
+    own = client is None
+    client = client or build_client()
+    try:
+        text = chat(messages, client=client, cfg=cfg or llm_config())
+    except LLMError as exc:
+        raise _http_err("llm_unavailable", str(exc), 502)
+    finally:
+        if own:
+            client.close()
+
+    report_path = run_dir / "report.md"
+    report_path.write_text(text, encoding="utf-8")
+    return {"run_uid": uid, "report": str(report_path), "chars": len(text)}

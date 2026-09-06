@@ -412,11 +412,89 @@ def mount() -> None:
 
     @ui.page("/results")
     def page_results() -> None:
+        from ..training import service as tsvc
+        from ..training.manager import get_manager
+
+        state: dict = {"task_id": None}
+
         def body() -> None:
-            _empty_state(
-                "尚无归档结果", "M3",
-                "跨 Run / 跨 Task 对比视图、复盘报告（markdown）；数据来自逐 epoch 指标单一数据源（spec §2.4）。",
-            )
+            tasks = [t for t in tsvc.list_tasks(get_manager()) if t["status"] in ("done", "failed", "cancelled")]
+
+            # ── 跨任务对比
+            ui.label("跨任务对比").classes("font-bold mt-2")
+            cross = ui.table(columns=[
+                {"name": "name", "label": "任务", "field": "name", "align": "left"},
+                {"name": "base_model", "label": "基模型", "field": "base_model"},
+                {"name": "runs", "label": "轮数", "field": "runs"},
+                {"name": "best", "label": "最优主指标", "field": "best_str"},
+            ], rows=[{"id": t["id"], "name": t["name"], "base_model": t["base_model"],
+                      "runs": t["runs"],
+                      "best_str": f"{t['primary_metric']:.3f}" if t.get("primary_metric") else "—"} for t in tasks],
+                row_key="id", selection="multiple").classes("w-full")
+
+            cross_out = ui.column().classes("w-full")
+
+            def do_cross() -> None:
+                uids = [r["id"] for r in (cross.selection or [])]
+                if not uids:
+                    ui.notify("请先勾选任务", type="warning")
+                    return
+                data = tsvc.compare_tasks(get_manager(), uids)
+                cross_out.clear()
+                with cross_out, ui.card().classes("w-full"):
+                    ui.label("按最优主指标排序").classes("text-xs opacity-50")
+                    for i, t in enumerate(data["tasks"], 1):
+                        best = t["best_primary_metric"]
+                        with ui.row().classes("w-full items-center"):
+                            ui.badge(f"#{i}")
+                            ui.label(t["name"]).classes("flex-1")
+                            ui.label(f"{best:.3f}" if best is not None else "—").classes("font-bold")
+
+            ui.button("对比所选", on_click=do_cross).props("unelevated")
+
+            # ── 任务内跨轮对比 + 复盘报告
+            ui.label("任务内跨轮对比与复盘报告").classes("font-bold mt-4")
+            done_tasks = {t["id"]: t["name"] for t in tasks}
+            task_sel = ui.select(done_tasks, label="选择任务", with_input=True)
+
+            detail = ui.column().classes("w-full")
+
+            def render_rounds() -> None:
+                detail.clear()
+                tid = task_sel.value
+                if not tid:
+                    return
+                data = tsvc.compare_runs(get_manager(), int(tid))
+                with detail, ui.card().classes("w-full"):
+                    ui.label(f"超参：{data['train_args']}").classes("text-xs opacity-60")
+                    rows = [{"round": f"轮 {r['round_no']}", "uid": r["uid"], "status": r["status"],
+                             "best": f"{r['best_val']:.3f} @ epoch {r['best_epoch']}" if r["best_val"] else "—",
+                             "metric": r["primary_metric"] or 0} for r in data["rounds"]]
+                    ui.table(columns=[
+                        {"name": "round", "label": "轮", "field": "round"},
+                        {"name": "uid", "label": "Run", "field": "uid", "align": "left"},
+                        {"name": "status", "label": "状态", "field": "status"},
+                        {"name": "best", "label": "主指标最佳", "field": "best", "align": "left"},
+                    ], rows=rows, row_key="uid", selection="single",
+                        on_select=lambda e: state.update(run=((e.selection or [None])[0] or {}).get("uid"))
+                    ).classes("w-full")
+                    ui.button("生成复盘报告", icon="description", on_click=lambda: do_report()).props("unelevated")
+
+            def do_report() -> None:
+                uid = state.get("run")
+                if not uid:
+                    ui.notify("请先在轮次表中选择一个 Run", type="warning")
+                    return
+                ui.notify(f"正在生成 {uid} 的复盘报告…")
+                try:
+                    result = tsvc.generate_report(get_manager(), uid)
+                    ui.notify(f"报告已写入：{result['report']}（{result['chars']} 字）")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"报告生成失败：{exc}", type="negative")
+
+            task_sel.on_value_change(lambda e: render_rounds())
+            with detail:
+                ui.label("选择任务后展示跨轮对比").classes("text-xs opacity-40")
 
         _page_frame("结果", "结果复盘", None, body)
 
