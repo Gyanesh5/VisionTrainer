@@ -500,13 +500,118 @@ def mount() -> None:
 
     @ui.page("/agent")
     def page_agent() -> None:
-        def body() -> None:
-            _empty_state(
-                "尚无调参任务", "M4",
-                "创建 Agent 任务（智谱 glm-5.3-flash / Ollama）、轮次时间线、审批门（manual/auto）、超参白名单（spec §2.5）。",
-            )
+        from datetime import datetime
 
-        _page_frame("Agent", "Agent 调参", None, body)
+        from ..agent import tuner
+        from ..training import service as tsvc
+        from ..training.manager import get_manager
+
+        state: dict = {"task_id": None}
+
+        def actions() -> None:
+            ui.button("新建 Agent 任务", icon="smart_toy", on_click=lambda: state["open_create"]()).props("unelevated")
+
+        def rows_data() -> list[dict]:
+            rows = []
+            for t in tsvc.list_tasks(get_manager()):
+                if t["source"] != "agent":
+                    continue
+                row = dict(t)
+                row["agent_str"] = f"{t['agent_state']} · {t['status']}"
+                row["metric_str"] = f"{t['primary_metric']:.3f}" if t.get("primary_metric") else "—"
+                rows.append(row)
+            return rows
+
+        def body() -> None:
+            columns = [
+                {"name": "name", "label": "任务", "field": "name", "align": "left"},
+                {"name": "agent_str", "label": "循环状态", "field": "agent_str", "align": "left"},
+                {"name": "metric_str", "label": "主指标", "field": "metric_str"},
+                {"name": "block_str", "label": "备注", "field": "block_str", "align": "left"},
+            ]
+            table = ui.table(columns=columns, rows=rows_data(), row_key="id",
+                             selection="single",
+                             on_select=lambda e: select((e.selection or [None])[0])).classes("w-full")
+            detail = ui.column().classes("w-full")
+
+            def select(t) -> None:
+                state["task_id"] = (t or {}).get("id") if isinstance(t, dict) else None
+                render_detail()
+
+            def render_detail() -> None:
+                detail.clear()
+                tid = state["task_id"]
+                if not tid:
+                    with detail:
+                        ui.label("点击行查看循环详情与审批门").classes("text-xs opacity-40")
+                    return
+                task = tsvc.get_task(get_manager(), tid)
+                cfg = task.get("agent_config") or {}
+                with detail, ui.card().classes("w-full"):
+                    with ui.row().classes("w-full items-center"):
+                        ui.label(f"{task['name']} · {cfg.get('state', '—')}").classes("text-lg font-bold")
+                        ui.space()
+                        if cfg.get("state") in ("waiting_approval", "paused"):
+                            ui.button("放行/继续", on_click=lambda: do_approve("continue")).props("unelevated color=green dense")
+                            ui.button("终止循环", on_click=lambda: do_approve("stop")).props("outline color=negative dense")
+                    ui.label(f"目标：{cfg.get('objective', '—')} · 最大轮数 {cfg.get('max_rounds', '—')} · "
+                             f"审批 {cfg.get('approval', '—')}").classes("text-xs opacity-60")
+                    if cfg.get("stop_reason"):
+                        ui.label(f"停止原因：{cfg['stop_reason']}").classes("text-xs")
+                    if cfg.get("pause_reason"):
+                        ui.label(f"暂停原因：{cfg['pause_reason']}").classes("text-xs").style("color:#b45309")
+                    for h in (cfg.get("history") or [])[::-1]:
+                        with ui.row().classes("w-full gap-2 items-start border-l-2 pl-2 py-0.5").style("border-color:#d1d5db"):
+                            ui.label(h.get("at", "")).classes("text-xs opacity-50")
+                            ui.label(f"{h.get('analysis', '')} → {h.get('changes', {})}").classes("text-xs")
+                    for r in task["runs"]:
+                        ui.label(f"轮 {r['round_no']} · {r['status']} · 主指标 "
+                                 f"{f"{r['primary_metric']:.3f}" if r['primary_metric'] is not None else '—'}").classes("text-xs")
+
+            def do_approve(action: str) -> None:
+                try:
+                    tuner.approve(get_manager(), state["task_id"], action)
+                    ui.notify(f"已 {action}")
+                    refresh()
+                    render_detail()
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"操作失败：{exc}", type="negative")
+
+            with ui.dialog() as create_dialog, ui.card().classes("w-96 gap-2"):
+                ui.label("新建 Agent 调参任务").classes("font-bold")
+                c_name = ui.input("任务名", value=f"调参-{datetime.now():%m%d-%H%M}")
+                c_model = ui.input("基模型", value="yolo11n")
+                managed = {d["name"]: d["name"] for d in ds.list_datasets()
+                           if d["form"] == "managed" and d.get("active_manifest")}
+                c_ds = ui.select(managed or {"—": "（暂无托管数据集）"}, label="数据集")
+                c_obj = ui.input("优化目标", placeholder="例如：提升小目标召回")
+                with ui.row():
+                    c_rounds = ui.number("最大轮数", value=5, precision=0)
+                    c_approval = ui.select(["manual", "auto"], value="manual", label="审批模式")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=create_dialog.close).props("flat")
+                    ui.button("创建", on_click=lambda: do_create()).props("unelevated")
+
+                def do_create() -> None:
+                    try:
+                        brief = tsvc.create_task(get_manager(), name=c_name.value, base_model=c_model.value,
+                                                 dataset=c_ds.value, epochs=2,
+                                                 agent={"max_rounds": int(c_rounds.value or 5),
+                                                        "approval": c_approval.value, "objective": c_obj.value})
+                        tuner.launch_or_resume(get_manager(), brief["id"])
+                        create_dialog.close()
+                        ui.notify(f"Agent 任务已创建：{brief['uid']}")
+                        refresh()
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"创建失败：{exc}", type="negative")
+
+            def refresh() -> None:
+                table.rows = rows_data()
+
+            ui.timer(2.0, refresh)
+            refresh()
+
+        _page_frame("Agent", "Agent 调参", actions, body)
 
     @ui.page("/settings")
     def page_settings() -> None:

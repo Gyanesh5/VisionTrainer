@@ -64,3 +64,15 @@ def detect_source(tmp_path: Path) -> Path:
 @pytest.fixture()
 def client() -> TestClient:
     return TestClient(app)
+
+
+import threading as _threading
+
+
+def _thread_excepthook(args):
+    import sys
+
+    print(f"THREAD CRASH in {args.thread.name}: {args.exc_type.__name__}: {args.exc_value}", file=sys.stderr)
+
+
+_threading.excepthook = _thread_excepthook

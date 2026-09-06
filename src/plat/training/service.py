@@ -76,6 +76,7 @@ def list_tasks(manager) -> list[dict]:
             out.append({"id": t.id, "uid": t.uid, "name": t.name, "source": t.source,
                         "status": t.status, "base_model": t.base_model,
                         "runs": len(runs), "primary_metric": best,
+                        "agent_state": (t.agent_config or {}).get("state"),
                         "block_reason": manager.block_reason if t.status == "queued" else None})
         return out
 
@@ -92,7 +93,7 @@ def get_task(manager, task_id: int) -> dict:
                 s.query(Run).filter(Run.task_id == task_id).order_by(Run.round_no).all()]
         return {"id": t.id, "uid": t.uid, "name": t.name, "source": t.source, "status": t.status,
                 "base_model": t.base_model, "train_args": t.train_args, "agent_config": t.agent_config,
-                "runs": runs}
+                "agent_state": (t.agent_config or {}).get("state"), "runs": runs}
 
 
 def delete_task(manager, task_id: int, delete_files: bool = False) -> None:

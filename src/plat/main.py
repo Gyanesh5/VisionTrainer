@@ -44,6 +44,9 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     async def lifespan(app: FastAPI):
         bind_loop(asyncio.get_running_loop())
         manager.start()
+        from .agent import tuner
+
+        tuner.recover(manager)
         yield
 
     app = FastAPI(title="X-Any 训练平台", version="0.1.0", lifespan=lifespan)

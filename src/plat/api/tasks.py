@@ -43,13 +43,33 @@ class TaskCreateBody(BaseModel):
 @router.post("/tasks")
 def create_task(body: TaskCreateBody, request: Request):
     try:
-        return tsvc.create_task(_manager(request), name=body.name, base_model=body.base_model,
-                                dataset=body.dataset, manifest_id=body.manifest_id, epochs=body.epochs,
-                                imgsz=body.imgsz, batch=body.batch, patience=body.patience,
-                                device=body.device, workers=body.workers, seed=body.seed,
-                                agent=body.agent.model_dump() if body.agent else None)
+        brief = tsvc.create_task(_manager(request), name=body.name, base_model=body.base_model,
+                                 dataset=body.dataset, manifest_id=body.manifest_id, epochs=body.epochs,
+                                 imgsz=body.imgsz, batch=body.batch, patience=body.patience,
+                                 device=body.device, workers=body.workers, seed=body.seed,
+                                 agent=body.agent.model_dump() if body.agent else None)
     except tsvc.TaskError as exc:
         raise _err(exc)
+    if body.agent:
+        from ..agent import tuner
+
+        tuner.launch_or_resume(_manager(request), brief["id"])
+    return brief
+
+
+@router.post("/tasks/{task_id}/approve")
+def approve_task(task_id: int, request: Request, body: dict):
+    """审批门裁决：{action: "continue" | "stop"}（06 号票）。"""
+    from ..agent import tuner
+
+    action = (body or {}).get("action")
+    try:
+        return tuner.approve(_manager(request), task_id, action)
+    except KeyError:
+        raise _not_found(f"任务不存在：{task_id}")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail={"error": {"code": "state_conflict",
+                             "message": str(exc), "detail": {}}})
 
 
 @router.get("/tasks")
