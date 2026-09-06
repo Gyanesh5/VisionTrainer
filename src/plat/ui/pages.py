@@ -72,17 +72,167 @@ def mount() -> None:
 
     @ui.page("/datasets")
     def page_datasets() -> None:
+        # UI 直调 service 层（与 REST API 同一函数）；契约本身由 tests/test_api_datasets.py 独立守护
+        from ..datasets import service as ds
+
+        # actions 在 body 之前执行；对话框等 body 局部物经由 state 回填给 actions 引用
+        state: dict = {"selected": None}
+
         def actions() -> None:
-            ui.button("导入标注目录", icon="upload", on_click=lambda: ui.notify(
-                "将在 M1 实装：X-AnyLabeling JSON → 托管数据集（转换+校验+切分）")).props("unelevated")
+            ui.button("导入标注目录", icon="upload", on_click=lambda: state["open_import"]()).props("unelevated")
+            ui.button("注册外部目录", icon="link", on_click=lambda: state["open_external"]()).props("outline")
+
+        def rows_data() -> list[dict]:
+            rows = []
+            for d in ds.list_datasets():
+                row = dict(d)
+                row["classes_str"] = "、".join(d.get("classes") or []) or "—"
+                ok = d.get("validation_ok")
+                row["validation_str"] = {True: "通过", False: "有问题"}.get(ok, "—")
+                rows.append(row)
+            return rows
 
         def body() -> None:
-            _empty_state(
-                "尚无数据集", "M1",
-                "托管/外部双形态；导入时自动转换（JSON 只读为真源）、五条校验规则、版本层切分 manifest（spec §2.1）。",
-            )
+            columns = [
+                {"name": "name", "label": "名称", "field": "name", "align": "left"},
+                {"name": "task_type", "label": "任务", "field": "task_type", "align": "left"},
+                {"name": "form", "label": "形态", "field": "form", "align": "left"},
+                {"name": "classes_str", "label": "类别", "field": "classes_str", "align": "left"},
+                {"name": "validation_str", "label": "校验", "field": "validation_str"},
+            ]
+            table = ui.table(columns=columns, rows=rows_data(), row_key="name",
+                             selection="single",
+                             on_select=lambda e: select((e.selection or [None])[0])).classes("w-full")
+            detail = ui.column().classes("w-full")
+
+            def select(row) -> None:
+                state["selected"] = (row or {}).get("name") if isinstance(row, dict) else None
+                render_detail()
+
+            def render_detail() -> None:
+                detail.clear()
+                name = state["selected"]
+                if not name:
+                    with detail:
+                        ui.label("点击表格行查看详情").classes("text-xs opacity-40")
+                    return
+                meta = ds.get_dataset(name)
+                with detail, ui.card().classes("w-full"):
+                    with ui.row().classes("w-full items-center"):
+                        ui.label(f"{meta['name']} · {meta['task_type']} · {meta['form']}").classes("text-lg font-bold")
+                        ui.space()
+                        if meta["form"] == "managed":
+                            ui.button("校验", on_click=lambda: do_validate(name)).props("outline dense")
+                            ui.button("重切分", on_click=lambda: resplit_dialog.open()).props("outline dense")
+                        ui.button("删除", color="negative", on_click=lambda: do_delete(name)).props("outline dense")
+                    if meta["form"] == "managed":
+                        ui.label(f"来源目录：{meta.get('source_dir', '—')}").classes("text-xs opacity-60")
+                        ui.label(f"类别（行序即 id）：{'、'.join(meta['classes'])}").classes("text-sm")
+                        ui.label(f"活跃切分清单：{meta.get('active_manifest', '—')}").classes("text-xs opacity-60")
+                        lv = meta.get("last_validation") or {}
+                        if lv:
+                            ui.label(
+                                f"上次校验：{lv['checked_at']} · 共 {lv['total_images']} 图"
+                                f"（标注 {lv['labeled']} / 负样本 {lv['background']}）· 问题 {len(lv['problems'])} 个"
+                            ).classes("text-xs opacity-60")
+                    else:
+                        ui.label(f"外部路径：{meta.get('path', '—')}（平台只读）").classes("text-xs opacity-60")
+                        if not meta.get("has_data_yaml"):
+                            ui.label(f"data.yaml 缺失，类别已平台侧登记：{meta.get('platform_side_classes')}").classes("text-xs opacity-60")
+
+            def do_validate(name: str) -> None:
+                try:
+                    report = ds.validate_dataset_by_name(name)
+                    ui.notify(f"校验完成：{report['total_images']} 图，问题 {len(report['problems'])} 个")
+                    refresh()
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"校验失败：{exc}", type="negative")
+
+            def do_delete(name: str) -> None:
+                try:
+                    ds.delete_dataset(name)
+                    state["selected"] = None
+                    ui.notify(f"已删除 {name}（source_dir 永不触碰）")
+                    refresh()
+                    render_detail()
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"删除失败：{exc}", type="negative")
+
+            def do_resplit() -> None:
+                name = state["selected"]
+                try:
+                    m = ds.resplit_dataset(name, r_ratio.value or 0.8, int(r_seed.value or 42), r_strat.value)
+                    resplit_dialog.close()
+                    ui.notify(f"新清单 {m['uid']}：train {len(m['train'])} / val {len(m['val'])}")
+                    refresh()
+                    render_detail()
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"重切失败：{exc}", type="negative")
+
+            with detail:
+                ui.label("点击表格行查看详情").classes("text-xs opacity-40")
+
+            with ui.dialog() as import_dialog, ui.card().classes("w-96 gap-2"):
+                ui.label("导入 X-AnyLabeling 标注目录").classes("font-bold")
+                i_name = ui.input("数据集名")
+                i_task = ui.select(["detect", "segment", "obb", "pose", "classify"], value="detect", label="任务类型")
+                i_src = ui.input("标注目录绝对路径", placeholder="/home/you/annot")
+                with ui.row().classes("items-center"):
+                    i_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05)
+                    i_seed = ui.number("随机种子", value=42, precision=0)
+                    i_strat = ui.checkbox("按类别分层")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=import_dialog.close).props("flat")
+                    ui.button("导入", on_click=lambda: do_import()).props("unelevated")
+
+                def do_import() -> None:
+                    try:
+                        meta = ds.import_dataset(i_name.value, i_task.value, i_src.value,
+                                                 i_ratio.value or 0.8, int(i_seed.value or 42), i_strat.value)
+                        import_dialog.close()
+                        ui.notify(f"导入成功：{len(meta['classes'])} 类，问题 {len((meta.get('last_validation') or {}).get('problems', []))} 个")
+                        refresh()
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"导入失败：{exc}", type="negative")
+
+            with ui.dialog() as external_dialog, ui.card().classes("w-96 gap-2"):
+                ui.label("注册外部标准 YOLO 目录（只读）").classes("font-bold")
+                e_name = ui.input("数据集名")
+                e_task = ui.select(["detect", "segment", "obb", "pose", "classify"], value="detect", label="任务类型")
+                e_path = ui.input("目录绝对路径")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=external_dialog.close).props("flat")
+                    ui.button("注册", on_click=lambda: do_external()).props("unelevated")
+
+                def do_external() -> None:
+                    try:
+                        ds.register_external(e_name.value, e_task.value, e_path.value)
+                        external_dialog.close()
+                        ui.notify("注册成功（外部目录永不改写）")
+                        refresh()
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"注册失败：{exc}", type="negative")
+
+            with ui.dialog() as resplit_dialog, ui.card().classes("w-96 gap-2"):
+                ui.label(f"重新切分 {state['selected']}").classes("font-bold")
+                r_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05)
+                r_seed = ui.number("随机种子", value=42, precision=0)
+                r_strat = ui.checkbox("按类别分层")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=resplit_dialog.close).props("flat")
+                    ui.button("重切", on_click=lambda: do_resplit()).props("unelevated")
+
+            def refresh() -> None:
+                table.rows = rows_data()
+
+            # 回填 actions 的对话框入口（actions 已先执行完毕，按钮点击时才取值）
+            state["open_import"] = import_dialog.open
+            state["open_external"] = external_dialog.open
+
+            refresh()
 
         _page_frame("数据集", "数据集", actions, body)
+
 
     @ui.page("/results")
     def page_results() -> None:

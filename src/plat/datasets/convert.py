@@ -1,0 +1,131 @@
+"""X-AnyLabeling 标注 JSON → YOLO txt 的纯函数转换（搬运自上游 LabelConverter.custom_to_yolo，
+按平台契约改造：classes 显式传入、无 PyQt/依赖、返回行列表而非直接写文件）。
+
+支持五种 task_type（05 号票）：detect(hbb) / segment(seg) / obb / pose / classify。
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+# task_type → (mode, 合法 shape_type)
+TASK_SHAPES: dict[str, tuple[str, tuple[str, ...]]] = {
+    "detect": ("hbb", ("rectangle",)),
+    "segment": ("seg", ("polygon",)),
+    "obb": ("obb", ("rotation",)),
+    "pose": ("pose", ("rectangle", "point")),
+    "classify": ("classify", ()),
+}
+
+
+def shape_matches_task(task_type: str, shape_types: set[str]) -> bool:
+    """标注 JSON 里是否存在匹配任务的形状（05 校验规则之一，对齐上游 TASK_SHAPE_MAPPINGS）。"""
+    if task_type == "classify":
+        return True  # 分类靠 flags，形状不参与
+    mode = TASK_SHAPES.get(task_type)
+    if not mode:
+        return False
+    return any(st in shape_types for st in mode[1])
+
+
+def clamp_points(points: list[list[float]], width: float, height: float) -> list[list[float]]:
+    return [[min(max(x, 0.0), width), min(max(y, 0.0), height)] for x, y in points]
+
+
+def _rect_to_xywh(rect: list[list[float]], width: float, height: float) -> tuple[float, float, float, float]:
+    """四角矩形 → 归一化 (xc, yc, w, h)。"""
+    xc = (rect[0][0] + rect[2][0]) / (2 * width)
+    yc = (rect[0][1] + rect[2][1]) / (2 * height)
+    w = abs(rect[2][0] - rect[0][0]) / width
+    h = abs(rect[2][1] - rect[0][1]) / height
+    return xc, yc, w, h
+
+
+def json_to_yolo_lines(
+    data: dict,
+    task_type: str,
+    classes: list[str],
+) -> tuple[list[str], bool]:
+    """单张标注 JSON → YOLO 行列表。
+
+    返回 (lines, has_valid_shape)。未知类别跳过（由上层校验报告统计，不在转换时炸）。
+    """
+    mode = TASK_SHAPES[task_type][0]
+    if mode == "classify":
+        flags = [v for v in (data.get("flags") or {}).values() if v]
+        return ([], bool(flags))
+
+    width = float(data["imageWidth"])
+    height = float(data["imageHeight"])
+    lines: list[str] = []
+    pose_instances: dict[int, dict] = {}
+
+    for shape in data.get("shapes", []):
+        st = shape.get("shape_type")
+        label = shape.get("label")
+        if label not in classes:
+            continue
+        class_index = classes.index(label)
+        points = clamp_points(shape.get("points", []), width, height)
+        if st == "rotation":
+            points = [[float(x), float(y)] for x, y in shape.get("points", [])]  # obb 不钳制：越界即跳过（上游默认策略）
+
+        if mode == "hbb" and st == "rectangle":
+            if len(points) < 2:
+                continue
+            if len(points) == 2:  # 旧版对角点模式
+                (x0, y0), (x1, y1) = points
+                points = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+            xc, yc, w, h = _rect_to_xywh(points, width, height)
+            lines.append(f"{class_index} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f}\n")
+        elif mode == "seg" and st == "polygon":
+            if len(points) < 3:
+                continue
+            norm = " ".join(f"{x / width:.6f} {y / height:.6f}" for x, y in points)
+            lines.append(f"{class_index} {norm}\n")
+        elif mode == "obb" and st == "rotation":
+            if len(points) != 4:
+                continue
+            if any(not (0 <= x <= width and 0 <= y <= height) for x, y in points):
+                continue  # 上游默认 obb_boundary_policy=skip
+            flat = [coord for pt in points for coord in pt]
+            norm = " ".join(
+                f"{flat[i] / width:.6f}" if i % 2 == 0 else f"{flat[i] / height:.6f}" for i in range(8)
+            )
+            lines.append(f"{class_index} {norm}\n")
+        elif mode == "pose" and st in ("rectangle", "point"):
+            group_id = shape.get("group_id")
+            if group_id is None:
+                continue
+            inst = pose_instances.setdefault(int(group_id), {"box": None, "box_label": None, "kpts": {}})
+            if st == "rectangle":
+                if len(points) == 2:
+                    (x0, y0), (x1, y1) = points
+                    points = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                inst["box"] = points
+                inst["box_label"] = label
+            else:
+                x, y = points[0]
+                visible = 1 if shape.get("difficult") else 2
+                inst["kpts"][label] = [x, y, visible]
+
+    if mode == "pose":
+        # 行 = 框类别 + 框 xywh + 键点序列（键点按 classes[1:] 顺序展开，同名后者覆盖前者）
+        for inst in pose_instances.values():
+            if not inst["box"] or not inst["box_label"]:
+                continue
+            box_index = classes.index(inst["box_label"])
+            xc, yc, w, h = _rect_to_xywh(inst["box"], width, height)
+            kpts = []
+            for name in classes[1:]:
+                if name in inst["kpts"]:
+                    x, y, v = inst["kpts"][name]
+                    kpts += [f"{x / width:.6f}", f"{y / height:.6f}", str(v)]
+            lines.append(f"{box_index} {xc:.6f} {yc:.6f} {w:.6f} {h:.6f} " + " ".join(kpts) + "\n")
+
+    return lines, bool(lines) or (mode == "pose" and bool(pose_instances))
+
+
+def write_label(path: pathlib.Path, lines: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(lines), encoding="utf-8")
