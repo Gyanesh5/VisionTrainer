@@ -27,6 +27,10 @@ def _default_trainer_entry() -> str:
     return str(__import__("pathlib").Path(__file__).parent / "training" / "trainer_entry.py")
 
 
+def _default_export_entry() -> str:
+    return str(__import__("pathlib").Path(__file__).parent / "training" / "export_entry.py")
+
+
 def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     """构建应用（可注入配置；测试用 with_ui=False 并传入 stub 训练环境）。"""
     cfg = cfg or load_config()
@@ -34,6 +38,7 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     settings = ManagerSettings(
         training_python=training.get("python", __import__("sys").executable),
         trainer_entry=training.get("trainer_entry", _default_trainer_entry()),
+        export_entry=training.get("export_entry", _default_export_entry()),
         runs_dir=__import__("pathlib").Path(training.get("runs_dir", "~/datasets/runs")).expanduser(),
         check_occupancy=training.get("check_occupancy", True),
     )

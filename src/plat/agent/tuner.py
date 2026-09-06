@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .allowlist import clamp_changes
-from .llm import LLMError, chat, parse_json_loose
+from .llm import LLMError, chat, llm_config, parse_json_loose
 
 NO_IMPROVE_EPS = 0.001
 NO_IMPROVE_ROUNDS = 2
@@ -166,18 +166,13 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
         state = cfg.get("state", "idle")
 
         # 1) 等审批 / 暂停恢复：这里只等待，不占队列
-        if state == "waiting_approval":
+        if state in ("waiting_approval", "paused"):
             act = _await_verdict(Session, task_id, stop)
             if act == "stop":
                 set_state("terminated")
                 return
-            continue
-        if state == "paused":
-            act = _await_verdict(Session, task_id, stop)
-            if act == "stop":
-                set_state("terminated")
-                return
-            set_state("running")  # 人工处理后重试本轮决策
+            if state == "paused":
+                set_state("running")  # 人工处理后重试本轮决策
             continue
         if state in ("terminated", "done"):
             return
@@ -357,7 +352,7 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
     text = ""
     for attempt in range(2):  # 解析失败带错误重试 1 次（06 号票）
         try:
-            text = chat(messages, cfg=llm_config_cached())
+            text = chat(messages, cfg=llm_config())
             decision = parse_json_loose(text)
             decision.setdefault("action", "tune")
             return decision, None
@@ -368,15 +363,3 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
                 continue
             return None, str(exc)
     return None, "决策失败"
-
-
-_cached_cfg: dict | None = None
-
-
-def llm_config_cached() -> dict:
-    global _cached_cfg
-    if _cached_cfg is None:
-        from ..agent.llm import llm_config
-
-        _cached_cfg = llm_config()
-    return _cached_cfg

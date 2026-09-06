@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -17,6 +19,19 @@ def _manager(request: Request):
 def _err(exc: tsvc.TaskError):
     return HTTPException(status_code=exc.status,
                          detail={"error": {"code": exc.code, "message": exc.message, "detail": {}}})
+
+
+def _maps_errors(fn):
+    """TaskError → 统一错误信封（docs/api.md 契约）；其余异常原样上抛。"""
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        try:
+            return fn(*args, **kwargs)
+        except tsvc.TaskError as exc:
+            raise _err(exc)
+
+    return wrapper
 
 
 class AgentConfig(BaseModel):
@@ -41,15 +56,13 @@ class TaskCreateBody(BaseModel):
 
 
 @router.post("/tasks")
+@_maps_errors
 def create_task(body: TaskCreateBody, request: Request):
-    try:
-        brief = tsvc.create_task(_manager(request), name=body.name, base_model=body.base_model,
-                                 dataset=body.dataset, manifest_id=body.manifest_id, epochs=body.epochs,
-                                 imgsz=body.imgsz, batch=body.batch, patience=body.patience,
-                                 device=body.device, workers=body.workers, seed=body.seed,
-                                 agent=body.agent.model_dump() if body.agent else None)
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    brief = tsvc.create_task(_manager(request), name=body.name, base_model=body.base_model,
+                             dataset=body.dataset, manifest_id=body.manifest_id, epochs=body.epochs,
+                             imgsz=body.imgsz, batch=body.batch, patience=body.patience,
+                             device=body.device, workers=body.workers, seed=body.seed,
+                             agent=body.agent.model_dump() if body.agent else None)
     if body.agent:
         from ..agent import tuner
 
@@ -66,10 +79,9 @@ def approve_task(task_id: int, request: Request, body: dict):
     try:
         return tuner.approve(_manager(request), task_id, action)
     except KeyError:
-        raise _not_found(f"任务不存在：{task_id}")
+        raise _err(tsvc.TaskError("not_found", f"任务不存在：{task_id}", 404))
     except ValueError as exc:
-        raise HTTPException(status_code=409, detail={"error": {"code": "state_conflict",
-                             "message": str(exc), "detail": {}}})
+        raise _err(tsvc.TaskError("state_conflict", str(exc), 409))
 
 
 @router.get("/tasks")
@@ -78,75 +90,73 @@ def list_tasks(request: Request):
 
 
 @router.get("/tasks/{task_id}")
+@_maps_errors
 def get_task(task_id: int, request: Request):
-    try:
-        return tsvc.get_task(_manager(request), task_id)
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    return tsvc.get_task(_manager(request), task_id)
 
 
 @router.delete("/tasks/{task_id}")
+@_maps_errors
 def delete_task(task_id: int, request: Request, delete_files: bool = False):
-    try:
-        tsvc.delete_task(_manager(request), task_id, delete_files)
-        return {"deleted": task_id}
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    tsvc.delete_task(_manager(request), task_id, delete_files)
+    return {"deleted": task_id}
 
 
 @router.get("/runs/{uid}")
+@_maps_errors
 def get_run(uid: str, request: Request):
-    try:
-        return tsvc.get_run(_manager(request), uid)
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    return tsvc.get_run(_manager(request), uid)
 
 
 @router.get("/runs/{uid}/logs")
+@_maps_errors
 def run_logs(uid: str, request: Request, tail: int = 200):
-    try:
-        return {"lines": tsvc.run_logs(_manager(request), uid, tail)}
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    return {"lines": tsvc.run_logs(_manager(request), uid, tail)}
 
 
 @router.post("/runs/{uid}/stop")
+@_maps_errors
 def stop_run(uid: str, request: Request):
-    try:
-        return {"run_uid": uid, "state": tsvc.stop_run(_manager(request), uid)}
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    return {"run_uid": uid, "state": tsvc.stop_run(_manager(request), uid)}
 
 
 @router.post("/runs/{uid}/resume")
+@_maps_errors
 def resume_run(uid: str, request: Request):
-    try:
-        return {"new_run_uid": tsvc.resume_run(_manager(request), uid)}
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    return {"new_run_uid": tsvc.resume_run(_manager(request), uid)}
+
+
+@router.post("/runs/{uid}/deploy")
+@_maps_errors
+def deploy_run(uid: str, request: Request, body: dict | None = None):
+    """一键部署（09 号票）：导出 ONNX + 组装模型库 + 导出验证，后台执行。"""
+    body = body or {}
+    return tsvc.deploy_run(_manager(request), uid, model_lib_dir=body.get("model_lib_dir"))
+
+
+@router.get("/deployments")
+def list_deployments(request: Request):
+    return tsvc.list_deployments(_manager(request))
 
 
 @router.post("/runs/{uid}/report")
+@_maps_errors
 def generate_report(uid: str, request: Request):
     """复盘报告：指标 + 图 → LLM → report.md（07 号票，多模态管线复用）。"""
-    try:
-        return tsvc.generate_report(_manager(request), uid)
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    return tsvc.generate_report(_manager(request), uid)
 
 
 @router.get("/tasks/{task_id}/comparison")
+@_maps_errors
 def compare_runs(task_id: int, request: Request):
-    try:
-        return tsvc.compare_runs(_manager(request), task_id)
-    except tsvc.TaskError as exc:
-        raise _err(exc)
+    return tsvc.compare_runs(_manager(request), task_id)
 
 
 @router.get("/compare")
+@_maps_errors
 def compare_tasks(request: Request, tasks: str):
     """跨任务对比：tasks=1,2,3（逗号分隔 id）。"""
-    uids = [int(x) for x in tasks.split(",") if x.strip().isdigit()]
-    if not uids:
-        raise _err(tsvc.TaskError("invalid_args", "tasks 参数为空或非法", 400))
-    return tsvc.compare_tasks(_manager(request), uids)
+    ids = [int(x) for x in tasks.split(",") if x.strip().isdigit()]
+    if not ids:
+        raise tsvc.TaskError("invalid_args", "tasks 参数为空或非法", 400)
+    return tsvc.compare_tasks(_manager(request), ids)

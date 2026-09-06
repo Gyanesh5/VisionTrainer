@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import base64
+import json
+import re
 from pathlib import Path
 
 import httpx
@@ -22,10 +24,6 @@ class LLMError(Exception):
 
 def llm_config() -> dict:
     return load_config().get("llm", {})
-
-
-def _content_text(text: str) -> str:
-    return text
 
 
 def _content_image(path: Path) -> dict:
@@ -66,9 +64,6 @@ def chat(messages: list[dict], *, client: httpx.Client | None = None,
 
 def parse_json_loose(text: str) -> dict:
     """三级解析降级（06 号票）：直接 loads → 剥代码栏 → 正则抽首个 {...}。"""
-    import json
-    import re
-
     text = text.strip()
     try:
         return json.loads(text)

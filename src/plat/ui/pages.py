@@ -5,6 +5,8 @@
 各视图随里程碑实装：数据集 M1、训练/队列 M2、结果对比 M3、Agent M4。
 """
 
+from pathlib import Path
+
 from nicegui import ui
 
 from ..config import load_config
@@ -157,6 +159,9 @@ def mount() -> None:
                             ui.button("停止", color="negative", on_click=lambda: do_stop(uid)).props("outline dense")
                         if run["status"] in ("done", "failed", "cancelled"):
                             ui.button("续训", on_click=lambda: do_resume(uid)).props("outline dense")
+                        if run["status"] == "done":
+                            ui.button("部署到标注端", icon="rocket_launch",
+                                      on_click=lambda: do_deploy(uid)).props("outline dense")
                     if run.get("error"):
                         ui.label(run["error"]).classes("text-xs").style("color:#b91c1c")
                     prog = run.get("progress")
@@ -196,6 +201,13 @@ def mount() -> None:
             def do_stop(uid: str) -> None:
                 tsvc.stop_run(get_manager(), uid)
                 ui.notify(f"停止请求已发出：{uid}")
+
+            def do_deploy(uid: str) -> None:
+                try:
+                    r = tsvc.deploy_run(get_manager(), uid)
+                    ui.notify(f"导出部署已启动：{r['target']}（完成后见结果页部署清单）")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"部署失败：{exc}", type="negative")
 
             def do_resume(uid: str) -> None:
                 new_uid_ = tsvc.resume_run(get_manager(), uid)
@@ -495,6 +507,22 @@ def mount() -> None:
             task_sel.on_value_change(lambda e: render_rounds())
             with detail:
                 ui.label("选择任务后展示跨轮对比").classes("text-xs opacity-40")
+
+            # ── 部署清单（09 号票）
+            ui.label("已部署到标注端的模型").classes("font-bold mt-4")
+            dep_data = tsvc.list_deployments(get_manager())
+            dep_rows = [{"name": Path(d["model_lib_dir"]).name, "task": d["task_name"],
+                         "run": d["run_uid"],
+                         "verified": "通过" if d["verified"] else "未验证",
+                         "dir": d["model_lib_dir"]} for d in dep_data["deployments"]]
+            ui.table(columns=[
+                {"name": "name", "label": "模型目录", "field": "name", "align": "left"},
+                {"name": "task", "label": "来源任务", "field": "task", "align": "left"},
+                {"name": "run", "label": "Run", "field": "run"},
+                {"name": "verified", "label": "导出验证", "field": "verified"},
+            ], rows=dep_rows, row_key="name").classes("w-full")
+            if dep_data.get("lru_hint"):
+                ui.label(dep_data["lru_hint"]).classes("text-xs").style("color:#b45309")
 
         _page_frame("结果", "结果复盘", None, body)
 

@@ -27,10 +27,6 @@ ALLOWLIST: dict[str, dict] = {
 }
 
 
-def is_allowed(key: str) -> bool:
-    return key in ALLOWLIST
-
-
 def clamp_changes(changes: dict) -> tuple[dict, list[dict]]:
     """应用白名单边界，返回 (合法变更, clamp 记录)。非白名单键直接拒绝记录。"""
     applied: dict = {}

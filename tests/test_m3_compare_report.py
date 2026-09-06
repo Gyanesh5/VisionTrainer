@@ -11,9 +11,6 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import detect_source  # noqa: F401 — pytest fixture
-from conftest import make_image, make_annotation, rect
-
 from plat.charts.render import render_run_charts
 from plat.datasets import service as svc
 from plat.main import create_app

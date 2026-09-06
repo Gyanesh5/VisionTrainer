@@ -55,7 +55,6 @@ def _wait_agent_state(client: TestClient, task_id: int, states: set[str], timeou
 def test_agent_auto_loop_two_rounds(agent_client, monkeypatch):
     """auto 模式：LLM 每轮给出 lr0 调整，跑满 2 轮后正常收官。"""
     from plat.agent import tuner as tuner_mod
-    from plat.db.models import init_db
 
     responses = [
         json_tune("0.05", "第一轮偏低，提高学习率"),
@@ -77,8 +76,6 @@ def test_agent_auto_loop_two_rounds(agent_client, monkeypatch):
 
 
 def json_tune(lr0: str, analysis: str) -> str:
-    import json
-
     return json.dumps({"analysis": analysis, "action": "tune",
                        "hyperparameters": {"lr0": float(lr0)}})
 
@@ -126,14 +123,11 @@ def test_agent_approve_continue_runs_next_round(agent_client, monkeypatch):
 
 def test_agent_clamps_out_of_range(agent_client, tmp_path, monkeypatch):
     """白名单 clamp：lr0 越界被压回边界，clamp 记录归档。"""
-    import json as _json
-
     from plat.agent import tuner as tuner_mod
-    from plat.db.models import AgentDecision, init_db
 
     responses = [
-        _json.dumps({"analysis": "lr 拉满", "action": "tune", "hyperparameters": {"lr0": 99.0, "not_allowed": 1}}),
-        _json.dumps({"analysis": "stop", "action": "stop"}),
+        json.dumps({"analysis": "lr 拉满", "action": "tune", "hyperparameters": {"lr0": 99.0, "not_allowed": 1}}),
+        json.dumps({"analysis": "stop", "action": "stop"}),
     ]
     monkeypatch.setattr(tuner_mod, "chat", _scripted_chat(responses))
 

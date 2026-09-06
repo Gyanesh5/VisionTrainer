@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
+import threading
+import time
+from datetime import datetime
 from pathlib import Path
 
+from .manager import SubprocessHandle
 from ..datasets import service as ds
 from ..datasets.service import DatasetError
-
-ALLOWED_ARGS = {"epochs", "imgsz", "batch", "patience", "device", "workers", "seed"}
 
 
 class TaskError(Exception):
@@ -179,25 +182,30 @@ PRIMARY_BY_TASK = {
 }
 
 
+def _dataset_meta_of_task(task) -> dict:
+    """从任务的派生路径反查数据集元数据（task_type/classes）。"""
+    if not task.dataset_manifest_path:
+        return {}
+    dataset_dir = Path(task.dataset_manifest_path).parent.parent.parent
+    meta_path = dataset_dir / "dataset.json"
+    if not meta_path.exists():
+        return {}
+    return json.loads(meta_path.read_text(encoding="utf-8"))
+
+
 def compare_runs(manager, task_id: int) -> dict:
-    """Task 内跨 Run 对比：各轮主指标 + 超参 diff（07 号票对比视图数据）。"""
+    """Task 内跨 Run 对比：各轮主指标曲线与最佳 epoch（07 号票对比视图数据）。"""
     from plat.db.models import EpochMetric, Run, Task
 
     with manager.Session() as s:
         task = s.get(Task, task_id)
         if task is None:
             raise _http_err("not_found", f"任务不存在：{task_id}", 404)
-        runs = s.query(Run).filter(Run.task_id == task_id).order_by(Run.round_no).all()
-        task_type = None
-        if task.dataset_manifest_path:  # <root>/<name>/derived/<uid>/data.yaml → 数据集元数据
-            dataset_dir = Path(task.dataset_manifest_path).parent.parent.parent
-            meta_path = dataset_dir / "dataset.json"
-            if meta_path.exists():
-                task_type = json.loads(meta_path.read_text(encoding="utf-8")).get("task_type")
+        task_type = _dataset_meta_of_task(task).get("task_type")
         primary_key = PRIMARY_BY_TASK.get(task_type or "", "")
-        rounds = []
         metric_keys = ("metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/mAP50-95(P)", "metrics/accuracy_top1")
-        for r in runs:
+        rounds = []
+        for r in s.query(Run).filter(Run.task_id == task_id).order_by(Run.round_no).all():
             best_val, best_epoch, curve = None, None, []
             for m in s.query(EpochMetric).filter(EpochMetric.run_id == r.id).order_by(EpochMetric.epoch).all():
                 rec = m.metrics or {}
@@ -210,11 +218,7 @@ def compare_runs(manager, task_id: int) -> dict:
             rounds.append({"uid": r.uid, "round_no": r.round_no, "status": r.status,
                            "primary_metric": r.primary_metric, "best_epoch": best_epoch,
                            "best_val": best_val, "curve": curve})
-        diff: dict[str, dict] = {}
-        for key in (task.train_args or {}):
-            values = {rounds[i]["round_no"]: (runs[i].__dict__.get("_args") or task.train_args.get(key)) for i in range(len(runs))}
-            # train_args 每轮同源；真正分轮的超参来自 agent_config 变更记录，这里展示任务级参数
-            diff[key] = task.train_args.get(key)
+        # train_args 每轮同源；真正分轮的超参变更记录在 agent_config.history，这里展示任务级参数
         return {"task": {"id": task.id, "uid": task.uid, "name": task.name, "task_type": task_type},
                 "rounds": rounds, "train_args": task.train_args}
 
@@ -239,8 +243,6 @@ def compare_tasks(manager, task_ids: list[int]) -> dict:
 
 def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> dict:
     """复盘报告（07 号票）：指标 JSON + 渲染图 → LLM → report.md 存 Run 目录。"""
-    from pathlib import Path as _P
-
     from ..agent.llm import LLMError, build_client, chat, llm_config
     from ..charts.render import confusion_matrix_png, render_run_charts
 
@@ -249,12 +251,12 @@ def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> 
         raise _http_err("state_conflict", "仅已结束的运行可生成复盘报告", 409)
     if not detail["run_dir"]:
         raise _http_err("invalid_args", "运行目录缺失", 400)
-    run_dir = _P(detail["run_dir"])
+    run_dir = Path(detail["run_dir"])
 
     charts = render_run_charts(detail["metrics"], run_dir / "report_assets")
     cm = confusion_matrix_png(run_dir)
     if cm:
-        charts = [cm] + charts
+        charts.insert(0, cm)
 
     content: list[dict] = [{"type": "text", "text": json.dumps({
         "task_name": detail["task_name"], "round": detail["round_no"], "status": detail["status"],
@@ -281,3 +283,125 @@ def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> 
     report_path = run_dir / "report.md"
     report_path.write_text(text, encoding="utf-8")
     return {"run_uid": uid, "report": str(report_path), "chars": len(text)}
+
+
+# ---------------------------------------------------------------- M5：回注部署
+
+def parse_model_family(base_model: str) -> str:
+    m = re.search(r"yolo(\d+)", base_model.lower())
+    return f"yolov{m.group(1)}" if m else "yolov8"
+
+
+def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool = False) -> dict:
+    """一键部署（09 号票）：导出 ONNX → 组装模型库目录 → 导出验证 → 登记 Deployment。
+
+    导出子进程在训练 venv 执行（真实链路需 ultralytics+onnxruntime；测试可注入 stub）。
+    """
+    from ..config import load_config
+    from plat.db.models import Deployment, Run, Task
+
+    cfg = load_config().get("training", {})
+    lib_dir = Path(model_lib_dir or cfg.get("model_lib_dir", "~/Documents/x-anylabeling-models")).expanduser()
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if run.status != "done":
+            raise _http_err("state_conflict", "仅已完成的运行可部署", 409)
+        if not run.best_pt or not Path(run.best_pt).exists():
+            raise _http_err("invalid_args", "best.pt 不存在，无法导出", 400)
+        task = s.get(Task, run.task_id)
+        ds_meta = _dataset_meta_of_task(task)
+        classes = ds_meta.get("classes") or []
+        task_type = ds_meta.get("task_type", "detect")
+        family = parse_model_family(task.base_model)
+        dir_name = f"{family}_{task_type}_{run.uid}"
+        target = lib_dir / dir_name
+        if target.exists():
+            raise _http_err("state_conflict", f"部署目录已存在：{target}", 409)
+        display_name = f"{task.name} · {datetime.now():%m-%d}"
+        conf = (task.train_args or {}).get("conf", 0.25)
+        imgsz = (task.train_args or {}).get("imgsz", 640)
+        deployment = Deployment(run_id=run.id, model_lib_dir=str(target),
+                                onnx_path=str(target / "model.onnx"), verified=False,
+                                verification={"status": "exporting"})
+        s.add(deployment)
+        s.commit()
+        dep_id = deployment.id
+
+        verify_image = None
+        src = ds_meta.get("source_dir")
+        if src and Path(src).exists():
+            from ..datasets.validate import list_images
+
+            imgs = list_images(Path(src))
+            verify_image = str(imgs[0]) if imgs else None
+
+    payload = {
+        "weights": run.best_pt, "run_dir": run.run_dir, "target_dir": str(target),
+        "name": dir_name, "display_name": display_name, "family": family,
+        "classes": classes, "conf": conf, "iou": 0.45, "imgsz": imgsz,
+        "verify_image": verify_image,
+    }
+    export_dir = Path(run.run_dir) / "export"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    payload_path = export_dir / "payload.json"
+    payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _finalize(proc) -> None:
+        # 导出子进程脱离启动，只能轮询回收（与训练 watchdog 同款模式）
+        ret = proc.poll()
+        while ret is None:
+            time.sleep(0.3)
+            ret = proc.poll()
+        with manager.Session() as s2:
+            dep = s2.get(Deployment, dep_id)
+            result_path = export_dir / "result.json"
+            if ret != 0:
+                dep.verification = {"status": "failed", "detail": f"导出进程退出码 {ret}"}
+            elif result_path.exists():
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+                dep.verified = bool(result.get("verification", {}).get("verified"))
+                dep.verification = result.get("verification", {})
+            else:
+                dep.verification = {"status": "failed", "detail": "未产生 result.json"}
+            s2.commit()
+
+    def _watch() -> None:
+        log_f = (export_dir / "export.log").open("wb")
+        try:
+            proc = SubprocessHandle([manager.s.training_python, manager.s.export_entry, str(payload_path)], log_f)
+            _finalize(proc)
+        finally:
+            log_f.close()
+
+    threading.Thread(target=_watch, daemon=True, name=f"deploy-{uid}").start()
+    out = {"deployment_id": dep_id, "target": str(target), "status": "exporting"}
+    if wait:
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            with manager.Session() as s:
+                dep = s.get(Deployment, dep_id)
+                if (dep.verification or {}).get("status") != "exporting":
+                    out["verified"] = dep.verified
+                    out["verification"] = dep.verification
+                    break
+            time.sleep(0.3)
+    return out
+
+
+def list_deployments(manager) -> dict:
+    from plat.db.models import Deployment, Run, Task
+
+    with manager.Session() as s:
+        rows = (s.query(Deployment, Run, Task)
+                .join(Run, Deployment.run_id == Run.id)
+                .join(Task, Run.task_id == Task.id)
+                .order_by(Deployment.id.desc()).all())
+        items = [{"deployment_id": d.id, "run_uid": r.uid, "task_name": t.name,
+                  "model_lib_dir": d.model_lib_dir, "verified": d.verified,
+                  "created_at": d.created_at.isoformat(timespec="seconds")} for d, r, t in rows]
+        hint = ("已部署超过 5 个模型：最早登记的模型可能被桌面端下拉框 LRU 挤出（文件保留，重新加载一次即可）"
+                if len(items) > 5 else None)
+        return {"deployments": items, "lru_hint": hint}

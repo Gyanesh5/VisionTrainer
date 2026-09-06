@@ -57,13 +57,14 @@ def main() -> None:
         rec["lr"] = [float(x) for x in (trainer.lr or [])]
         append(rec)
 
-    last_progress = {"t": 0.0}
+    last_progress = 0.0
 
     def on_train_batch_end(trainer) -> None:
+        nonlocal last_progress
         now = time.time()
-        if now - last_progress["t"] < 1.0:  # 1Hz 节流（07 号票）
+        if now - last_progress < 1.0:  # 1Hz 节流（07 号票）
             return
-        last_progress["t"] = now
+        last_progress = now
         append({
             "progress": {
                 "epoch": int(trainer.epoch) + 1,

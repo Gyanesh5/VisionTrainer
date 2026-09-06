@@ -18,3 +18,6 @@ base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
 api_key = "" # 只存本地，不进 git
 model = "glm-5.3-flash"
 # 本地备用槽示例：base_url = "http://localhost:11434/v1"（Ollama）
+
+# 回注部署（09 号票）：标注端模型库位置（训练 venv 需含 onnxruntime 才能做导出验证）
+model_lib_dir = "~/Documents/x-anylabeling-models"

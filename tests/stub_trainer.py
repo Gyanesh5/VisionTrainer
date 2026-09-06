@@ -36,3 +36,8 @@ for e in range(1, epochs + 1):
     }
     with metrics_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
+
+w = run_dir / "weights"
+w.mkdir(parents=True, exist_ok=True)
+(w / "best.pt").write_bytes(b"STUB-PT")
+(w / "last.pt").write_bytes(b"STUB-PT")

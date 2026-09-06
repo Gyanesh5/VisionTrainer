@@ -13,12 +13,6 @@ import matplotlib
 matplotlib.use("Agg")  # 无头渲染
 
 
-def _series(metrics: list[dict], pick) -> tuple[list[int], list[float | None]]:
-    xs = [int(m["epoch"]) for m in metrics]
-    ys = [pick(m) for m in metrics]
-    return xs, ys
-
-
 def _style(ax):
     ax.grid(True, alpha=0.3)
     ax.legend(fontsize=8)
@@ -34,8 +28,8 @@ def render_run_charts(metrics: list[dict], out_dir: Path) -> list[Path]:
 
     # 图 1：主指标
     fig, ax = plt.subplots(figsize=(5, 3), dpi=110)
-    map50 = [((m.get("metrics") or {}).get("metrics/mAP50(B)")) for m in metrics]
-    map5095 = [((m.get("metrics") or {}).get("metrics/mAP50-95(B)")) for m in metrics]
+    map50 = [(m.get("metrics") or {}).get("metrics/mAP50(B)") for m in metrics]
+    map5095 = [(m.get("metrics") or {}).get("metrics/mAP50-95(B)") for m in metrics]
     if any(v is not None for v in map50):
         ax.plot(epochs, map50, label="mAP50")
     if any(v is not None for v in map5095):
@@ -52,7 +46,9 @@ def render_run_charts(metrics: list[dict], out_dir: Path) -> list[Path]:
     fig, ax = plt.subplots(figsize=(5, 3), dpi=110)
     loss_keys: list[str] = []
     for m in metrics:
-        loss_keys += [k for k in (m.get("loss") or {}) if k not in loss_keys]
+        for k in (m.get("loss") or {}):
+            if k not in loss_keys:
+                loss_keys.append(k)
     for k in loss_keys:
         ax.plot(epochs, [(m.get("loss") or {}).get(k) for m in metrics], label=k)
     if loss_keys:

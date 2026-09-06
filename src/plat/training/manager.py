@@ -79,6 +79,7 @@ class ManagerSettings:
     training_python: str
     trainer_entry: str
     runs_dir: Path
+    export_entry: str = ""
     poll_interval: float = 1.0
     stop_timeout: float = 10.0
     tail_interval: float = 0.5
@@ -224,7 +225,7 @@ class TrainingManager:
         """孤儿收养：进程还活着，重建监控（不重启进程）。"""
         with self.Session() as s:
             run = s.get(Run, run_id)
-            proc = _ExternalProc(run.pid)
+            proc = ExternalProc(run.pid)
             run.status = "running"
             s.commit()
             self.current = CurrentRun(run_id=run_id, uid=run.uid, task_id=run.task_id,
