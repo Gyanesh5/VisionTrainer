@@ -136,6 +136,12 @@ class TrainingManager:
                         alive = False
                 if alive:
                     self._attach(r.id)
+                    # 竞态防护：收养窗口期内用户可能已请求停止（status=stopping），
+                    # attach 会把状态写回 running，这里复查并补挂停止标志
+                    with self.Session() as s3:
+                        r3 = s3.get(Run, r.id)
+                        if r3 and r3.status == "stopping" and self.current and self.current.run_id == r3.id:
+                            self.current.stop_requested = True
                 else:
                     r.status = "failed"
                     r.error = "平台重启时训练进程已消失（孤儿死亡）"
@@ -263,7 +269,13 @@ class TrainingManager:
                             self._record_metric(cur, rec)
                     cur.metrics_offset = f.tell()
 
-            # 2) 优雅停止升级：SIGTERM 超时 → killpg SIGKILL
+            # 2) 停止请求：以 DB 状态为准（单一数据源，消除 attach/stop 竞态）
+            with self.Session() as s:
+                run = s.get(Run, cur.run_id)
+                if run and run.status == "stopping":
+                    cur.stop_requested = True
+
+            # 3) 优雅停止升级：SIGTERM 超时 → killpg SIGKILL
             if cur.stop_requested:
                 if deadline is None:
                     deadline = time.time() + self.s.stop_timeout
@@ -276,7 +288,7 @@ class TrainingManager:
                 time.sleep(self.s.tail_interval)
                 continue
 
-            # 3) 进程退出 → 终态
+            # 4) 进程退出 → 终态
             self._finalize(cur, ret)
             return
 
@@ -455,19 +467,30 @@ class SubprocessHandle:
 
 
 class ExternalProc:
-    """收养场景：进程不是本进程创建的，只能靠信号与返回码探测。"""
+    """收养场景：进程不是本次 Popen 创建的，返回码探测需两条路径——
+
+    同进程（测试/同机单进程内）：waitpid(WNOHANG) 可收割；
+    真孤儿（父进程已退出，被 init 收养）：init 会收割，用 kill(pid,0) 探测即可。
+    """
 
     def __init__(self, pid: int):
         self._pid = pid
 
     def poll(self) -> int | None:
         try:
-            os.kill(self._pid, 0)
-            return None
-        except ProcessLookupError:
-            return -1
-        except PermissionError:
-            return None
+            waited, status = os.waitpid(self._pid, os.WNOHANG)
+        except ChildProcessError:
+            waited, status = 0, 0
+            try:
+                os.kill(self._pid, 0)
+                return None  # 存活（非子进程或仍在运行）
+            except ProcessLookupError:
+                return -1
+            except PermissionError:
+                return None
+        if waited == self._pid:
+            return status
+        return None
 
     @property
     def pid(self) -> int:

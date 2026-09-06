@@ -157,3 +157,70 @@ def test_run_progress_snapshot(training_client):
     prog = run.get("progress") or {}
     assert prog.get("epochs_total") == 2, f"进度快照缺失：{prog}"
     assert prog.get("epoch") in (1, 2)
+
+
+def test_orphan_adoption_after_platform_restart(tmp_path, datasets_root, detect_source):
+    """M2 验收④：平台重启不杀训练；重启后收养存活进程恢复监控（ADR 0001）。"""
+    from plat.datasets import service as svc
+
+    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    monkey_root = datasets_root
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+                        "check_occupancy": False}}
+    app1 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app1) as c1:
+        r = c1.post("/api/v1/tasks", json={"name": "adopt", "base_model": "stub",
+                                           "dataset": "plate", "epochs": 100})
+        assert r.status_code == 200, r.text
+        task_id = r.json()["id"]
+        deadline = time.time() + 15
+        run = {}
+        while time.time() < deadline:
+            run = c1.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]
+            if run["status"] == "running":
+                break
+            time.sleep(0.2)
+        assert run["status"] == "running"
+        run_uid, pid = run["uid"], None
+        # 读取 pid（模拟平台崩溃：直接退出 client，子进程因脱离而存活）
+        import sqlite3
+
+        conn = sqlite3.connect(tmp_path / "db.sqlite")
+        pid = conn.execute("SELECT pid FROM runs WHERE uid=?", (run_uid,)).fetchone()[0]
+        conn.close()
+
+    # 平台已"崩溃"。子进程应仍存活（start_new_session 脱离）
+    time.sleep(0.5)
+    import os
+
+    try:
+        os.kill(pid, 0)
+        alive = True
+    except OSError:
+        alive = False
+    assert alive, "脱离启动的子进程不应随平台退出"
+
+    # 新平台实例启动 → 收养 → 继续监控 → 优雅停止仍有效
+    app2 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app2) as c2:
+        deadline = time.time() + 15
+        status = None
+        while time.time() < deadline:
+            run = c2.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]
+            status = run["status"]
+            if status == "running" and run["uid"] == run_uid:
+                # 收养成功：进程被重新纳管
+                r = c2.post(f"/api/v1/runs/{run_uid}/stop")
+                assert r.status_code == 200
+                break
+            time.sleep(0.2)
+        assert status == "running", f"收养后应恢复 running，实际 {status}"
+        deadline = time.time() + 15
+        final = None
+        while time.time() < deadline:
+            final = c2.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]["status"]
+            if final in ("cancelled", "failed"):
+                break
+            time.sleep(0.2)
+        assert final == "cancelled", f"收养后停止应生效，实际 {final}"
