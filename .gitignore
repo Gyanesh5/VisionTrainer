@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+config.toml
+*.log
+runs/
+data/
+*.egg-info/
+dist/
+.pyplaywright/

@@ -1,0 +1,28 @@
+[project]
+name = "xany-training-platform"
+version = "0.1.0"
+description = "单机 YOLO 训练平台：数据集管理、GPU 调度训练、实时监控与 Agent 自动调参"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "nicegui>=3,<4",
+    "sqlalchemy>=2.0",
+    "matplotlib>=3.9",
+]
+
+[project.scripts]
+plat = "plat.main:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/plat"]

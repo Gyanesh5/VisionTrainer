@@ -1,0 +1,20 @@
+# 复制为 config.toml 后修改；config.toml 不进 git（密钥在此）。
+
+[server]
+host = "127.0.0.1"
+port = 8600
+
+[training]
+# 训练子进程使用的 python 解释器（torch/ultralytics 所在环境，04 号票：单 venv 配置化）
+python = "/home/wuguang/Desktop/workspace/X-AnyLabeling/.venv/bin/python"
+# 数据集根目录（05 号票：默认跟 Ultralytics datasets_dir 设置）
+datasets_dir = "~/datasets"
+# 训练产物根目录（runs_dir 必须绝对路径，01 号票）
+runs_dir = "~/datasets/runs"
+
+[llm]
+# OpenAI 兼容端点（06 号票）。云端槽默认智谱 coding plan；base_url 以智谱官方文档为准。
+base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
+api_key = "" # 只存本地，不进 git
+model = "glm-5.3-flash"
+# 本地备用槽示例：base_url = "http://localhost:11434/v1"（Ollama）
