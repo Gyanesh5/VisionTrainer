@@ -102,6 +102,10 @@ SCHEMA_VERSION = 1
 
 def init_db(db_url: str = "sqlite:///data/platform.db") -> sessionmaker:
     """建表 + 记录 schema 版本；返回会话工厂。幂等。"""
+    if db_url.startswith("sqlite:///"):
+        from pathlib import Path
+
+        Path(db_url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(db_url, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with engine.begin() as conn:

@@ -8,6 +8,7 @@
 from nicegui import ui
 
 from ..config import load_config
+from ..datasets import service as ds
 
 NAV_ITEMS = [
     ("训练", "model_training", "/", "M2"),
@@ -16,6 +17,22 @@ NAV_ITEMS = [
     ("Agent", "smart_toy", "/agent", "M4"),
     ("设置", "settings", "/settings", ""),
 ]
+
+
+def _chart_options(metrics: list[dict]) -> dict:
+    """Run 详情实时曲线（07 号票：loss 分项 + P/R/mAP 曲线的核心两线）。"""
+    return {
+        "backgroundColor": "transparent",
+        "grid": {"left": 42, "right": 14, "top": 28, "bottom": 26},
+        "xAxis": {"type": "category", "data": [m["epoch"] for m in metrics]},
+        "yAxis": {"type": "value"},
+        "series": [
+            {"name": "mAP50", "type": "line", "smooth": True,
+             "data": [(m.get("metrics") or {}).get("metrics/mAP50(B)") for m in metrics]},
+            {"name": "mAP50-95", "type": "line", "smooth": True,
+             "data": [(m.get("metrics") or {}).get("metrics/mAP50-95(B)") for m in metrics]},
+        ],
+    }
 
 
 def _nav_rail(active: str) -> None:
@@ -57,19 +74,130 @@ def _empty_state(title: str, milestone: str, desc: str) -> None:
 def mount() -> None:
     @ui.page("/")
     def page_training() -> None:
+        # UI 直调 training/datasets service 层（与 REST API 同一函数）；
+        # WS /ws/events 供外部消费者，REST 契约由 tests 独立守护。
+        from datetime import datetime
+
+        from ..training import service as tsvc
+        from ..training.manager import get_manager
+
+        # actions 先于 body 构建，按钮回调经由 state 回填（对话框在 body 内创建）
+        state: dict = {"selected": None, "open_create": lambda: ui.notify("页面初始化中…")}
+
         def actions() -> None:
-            ui.button("＋ 新建训练", icon="add", on_click=lambda: ui.notify(
-                "将在 M2 实装：训练表单（基模型/数据集/超参白名单）")).props("unelevated")
+            ui.button("＋ 新建训练", icon="add", on_click=lambda: state["open_create"]()).props("unelevated")
+
+        def rows_data() -> list[dict]:
+            rows = []
+            for t in tsvc.list_tasks(get_manager()):
+                row = dict(t)
+                row["metric_str"] = f"mAP50-95 {t['primary_metric']:.3f}" if t.get("primary_metric") else "—"
+                row["block_str"] = t.get("block_reason") or "—"
+                rows.append(row)
+            return rows
 
         def body() -> None:
-            _empty_state(
-                "任务队列为空", "M2",
-                "此处展示任务表格（六态 + source 徽标 + 排队原因）、Run 详情与 Agent 审批卡；"
-                "队列由 Runner 单飞 FIFO 调度（ADR 0001）。",
-            )
+            columns = [
+                {"name": "name", "label": "任务", "field": "name", "align": "left"},
+                {"name": "base_model", "label": "基模型", "field": "base_model", "align": "left"},
+                {"name": "source", "label": "来源", "field": "source"},
+                {"name": "status", "label": "状态", "field": "status"},
+                {"name": "metric_str", "label": "主指标", "field": "metric_str"},
+                {"name": "block_str", "label": "备注", "field": "block_str", "align": "left"},
+            ]
+            table = ui.table(columns=columns, rows=rows_data(), row_key="uid",
+                             selection="single",
+                             on_select=lambda e: select((e.selection or [None])[0])).classes("w-full")
+            detail = ui.column().classes("w-full")
+
+            def select(row) -> None:
+                state["selected"] = (row or {}).get("id") if isinstance(row, dict) else None
+                render_detail()
+
+            def render_detail() -> None:
+                detail.clear()
+                task_id = state["selected"]
+                if not task_id:
+                    with detail:
+                        ui.label("点击任务行查看运行详情").classes("text-xs opacity-40")
+                    return
+                task = tsvc.get_task(get_manager(), task_id)
+                if not task["runs"]:
+                    with detail:
+                        ui.label("该任务暂无运行记录").classes("text-xs opacity-40")
+                    return
+                uid = task["runs"][-1]["uid"]
+                run = tsvc.get_run(get_manager(), uid)
+                with detail, ui.card().classes("w-full"):
+                    with ui.row().classes("w-full items-center"):
+                        ui.label(f"Run {uid} · 轮 {run['round_no']} · {run['status']}").classes("font-bold")
+                        ui.space()
+                        if run["status"] in ("queued", "running"):
+                            ui.button("停止", color="negative", on_click=lambda: do_stop(uid)).props("outline dense")
+                        if run["status"] in ("done", "failed", "cancelled"):
+                            ui.button("续训", on_click=lambda: do_resume(uid)).props("outline dense")
+                    if run.get("error"):
+                        ui.label(run["error"]).classes("text-xs").style("color:#b91c1c")
+                    chart = ui.echart(_chart_options(run["metrics"])).classes("w-full h-56")
+                    if run["status"] == "running":
+
+                        def poll() -> None:
+                            try:
+                                r = tsvc.get_run(get_manager(), uid)
+                            except Exception:  # noqa: BLE001
+                                return
+                            chart.options = _chart_options(r["metrics"])
+                        ui.timer(1.0, poll)
+
+            def do_stop(uid: str) -> None:
+                get_manager().request_stop(uid)
+                ui.notify(f"停止请求已发出：{uid}")
+
+            def do_resume(uid: str) -> None:
+                new_uid_ = get_manager().resume(uid)
+                ui.notify(f"续训 Run {new_uid_} 已排队")
+                refresh()  # state["selected"] 仍是 task_id，详情会显示最新一轮
+                render_detail()
+
+            with detail:
+                ui.label("点击任务行查看运行详情").classes("text-xs opacity-40")
+
+            with ui.dialog() as create_dialog, ui.card().classes("w-96 gap-2"):
+                ui.label("新建训练任务").classes("font-bold")
+                c_name = ui.input("任务名", value=f"训练-{datetime.now():%m%d-%H%M}")
+                c_model = ui.input("基模型", value="yolo11n")
+                managed = {d["name"]: d["name"] for d in ds.list_datasets()
+                           if d["form"] == "managed" and d.get("active_manifest")}
+                c_ds = ui.select(managed or {"—": "（暂无托管数据集）"}, label="数据集")
+                with ui.row():
+                    c_epochs = ui.number("epochs", value=50, precision=0)
+                    c_imgsz = ui.number("imgsz", value=640, precision=0)
+                    c_batch = ui.number("batch", value=16, precision=0)
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=create_dialog.close).props("flat")
+                    ui.button("创建", on_click=lambda: do_create()).props("unelevated")
+
+                def do_create() -> None:
+                    try:
+                        brief = tsvc.create_task(get_manager(), name=c_name.value, base_model=c_model.value,
+                                                 dataset=c_ds.value, epochs=int(c_epochs.value or 50),
+                                                 imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16))
+                        create_dialog.close()
+                        ui.notify(f"任务已排队：{brief['uid']}")
+                        refresh()
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"创建失败：{exc}", type="negative")
+
+            def refresh() -> None:
+                table.rows = rows_data()
+
+            state["open_create"] = create_dialog.open
+            ui.timer(2.0, refresh)
+            refresh()
 
         _page_frame("训练", "训练任务", actions, body)
 
+    @ui.page("/datasets")
     @ui.page("/datasets")
     def page_datasets() -> None:
         # UI 直调 service 层（与 REST API 同一函数）；契约本身由 tests/test_api_datasets.py 独立守护
