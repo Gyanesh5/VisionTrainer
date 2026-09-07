@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import threading
 import time
 from datetime import datetime
@@ -288,8 +287,10 @@ def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> 
 # ---------------------------------------------------------------- M5：回注部署
 
 def parse_model_family(base_model: str) -> str:
-    m = re.search(r"yolo(\d+)", base_model.lower())
-    return f"yolov{m.group(1)}" if m else "yolov8"
+    """目录命名用家族串（v10 及以前带 v，11/12/26 不带）——与 export_entry.family_slug 同规则。"""
+    from .export_entry import family_slug
+
+    return family_slug(base_model)
 
 
 def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool = False) -> dict:
@@ -309,7 +310,11 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
             raise _http_err("not_found", f"Run 不存在：{uid}", 404)
         if run.status != "done":
             raise _http_err("state_conflict", "仅已完成的运行可部署", 409)
-        if not run.best_pt or not Path(run.best_pt).exists():
+        best_pt = run.best_pt
+        if not best_pt and run.run_dir:  # 历史数据兜底：DB 字段缺失但产物在盘
+            cand = Path(run.run_dir) / "weights" / "best.pt"
+            best_pt = str(cand) if cand.exists() else None
+        if not best_pt or not Path(best_pt).exists():
             raise _http_err("invalid_args", "best.pt 不存在，无法导出", 400)
         task = s.get(Task, run.task_id)
         ds_meta = _dataset_meta_of_task(task)
@@ -339,8 +344,9 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
             verify_image = str(imgs[0]) if imgs else None
 
     payload = {
-        "weights": run.best_pt, "run_dir": run.run_dir, "target_dir": str(target),
+        "weights": best_pt, "run_dir": run.run_dir, "target_dir": str(target),
         "name": dir_name, "display_name": display_name, "family": family,
+        "base_model": task.base_model, "task_type": task_type,
         "classes": classes, "conf": conf, "iou": 0.45, "imgsz": imgsz,
         "verify_image": verify_image,
     }

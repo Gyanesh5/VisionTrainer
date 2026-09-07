@@ -148,6 +148,12 @@ class TrainingManager:
                     r.status = status
                     r.error = error
                     r.finished_at = _now()
+                    # 与 _finalize 同款产物回填（best/last.pt），否则部署链拿不到权重路径
+                    if r.run_dir:
+                        weights = Path(r.run_dir) / "weights"
+                        best, last = weights / "best.pt", weights / "last.pt"
+                        r.best_pt = str(best) if best.exists() else None
+                        r.last_pt = str(last) if last.exists() else None
                     s.commit()
                     publish_threadsafe({"type": "run.status", "run_uid": r.uid, "status": status, "error": error})
                     self._aggregate(s, r.task_id)

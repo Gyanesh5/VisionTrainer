@@ -292,3 +292,5 @@ def test_adopted_run_natural_exit_judged_done(tmp_path, datasets_root, detect_so
                 break
             time.sleep(0.2)
         assert status == "done", f"收养后自然跑完应判 done，实际 {status}"
+        detail = c2.get(f"/api/v1/runs/{run['uid']}").json()
+        assert detail["artifacts"]["best_pt"], f"收养完成的 best_pt 应回填：{detail['artifacts']}"

@@ -61,7 +61,7 @@ def test_deploy_full_chain(deploy_client):
     r = c.post(f"/api/v1/runs/{run_uid}/deploy")
     assert r.status_code == 200, r.text
     target = Path(r.json()["target"])
-    assert target.name == "yolov11_detect_" + run_uid
+    assert target.name == "yolo11_detect_" + run_uid  # 04 号票：11+ 家族无 v
 
     # 等待导出链路完成
     deadline = time.time() + 20
@@ -76,7 +76,7 @@ def test_deploy_full_chain(deploy_client):
 
     # 模型库目录契约：model.onnx + config.yaml，classes 顺序=训练 data.yaml
     config = yaml.safe_load((target / "config.yaml").read_text(encoding="utf-8"))
-    assert config["type"] == "yolov11"
+    assert config["type"] == "yolo11"  # 04 号票：桌面端合法 type（11 家族 detect 无 v 无后缀）
     assert config["name"] == target.name
     assert config["classes"] == ["car", "person"]
     assert (target / "model.onnx").exists()
@@ -118,6 +118,28 @@ def test_lru_hint_after_six(tmp_path, datasets_root, detect_source):
 def test_family_parsing():
     from plat.training.service import parse_model_family
 
-    assert parse_model_family("yolo11n") == "yolov11"
-    assert parse_model_family("yolo26s") == "yolov26"
+    assert parse_model_family("yolo11n") == "yolo11"  # 11+ 无 v（04 号票修正）
+    assert parse_model_family("yolo26s") == "yolo26"
+    assert parse_model_family("yolov8n") == "yolov8"
     assert parse_model_family("custom-net") == "yolov8"
+
+
+def test_desktop_type_mapping():
+    """04 号票：type 家族号归一 × 任务后缀 + 未收录家族兜底（调研报告 4.2/4.3）。"""
+    from plat.training.export_entry import desktop_type, family_slug
+
+    assert family_slug("yolo11n-obb") == "yolo11"
+    assert family_slug("yolov8n") == "yolov8"
+    # 家族号归一 × 任务后缀
+    assert desktop_type("yolo11n-obb", "obb") == "yolo11_obb"
+    assert desktop_type("yolo26s", "detect") == "yolo26"
+    assert desktop_type("yolov8n", "segment") == "yolov8_seg"
+    assert desktop_type("yolo11n-pose", "pose") == "yolo11_pose"
+    assert desktop_type("yolo11n-cls", "classify") == "yolo11_cls"
+    assert desktop_type("yolov10x", "detect") == "yolov10"
+    # 未收录组合兜底：yolo12_seg 不存在 → 非 end2end 走 v8 式，end2end 走 yolo26 式
+    assert desktop_type("yolo12n", "segment", end2end=False) == "yolov8_seg"
+    assert desktop_type("yolo27x", "detect", end2end=True) == "yolo26"
+    assert desktop_type("yolo27x", "obb", end2end=False) == "yolov8_obb"
+    # classify 无 end2end 概念，恒 v8_cls 兜底
+    assert desktop_type("yolo26n-cls", "classify") == "yolov8_cls"
