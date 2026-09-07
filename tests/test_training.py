@@ -224,3 +224,71 @@ def test_orphan_adoption_after_platform_restart(tmp_path, datasets_root, detect_
                 break
             time.sleep(0.2)
         assert final == "cancelled", f"收养后停止应生效，实际 {final}"
+
+
+def test_orphan_completed_during_downtime_judged_done(tmp_path, datasets_root, detect_source):
+    """收养回归：脱离进程在平台停机期间自然跑完 → 按产物判定 done（不是孤儿死亡 failed）。"""
+    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+                        "check_occupancy": False}}
+    app1 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app1) as c1:
+        r = c1.post("/api/v1/tasks", json={"name": "orphan-done", "base_model": "stub",
+                                           "dataset": "plate", "epochs": 2})
+        task_id = r.json()["id"]
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            if c1.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]["status"] == "done":
+                break
+            time.sleep(0.2)
+        # 模拟"平台在 finalize 前崩溃"：把终态改回 running、pid 指向已死进程
+        import sqlite3
+
+        conn = sqlite3.connect(tmp_path / "db.sqlite")
+        conn.execute("UPDATE runs SET status='running', pid=999999999 WHERE task_id=?", (task_id,))
+        conn.commit()
+        conn.close()
+
+    app2 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app2) as c2:
+        deadline = time.time() + 10
+        status = None
+        while time.time() < deadline:
+            status = c2.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]["status"]
+            if status != "running":
+                break
+            time.sleep(0.2)
+        assert status == "done", f"停机期间跑完的孤儿应判 done，实际 {status}"
+
+
+def test_adopted_run_natural_exit_judged_done(tmp_path, datasets_root, detect_source):
+    """收养回归：watchdog 监控中的收养进程自然退出（无退出码）→ 按产物判 done，不再误判 failed(-1)。"""
+    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+                        "check_occupancy": False}}
+    app1 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app1) as c1:
+        r = c1.post("/api/v1/tasks", json={"name": "adopt-exit", "base_model": "stub",
+                                           "dataset": "plate", "epochs": 8})  # ~4.8s，足够完成收养
+        task_id = r.json()["id"]
+        deadline = time.time() + 15
+        run = {}
+        while time.time() < deadline:
+            run = c1.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]
+            if run["status"] == "running":
+                break
+            time.sleep(0.1)
+        assert run["status"] == "running"
+
+    app2 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app2) as c2:
+        deadline = time.time() + 20
+        status = None
+        while time.time() < deadline:
+            status = c2.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]["status"]
+            if status in ("done", "failed", "cancelled"):
+                break
+            time.sleep(0.2)
+        assert status == "done", f"收养后自然跑完应判 done，实际 {status}"

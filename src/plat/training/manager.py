@@ -121,7 +121,7 @@ class TrainingManager:
         t.start()
 
     def adopt(self) -> None:
-        """平台重启后：running 且 pid 存活 → 重新挂 watchdog 继续监控；pid 已死 → failed。"""
+        """平台重启后：running 且 pid 存活 → 重新挂 watchdog 继续监控；pid 已死 → 按产物判定终态。"""
         with self.Session() as s:
             rows = s.query(Run).filter(Run.status == "running").all()
             for r in rows:
@@ -143,12 +143,38 @@ class TrainingManager:
                         if r3 and r3.status == "stopping" and self.current and self.current.run_id == r3.id:
                             self.current.stop_requested = True
                 else:
-                    r.status = "failed"
-                    r.error = "平台重启时训练进程已消失（孤儿死亡）"
+                    # pid 已死 ≠ 崩溃：脱离进程可能在平台停机期间自然跑完——按产物判定
+                    status, error = self._judge_orphan(s, r)
+                    r.status = status
+                    r.error = error
                     r.finished_at = _now()
                     s.commit()
-                    publish_threadsafe({"type": "run.status", "run_uid": r.uid, "status": "failed", "error": r.error})
+                    publish_threadsafe({"type": "run.status", "run_uid": r.uid, "status": status, "error": error})
                     self._aggregate(s, r.task_id)
+
+    def _judge_orphan(self, s, run) -> tuple[str, str | None]:
+        """收养的脱离进程取不到退出码：epoch 记录达到目标轮数且 best.pt 在 → done，否则 failed。
+
+        轮数证据双源：results.csv 行数与 metrics.jsonl 的 epoch 记录数（platform 单一数据源，stub 也有）。
+        """
+        task = s.get(Task, run.task_id)
+        epochs = int((task.train_args or {}).get("epochs", 0) or 0) if task else 0
+        recorded = 0
+        if run.run_dir:
+            run_dir = Path(run.run_dir)
+            csv_path = run_dir / "results.csv"
+            if csv_path.exists():
+                with csv_path.open("r", encoding="utf-8") as f:
+                    recorded = max(sum(1 for _ in f) - 1, 0)
+            jsonl = run_dir / "metrics.jsonl"
+            if jsonl.exists():
+                n = sum(1 for line in jsonl.read_text(encoding="utf-8", errors="replace").splitlines()
+                        if line.strip().startswith("{") and '"metrics"' in line)
+                recorded = max(recorded, n)
+        best = Path(run.run_dir) / "weights" / "best.pt" if run.run_dir else None
+        if epochs and recorded >= epochs and best and best.exists():
+            return "done", None
+        return "failed", "训练进程消失且产物不完整（孤儿未跑完）"
 
     # ------------------------------------------------------------ 队列
 
@@ -339,6 +365,10 @@ class TrainingManager:
                 run.status = "cancelled"
             elif ret == 0:
                 run.status = "done"
+            elif ret == -1 and isinstance(cur.proc, ExternalProc):
+                # 收养的脱离进程自然退出：无退出码可取，按产物完整性判定
+                status, error = self._judge_orphan(s, run)
+                run.status, run.error = status, error
             else:
                 run.status = "failed"
                 run.error = f"训练进程退出码 {ret}（详见 training.log）"

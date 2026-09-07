@@ -47,14 +47,23 @@ def main() -> None:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
     def on_fit_epoch_end(trainer) -> None:
-        rec = {"epoch": int(trainer.epoch) + 1}
-        rec["metrics"] = {k: float(v) for k, v in (trainer.metrics or {}).items()}
+        # 铁律：指标回调永不炸训练——任何取值失败都降级为空记录
         try:
-            losses = trainer.label_loss_items(trainer.tloss)
-            rec["loss"] = {k: float(v) for k, v in (losses or {}).items()}
+            # 0 基 epoch；训练结束后的终验回调 epoch 会越界，钳到 epochs 内
+            n_epochs = int(trainer.epochs)
+            rec = {"epoch": min(int(trainer.epoch) + 1, n_epochs)}
+            rec["metrics"] = {k: float(v) for k, v in (trainer.metrics or {}).items()}
+            try:
+                losses = trainer.label_loss_items(trainer.tloss)
+                rec["loss"] = {k: float(v) for k, v in (losses or {}).items()}
+            except Exception:
+                rec["loss"] = {}
+            lr = trainer.lr or {}
+            if hasattr(lr, "values") and not isinstance(lr, (list, tuple)):
+                lr = list(lr.values())  # 8.4.x：lr 是 {'lr/pg0': v,...} 的映射
+            rec["lr"] = [float(x) for x in lr]
         except Exception:
-            rec["loss"] = {}
-        rec["lr"] = [float(x) for x in (trainer.lr or [])]
+            rec = {"epoch": getattr(trainer, "epoch", 0) + 1, "metrics": {}, "loss": {}, "lr": []}
         append(rec)
 
     last_progress = 0.0
@@ -65,12 +74,18 @@ def main() -> None:
         if now - last_progress < 1.0:  # 1Hz 节流（07 号票）
             return
         last_progress = now
+        try:
+            batches_total = int(trainer.num_batches or 0)
+            if not batches_total and getattr(trainer, "train_loader", None) is not None:
+                batches_total = len(trainer.train_loader)  # 8.4.x 兜底
+        except Exception:
+            batches_total = 0
         append({
             "progress": {
                 "epoch": int(trainer.epoch) + 1,
                 "epochs_total": int(trainer.epochs),
                 "batch": int(getattr(trainer, "batch_idx", 0) or 0) + 1,
-                "batches_total": int(getattr(trainer, "num_batches", 0) or 0),
+                "batches_total": batches_total,
             }
         })
 

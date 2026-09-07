@@ -2,7 +2,7 @@
 
 单机 YOLO 训练平台：数据集管理、GPU 调度训练队列、实时曲线监控、结果归档对比，以及 **Agent 自动调参**（核心卖点）。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录打通。
 
-规划蓝图（wayfinder 地图、12 张决策票、ADR）见 `.scratch/training-platform/`——**实现前先读地图**。
+规划蓝图（wayfinder 地图、12 张决策票、ADR）见 `.scratch/training-platform/`；**当前推进地图：生产可用** 见 `.scratch/production-ready/`——**实现前先读地图**。
 
 ## 快速开始
 

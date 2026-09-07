@@ -5,12 +5,17 @@ host = "127.0.0.1"
 port = 8600
 
 [training]
-# 训练子进程使用的 python 解释器（torch/ultralytics 所在环境，04 号票：单 venv 配置化）
+# 训练/导出子进程使用的 python 解释器（torch/ultralytics 所在环境；平台自身 venv 无 torch）
 python = "/home/wuguang/Desktop/workspace/X-AnyLabeling/.venv/bin/python"
+# 子进程入口（真实链路；tests/stub_*.py 仅测试用，不要写进正式配置）
+trainer_entry = "~/Desktop/workspace/xany-training-platform/src/plat/training/trainer_entry.py"
+export_entry = "~/Desktop/workspace/xany-training-platform/src/plat/training/export_entry.py"
 # 数据集根目录（05 号票：默认跟 Ultralytics datasets_dir 设置）
 datasets_dir = "~/datasets"
 # 训练产物根目录（runs_dir 必须绝对路径，01 号票）
 runs_dir = "~/datasets/runs"
+# 队首启动前检测 GPU 是否被外部进程占用（桌面端加载模型也会触发；关掉则盲启）
+check_occupancy = true
 
 [llm]
 # OpenAI 兼容端点（06 号票）。云端槽默认智谱 coding plan；base_url 以智谱官方文档为准。
