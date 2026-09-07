@@ -53,6 +53,7 @@ class TaskCreateBody(BaseModel):
     workers: int = 8
     seed: int = 42
     agent: AgentConfig | None = None
+    extra_args: dict | None = None  # 基线超参（白名单内，07 号票）
 
 
 @router.post("/tasks")
@@ -62,7 +63,8 @@ def create_task(body: TaskCreateBody, request: Request):
                              dataset=body.dataset, manifest_id=body.manifest_id, epochs=body.epochs,
                              imgsz=body.imgsz, batch=body.batch, patience=body.patience,
                              device=body.device, workers=body.workers, seed=body.seed,
-                             agent=body.agent.model_dump() if body.agent else None)
+                             agent=body.agent.model_dump() if body.agent else None,
+                             extra_args=body.extra_args)
     if body.agent:
         from ..agent import tuner
 
@@ -132,6 +134,13 @@ def deploy_run(uid: str, request: Request, body: dict | None = None):
     """一键部署（09 号票）：导出 ONNX + 组装模型库 + 导出验证，后台执行。"""
     body = body or {}
     return tsvc.deploy_run(_manager(request), uid, model_lib_dir=body.get("model_lib_dir"))
+
+
+@router.post("/runs/{uid}/clear-last-pt")
+@_maps_errors
+def clear_last_pt(uid: str, request: Request):
+    """Run 级磁盘管理（11 号票）：删 last.pt 留 best.pt。"""
+    return tsvc.clear_last_pt(_manager(request), uid)
 
 
 @router.get("/deployments")

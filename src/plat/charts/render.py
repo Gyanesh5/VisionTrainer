@@ -18,8 +18,21 @@ def _style(ax):
     ax.legend(fontsize=8)
 
 
+def _primary_series(metrics: list[dict]) -> tuple[str, list]:
+    """主指标键按可用性选：mAP50-95(B) → (P) → top1 → 任意 mAP50-95（pose/classify 适配，不画空图）。"""
+    for key in ("metrics/mAP50-95(B)", "metrics/mAP50-95(P)", "metrics/accuracy_top1"):
+        vals = [(m.get("metrics") or {}).get(key) for m in metrics]
+        if any(v is not None for v in vals):
+            return key.split("/")[-1], vals
+    for m in metrics:
+        for k in (m.get("metrics") or {}):
+            if "mAP50-95" in k:
+                return k.split("/")[-1], [(mm.get("metrics") or {}).get(k) for mm in metrics]
+    return "", []
+
+
 def render_run_charts(metrics: list[dict], out_dir: Path) -> list[Path]:
-    """渲染 loss 曲线与主指标曲线两张 PNG（06 号票 Agent 输入用）。"""
+    """渲染 loss 曲线与主指标曲线两张 PNG（06 号票 Agent 输入用；键选择兼容 pose/classify）。"""
     import matplotlib.pyplot as plt
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -29,11 +42,11 @@ def render_run_charts(metrics: list[dict], out_dir: Path) -> list[Path]:
     # 图 1：主指标
     fig, ax = plt.subplots(figsize=(5, 3), dpi=110)
     map50 = [(m.get("metrics") or {}).get("metrics/mAP50(B)") for m in metrics]
-    map5095 = [(m.get("metrics") or {}).get("metrics/mAP50-95(B)") for m in metrics]
     if any(v is not None for v in map50):
         ax.plot(epochs, map50, label="mAP50")
-    if any(v is not None for v in map5095):
-        ax.plot(epochs, map5095, label="mAP50-95")
+    primary_label, primary_vals = _primary_series(metrics)
+    if primary_label and primary_label != "mAP50(B)":
+        ax.plot(epochs, primary_vals, label=primary_label)
     ax.set_xlabel("epoch")
     _style(ax)
     p = out_dir / "chart_map.png"

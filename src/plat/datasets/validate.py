@@ -96,5 +96,7 @@ def validate_dataset(source_dir: Path, task_type: str, classes: list[str]) -> di
             "no_matching_shape": sum(1 for e in entries if "no_matching_shape" in e["problems"]),
             "unknown_labels": sum(1 for e in entries if any(p.startswith("unknown_labels") for p in e["problems"])),
         },
-        "ok": not scan["problems"] and all(not e["problems"] for e in entries),
+        "ok": not scan["problems"] and all(
+            not [p for p in e["problems"] if p != "missing_json"] for e in entries
+        ),  # missing_json = 负样本（设计内），不算问题
     }

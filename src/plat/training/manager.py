@@ -221,6 +221,22 @@ class TrainingManager:
         self._launch(run_id)
 
     def _launch(self, run_id: int) -> None:
+        try:
+            self._launch_inner(run_id)
+        except Exception as exc:  # 启动失败（解释器路径错/入口缺失等）→ run 转 failed，不永卡 running
+            with self.Session() as s:
+                run = s.get(Run, run_id)
+                if run and run.status == "running":
+                    run.status = "failed"
+                    run.error = f"训练进程启动失败：{exc}"
+                    run.finished_at = _now()
+                    s.commit()
+                    task_id = run.task_id
+                    self._aggregate(s, task_id)
+            publish_threadsafe({"type": "queue.updated", "running_uid": None,
+                                "queued_uids": [], "block_reason": f"上次启动失败：{exc}"})
+
+    def _launch_inner(self, run_id: int) -> None:
         with self.Session() as s:
             run = s.get(Run, run_id)
             task = s.get(Task, run.task_id)

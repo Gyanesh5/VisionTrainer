@@ -27,7 +27,9 @@ def _http_err(code: str, message: str, status: int) -> TaskError:
 
 def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_id: str | None = None,
                 epochs: int = 50, imgsz: int = 640, batch: int = 16, patience: int | None = None,
-                device: str = "0", workers: int = 8, seed: int = 42, agent: dict | None = None) -> dict:
+                device: str = "0", workers: int = 8, seed: int = 42, agent: dict | None = None,
+                extra_args: dict | None = None) -> dict:
+    """extra_args：用户设定的基线超参（07 号票），白名单 clamp 后并入 train_args。"""
     from .manager import new_uid
     from plat.db.models import Run, Task
 
@@ -52,6 +54,13 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
                   "device": device, "workers": workers, "seed": seed}
     if patience is not None:
         train_args["patience"] = patience
+    if extra_args:
+        from ..agent.allowlist import clamp_changes
+
+        applied, clamped = clamp_changes(extra_args)
+        if not applied and extra_args:
+            raise _http_err("invalid_args", "基线超参全部不在白名单内", 400)
+        train_args.update(applied)
 
     with manager.Session() as s:
         task = Task(uid=new_uid(), name=name, source="agent" if agent else "manual",
@@ -132,13 +141,43 @@ def get_run(manager, uid: str) -> dict:
         metrics = [{"epoch": m.epoch, **(m.metrics or {})} for m in
                    s.query(EpochMetric).filter(EpochMetric.run_id == r.id).order_by(EpochMetric.epoch).all()]
         run_dir = Path(r.run_dir) if r.run_dir else None
+        eta_seconds = None
+        if r.status == "running" and metrics and r.started_at:
+            done_epochs = max(len({m["epoch"] for m in metrics}), 1)
+            total = int((task.train_args or {}).get("epochs", done_epochs) or done_epochs)
+            avg = (datetime.now() - r.started_at).total_seconds() / done_epochs
+            eta_seconds = max(int(avg * max(total - done_epochs, 0)), 0)
         return {"uid": r.uid, "task_id": r.task_id, "task_name": task.name if task else "",
+                "task_type": _dataset_meta_of_task(task).get("task_type") if task else None,
                 "round_no": r.round_no, "status": r.status, "primary_metric": r.primary_metric,
                 "metrics": metrics, "run_dir": r.run_dir,
+                "started_at": r.started_at.isoformat(timespec="seconds") if r.started_at else None,
+                "eta_seconds": eta_seconds,
                 "progress": manager.current_progress.get(r.id),
                 "artifacts": {"best_pt": r.best_pt, "last_pt": r.last_pt,
                               "training_log": str(run_dir / "training.log") if run_dir else None,
                               "results_csv": str(run_dir / "results.csv") if run_dir else None}}
+
+
+def clear_last_pt(manager, uid: str) -> dict:
+    """Run 级磁盘管理（11 号票）：删 last.pt 留 best.pt。"""
+    from plat.db.models import Run
+
+    with manager.Session() as s:
+        r = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if r is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if r.status in ("running", "stopping"):
+            raise _http_err("state_conflict", "运行中的 Run 不清理", 409)
+    removed = False
+    if r.last_pt and Path(r.last_pt).exists():
+        Path(r.last_pt).unlink()
+        removed = True
+    with manager.Session() as s:
+        row = s.query(Run).filter(Run.uid == uid).one()
+        row.last_pt = None
+        s.commit()
+    return {"run_uid": uid, "removed": removed, "best_pt": r.best_pt}
 
 
 def stop_run(manager, uid: str) -> str:
@@ -223,8 +262,8 @@ def compare_runs(manager, task_id: int) -> dict:
 
 
 def compare_tasks(manager, task_ids: list[int]) -> dict:
-    """跨 Task 对比：各任务最优主指标终值（07 号票）。"""
-    from plat.db.models import Run, Task
+    """跨 Task 对比：各任务最优主指标终值 + 最优 Run 的主指标曲线 + 超参（叠加与 diff 用，06 号票）。"""
+    from plat.db.models import EpochMetric, Run, Task
 
     with manager.Session() as s:
         items = []
@@ -233,16 +272,41 @@ def compare_tasks(manager, task_ids: list[int]) -> dict:
             if t is None:
                 continue
             runs = s.query(Run).filter(Run.task_id == tid).all()
-            best = max((r.primary_metric or 0) for r in runs) if runs else None
+            best = None
+            if runs:
+                best_run = max(runs, key=lambda r: r.primary_metric or 0)
+                if best_run.primary_metric is not None:
+                    best = best_run
+            curve = []
+            if best is not None:
+                curve = [{"epoch": m.epoch, "primary": ((m.metrics or {}).get("metrics") or {}).get(
+                    _primary_key_of_task(t))} for m in
+                    s.query(EpochMetric).filter(EpochMetric.run_id == best.id)
+                    .order_by(EpochMetric.epoch).all()]
             items.append({"id": t.id, "uid": t.uid, "name": t.name, "status": t.status,
-                          "base_model": t.base_model, "runs": len(runs), "best_primary_metric": best})
+                          "base_model": t.base_model, "runs": len(runs), "train_args": t.train_args or {},
+                          "best_run_uid": best.uid if best is not None else None,
+                          "best_primary_metric": best.primary_metric if best else None,
+                          "curve": curve})
         items.sort(key=lambda x: -(x["best_primary_metric"] or 0))
         return {"tasks": items}
 
 
+def _primary_key_of_task(task) -> str:
+    task_type = (_dataset_meta_of_task(task) or {}).get("task_type")
+    return PRIMARY_BY_TASK.get(task_type or "", "metrics/mAP50-95(B)")
+
+
+def _first_present(metrics: dict) -> float | None:
+    for k in ("metrics/mAP50-95(B)", "metrics/mAP50-95(P)", "metrics/accuracy_top1"):
+        if k in metrics:
+            return float(metrics[k])
+    return None
+
+
 def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> dict:
     """复盘报告（07 号票）：指标 JSON + 渲染图 → LLM → report.md 存 Run 目录。"""
-    from ..agent.llm import LLMError, build_client, chat, llm_config
+    from ..agent.llm import LLMError, build_client, chat, llm_config, _content_image
     from ..charts.render import confusion_matrix_png, render_run_charts
 
     detail = get_run(manager, uid)
@@ -262,7 +326,7 @@ def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> 
         "primary_metric": detail["primary_metric"], "epochs": detail["metrics"],
     }, ensure_ascii=False)}]
     for png in charts:
-        content.append({"type": "image_url", "image_url": {"url": "file://" + str(png)}})
+        content.append(_content_image(png))  # API 只认 base64 data URL，file:// 会 400
 
     messages = [
         {"role": "system", "content": "你是 YOLO 训练复盘分析师。基于指标与曲线图输出 markdown 复盘报告，"
@@ -377,7 +441,14 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
     def _watch() -> None:
         log_f = (export_dir / "export.log").open("wb")
         try:
-            proc = SubprocessHandle([manager.s.training_python, manager.s.export_entry, str(payload_path)], log_f)
+            try:
+                proc = SubprocessHandle([manager.s.training_python, manager.s.export_entry, str(payload_path)], log_f)
+            except Exception as exc:  # 解释器/入口路径错 → 线程不裸死，deployment 转 failed
+                with manager.Session() as s2:
+                    dep = s2.get(Deployment, dep_id)
+                    dep.verification = {"status": "failed", "detail": f"导出进程启动失败：{exc}"}
+                    s2.commit()
+                return
             _finalize(proc)
         finally:
             log_f.close()

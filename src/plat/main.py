@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -81,8 +82,24 @@ app = create_app()
 
 
 def main() -> None:
+    import logging
+    from logging.handlers import RotatingFileHandler
+
     server = load_config().get("server", {})
-    uvicorn.run(app, host=server.get("host", "127.0.0.1"), port=server.get("port", 8600))
+    # spec 2.7：logs/plat.log 轮转 10MB×5；访问日志只走控制台
+    log_dir = Path(__file__).parent.parent.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    file_handler = RotatingFileHandler(log_dir / "plat.log", maxBytes=10 * 1024 * 1024,
+                                       backupCount=5, encoding="utf-8")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    root.addHandler(file_handler)
+    access = logging.getLogger("uvicorn.access")
+    access.propagate = False
+    access.addHandler(logging.StreamHandler())
+    uvicorn.run(app, host=server.get("host", "127.0.0.1"), port=server.get("port", 8600),
+                log_config=None)
 
 
 if __name__ == "__main__":

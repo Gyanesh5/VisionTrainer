@@ -19,7 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .allowlist import clamp_changes
-from .llm import LLMError, chat, llm_config, parse_json_loose
+from .llm import LLMError, _content_image, chat, llm_config, parse_json_loose
 
 NO_IMPROVE_EPS = 0.001
 NO_IMPROVE_ROUNDS = 2
@@ -342,7 +342,7 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
                        "hyperparameters 只能包含白名单键；若无改进空间 action=stop。",
     }, ensure_ascii=False)}]
     for png in charts:
-        content.append({"type": "image_url", "image_url": {"url": "file://" + str(png)}})
+        content.append(_content_image(png))  # API 只认 base64 data URL，file:// 会 400
 
     messages = [
         {"role": "system", "content": "你是 YOLO 训练超参调优 Agent。只输出 JSON。"},

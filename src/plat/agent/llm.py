@@ -15,7 +15,8 @@ import httpx
 
 from ..config import load_config
 
-DEFAULT_TIMEOUT = 60.0
+# 多模态（3-4 张 base64 图）+ 推理模型的生成耗时轻松超过 60s，读超时须放宽
+DEFAULT_TIMEOUT = 180.0
 
 
 class LLMError(Exception):
