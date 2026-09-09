@@ -80,14 +80,29 @@ def list_tasks(manager) -> list[dict]:
     from plat.db.models import Run, Task
 
     with manager.Session() as s:
+        queued_runs = s.query(Run).filter(Run.status == "queued").order_by(Run.id).all()
+        queue_pos = {r.task_id: i + 1 for i, r in enumerate(queued_runs)}
         out = []
         for t in s.query(Task).order_by(Task.id.desc()).all():
             runs = s.query(Run).filter(Run.task_id == t.id).all()
             best = max((r.primary_metric or 0) for r in runs) if runs else None
+            # 进度摘要：running → epoch x/y；queued → 排队位次（UI 行内进度用）
+            progress, prog_frac = "", None
+            if runs:
+                last = max(runs, key=lambda r: r.round_no)
+                if last.status == "running":
+                    pg = manager.current_progress.get(last.id) or {}
+                    ep, ep_total = pg.get("epoch"), pg.get("epochs_total")
+                    progress = f"epoch {ep or 0}/{ep_total or '?'}"
+                    if ep and ep_total:
+                        prog_frac = min(ep / ep_total, 1.0)
+                elif last.status == "queued" and t.id in queue_pos:
+                    progress = f"排队第 {queue_pos[t.id]} 位"
             out.append({"id": t.id, "uid": t.uid, "name": t.name, "source": t.source,
                         "status": t.status, "base_model": t.base_model,
                         "runs": len(runs), "primary_metric": best,
                         "agent_state": (t.agent_config or {}).get("state"),
+                        "progress": progress, "prog_frac": prog_frac,
                         "block_reason": manager.block_reason if t.status == "queued" else None})
         return out
 
@@ -478,6 +493,7 @@ def list_deployments(manager) -> dict:
                 .order_by(Deployment.id.desc()).all())
         items = [{"deployment_id": d.id, "run_uid": r.uid, "task_name": t.name,
                   "model_lib_dir": d.model_lib_dir, "verified": d.verified,
+                  "verification": d.verification or {},
                   "created_at": d.created_at.isoformat(timespec="seconds")} for d, r, t in rows]
         hint = ("已部署超过 5 个模型：最早登记的模型可能被桌面端下拉框 LRU 挤出（文件保留，重新加载一次即可）"
                 if len(items) > 5 else None)

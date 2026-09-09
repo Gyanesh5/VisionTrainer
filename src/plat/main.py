@@ -74,7 +74,8 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
 
     if with_ui:
         mount_ui()
-        ui.run_with(app, title="X-Any 训练平台", storage_secret="plat-dev-secret")
+        # language=zh-CN：Quasar 内置组件文案中文化（NiceGUI 自带 zh-CN 语言包）
+        ui.run_with(app, title="X-Any 训练平台", storage_secret="plat-dev-secret", language="zh-CN")
     return app
 
 

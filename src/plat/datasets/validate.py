@@ -15,14 +15,19 @@ def list_images(source_dir: Path) -> list[Path]:
     return sorted(p for p in source_dir.rglob("*") if p.suffix.lower() in IMAGE_EXTS)
 
 
-def scan_entries(source_dir: Path, task_type: str, classes: list[str]) -> dict:
+def scan_entries(source_dir: Path, task_type: str, classes: list[str],
+                 progress=None) -> dict:
     """扫描 source_dir：图片 + 同词干 JSON。返回 entries 与发现的问题清单。
 
     entries 元素：{image(绝对路径 str), label(json 路径 str|None), primary_label(str|None), problems: [...]}
+    progress(cur, total)：每 20 张回调一次（UI 导入进度条用）。
     """
     entries = []
     problems: list[dict] = []
-    for image in list_images(source_dir):
+    images = list_images(source_dir)
+    for i, image in enumerate(images):
+        if progress is not None and (i % 20 == 0 or i == len(images) - 1):
+            progress(i + 1, len(images))
         label_path = image.with_suffix(".json")
         if not label_path.exists():
             # 大小写容错：找同词干 json
@@ -78,9 +83,10 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str]) -> dict:
     return {"entries": entries, "problems": problems}
 
 
-def validate_dataset(source_dir: Path, task_type: str, classes: list[str]) -> dict:
+def validate_dataset(source_dir: Path, task_type: str, classes: list[str],
+                     progress=None) -> dict:
     """五条校验规则 → validation_report dict（05 号票）。"""
-    scan = scan_entries(source_dir, task_type, classes)
+    scan = scan_entries(source_dir, task_type, classes, progress=progress)
     entries = scan["entries"]
     labeled = [e for e in entries if e.get("has_shapes")]
     return {

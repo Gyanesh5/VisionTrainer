@@ -71,8 +71,12 @@ def import_dataset(
     seed: int = 42,
     stratify: bool = False,
     root: Path | None = None,
+    progress_cb=None,
 ) -> dict:
-    """X-AnyLabeling 标注目录 → 托管数据集：探测类别 → 校验 → 首次切分 → 派生结构。"""
+    """X-AnyLabeling 标注目录 → 托管数据集：探测类别 → 校验 → 首次切分 → 派生结构。
+
+    progress_cb(phase, cur, total)：三阶段（扫描标注/校验标注/派生训练结构）进度回调（UI 进度条用）。
+    """
     _slug(name)
     if task_type not in VALID_TASK_TYPES:
         raise DatasetError("invalid_args", f"task_type 必须是 {sorted(VALID_TASK_TYPES)}")
@@ -83,7 +87,10 @@ def import_dataset(
     if ds_dir.exists():
         raise DatasetError("state_conflict", f"数据集已存在：{name}")
 
-    scan = scan_entries(src, task_type, classes=[])  # classes 未定，先探测（探测不看校验问题）
+    def _cb(phase: str):
+        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
+
+    scan = scan_entries(src, task_type, classes=[], progress=_cb("扫描标注"))  # classes 未定，先探测（探测不看校验问题）
     detected: set[str] = set()
     for e in scan["entries"]:
         for s in _read_json(e["label"]).get("shapes", []):
@@ -95,13 +102,13 @@ def import_dataset(
 
     ds_dir.mkdir(parents=True)
     (ds_dir / "classes.txt").write_text("\n".join(classes) + ("\n" if classes else ""), encoding="utf-8")
-    report = validate_dataset(src, task_type, classes)
+    report = validate_dataset(src, task_type, classes, progress=_cb("校验标注"))
     (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
     entries = _entries_with_labels(scan["entries"], classes)
     manifest = build_manifest(entries, ratio, seed, stratify)
     save_manifest(ds_dir, manifest)
-    _derive(ds_dir, manifest, task_type, classes)
+    _derive(ds_dir, manifest, task_type, classes, progress=_cb("派生训练结构"))
 
     meta = {
         "name": name,
@@ -256,7 +263,8 @@ def rename_classes(name: str, classes: list[str], root: Path | None = None) -> d
 
 # ---------------------------------------------------------------- 派生结构
 
-def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str]) -> None:
+def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
+            progress=None) -> None:
     """按 manifest 生成标准 YOLO 训练目录（图片 symlink，标签转换；05 号票零拷贝）。
 
     只清理再生成物（images/labels/class 目录、data.yaml），split_manifest.json 原样保留。
@@ -279,7 +287,9 @@ def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str]) ->
             (derived / "images" / split).mkdir(parents=True, exist_ok=True)
             (derived / "labels" / split).mkdir(parents=True, exist_ok=True)
 
-    for f in manifest["files"]:
+    for i, f in enumerate(manifest["files"]):
+        if progress is not None and (i % 20 == 0 or i == len(manifest["files"]) - 1):
+            progress(i + 1, len(manifest["files"]))
         image = Path(f["image"])
         split = "train" if image.as_posix() in train_set or str(image) in train_set else "val"
         if mode == "classify":
@@ -345,6 +355,7 @@ def _brief(meta: dict) -> dict:
         brief["active_manifest"] = meta.get("active_manifest")
         brief["validation_ok"] = (meta.get("last_validation") or {}).get("ok")
         brief["source_dir"] = meta.get("source_dir")
+        brief["images"] = (meta.get("last_validation") or {}).get("total_images")
     else:
         brief["path"] = meta.get("path")
         brief["has_data_yaml"] = meta.get("has_data_yaml")
