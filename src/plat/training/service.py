@@ -29,7 +29,8 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
                 epochs: int = 50, imgsz: int = 640, batch: int = 16, patience: int | None = None,
                 device: str = "0", workers: int = 8, seed: int = 42, agent: dict | None = None,
                 extra_args: dict | None = None) -> dict:
-    """extra_args：用户设定的基线超参（07 号票），白名单 clamp 后并入 train_args。"""
+    """extra_args：用户设定的训练参数（对齐 ultralytics 官方全量，见 training/params.py），
+    按 params schema 校验后并入 train_args；Agent 调参决策仍走 agent/allowlist.py 白名单。"""
     from .manager import new_uid
     from plat.db.models import Run, Task
 
@@ -55,11 +56,11 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
     if patience is not None:
         train_args["patience"] = patience
     if extra_args:
-        from ..agent.allowlist import clamp_changes
+        from .params import validate_extra_args
 
-        applied, clamped = clamp_changes(extra_args)
-        if not applied and extra_args:
-            raise _http_err("invalid_args", "基线超参全部不在白名单内", 400)
+        applied, errors = validate_extra_args(extra_args)
+        if errors:
+            raise _http_err("invalid_args", "训练参数校验失败: " + "; ".join(errors), 400)
         train_args.update(applied)
 
     with manager.Session() as s:

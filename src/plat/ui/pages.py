@@ -17,6 +17,7 @@ from nicegui import app, ui
 
 from ..config import load_config
 from ..datasets import service as ds
+from ..training.params import GROUPS as PARAM_GROUPS
 
 NAV_ITEMS = [
     ("训练", "model_training", "/"),
@@ -302,6 +303,58 @@ def _wire_model_dataset(model_input, ds_select, reason_label, ok_btn) -> None:
 
     model_input.on_value_change(on_model)
     ds_select.on_value_change(lambda _e: check())
+
+
+def _default_hint(e: dict) -> str:
+    return f"默认 {e['default']}" if e["default"] is not None else "默认不设置"
+
+
+def _render_param_groups() -> dict[str, tuple[dict, object]]:
+    """在当前容器内渲染官方全量训练参数的分组表单，返回 {key: (entry, widget)}。"""
+    param_fields: dict[str, tuple[dict, object]] = {}
+
+    def _add_field(e: dict) -> None:
+        t = e["type"]
+        if t in ("int", "float"):
+            w = ui.number(e["label"], precision=0 if t == "int" else None,
+                          step=0.0001 if t == "float" else 1,
+                          placeholder=_default_hint(e)).classes("flex-1")
+        elif t == "bool":
+            w = ui.select({"": "官方默认", True: "开", False: "关"}, value="",
+                          label=e["label"]).classes("flex-1")
+        elif t == "bool|str":
+            w = ui.select({"": "官方默认", True: "开", False: "关",
+                           **{o: o for o in e["options"]}}, value="",
+                          label=e["label"]).classes("flex-1")
+        elif t == "str" and "options" in e:
+            w = ui.select({"": "官方默认", **{o: o for o in e["options"]}}, value="",
+                          label=e["label"]).classes("flex-1")
+        else:  # 自由字符串 / freeze 的 int|list
+            w = ui.input(e["label"], placeholder=_default_hint(e)).classes("flex-1")
+        param_fields[e["key"]] = (e, w)
+
+    for group_name, entries in PARAM_GROUPS.items():
+        with ui.expansion(f"{group_name}（{len(entries)} 项）").classes("w-full"):
+            # 每行两个字段，与既有表单节奏一致
+            for i in range(0, len(entries), 2):
+                with ui.row().classes("w-full"):
+                    _add_field(entries[i])
+                    if i + 1 < len(entries):
+                        _add_field(entries[i + 1])
+    return param_fields
+
+
+def _collect_params(param_fields: dict[str, tuple[dict, object]]) -> dict:
+    """收集用户显式设置的参数（空/空白 = 不设置，走官方默认）。"""
+    extra: dict = {}
+    for key, (_e, w) in param_fields.items():
+        v = w.value
+        if v is None or v == "":
+            continue
+        if isinstance(v, str) and not v.strip():
+            continue
+        extra[key] = v
+    return extra
 
 
 def _section_header(icon: str, title: str, hint: str = "") -> None:
@@ -592,7 +645,7 @@ def mount() -> None:
 
                     ui.button("删除", color="negative", icon="delete", on_click=_do_del).props("unelevated")
 
-            with ui.dialog() as create_dialog, ui.card().classes("w-[28rem] gap-2"):
+            with ui.dialog() as create_dialog, ui.card().classes("w-[36rem] gap-2 max-h-[85vh] overflow-y-auto"):
                 ui.label("新建训练任务").classes("font-bold")
                 c_name = ui.input("任务名", value=f"训练-{datetime.now():%m%d-%H%M}")
                 managed = {d["name"]: d["name"] for d in ds.list_datasets()
@@ -606,8 +659,15 @@ def mount() -> None:
                     c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("flex-1")
                     c_imgsz = ui.number("imgsz", value=640, precision=0, min=64).classes("flex-1")
                 with ui.row().classes("w-full"):
-                    c_batch = ui.number("batch", value=16, precision=0, min=1).classes("flex-1")
-                    c_device = ui.input("device", value="0").classes("flex-1")
+                    c_batch = ui.number("batch（-1=自动）", value=16, precision=0, min=-1).classes("flex-1")
+                    c_device = ui.input("device（如 0 / 0,1 / cpu）", value="0").classes("flex-1")
+                with ui.row().classes("w-full"):
+                    c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
+                    c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
+                c_patience = ui.number("patience（留空=官方默认 100）", precision=0, min=1).classes("w-full")
+                with ui.expansion("训练参数（对齐 ultralytics 8.4.100 官方全量，留空走官方默认）",
+                                  icon="tune").classes("w-full"):
+                    param_fields = _render_param_groups()
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=create_dialog.close).props("flat")
                     c_ok = ui.button("创建", on_click=lambda: do_create()).props("unelevated")
@@ -627,7 +687,11 @@ def mount() -> None:
                                                  base_model=c_model.value, dataset=c_ds.value,
                                                  epochs=int(c_epochs.value or 50),
                                                  imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16),
-                                                 device=c_device.value or "0")
+                                                 device=c_device.value or "0",
+                                                 workers=int(c_workers.value if c_workers.value is not None else 8),
+                                                 seed=int(c_seed.value if c_seed.value is not None else 42),
+                                                 patience=int(c_patience.value) if c_patience.value is not None else None,
+                                                 extra_args=_collect_params(param_fields) or None)
                         create_dialog.close()
                         ui.notify(f"任务已排队：{brief['uid']}")
                         refresh()
@@ -1433,8 +1497,8 @@ def mount() -> None:
                 refresh()
                 render_detail()
 
-            # ── 新建对话框：预设档位 + 目标模板 + 基线超参折叠 + 基模型联动
-            with ui.dialog() as create_dialog, ui.card().classes("w-[30rem] gap-2"):
+            # ── 新建对话框：预设档位 + 目标模板 + 官方全量训练参数（分组折叠） + 基模型联动
+            with ui.dialog() as create_dialog, ui.card().classes("w-[36rem] gap-2 max-h-[85vh] overflow-y-auto"):
                 ui.label("新建 Agent 调参任务").classes("font-bold")
                 c_name = ui.input("任务名", value=f"调参-{datetime.now():%m%d-%H%M}")
                 managed = {d["name"]: d["name"] for d in ds.list_datasets()
@@ -1452,20 +1516,22 @@ def mount() -> None:
                     c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("w-28")
                 with ui.row().classes("w-full"):
                     c_imgsz = ui.number("imgsz", value=640, precision=0, min=64).classes("flex-1")
-                    c_batch = ui.number("batch", value=16, precision=0, min=1).classes("flex-1")
+                    c_batch = ui.number("batch（-1=自动）", value=16, precision=0, min=-1).classes("flex-1")
+                with ui.row().classes("w-full"):
+                    c_device = ui.input("device（如 0 / 0,1 / cpu）", value="0").classes("flex-1")
+                    c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
+                with ui.row().classes("w-full"):
+                    c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
+                    c_patience = ui.number("patience（留空=官方默认 100）", precision=0, min=1).classes("flex-1")
                 with ui.row().classes("w-full"):
                     c_rounds = ui.number("最大轮数", value=5, precision=0, min=1).classes("flex-1")
                     c_approval = ui.select({"manual": "每轮人工审批", "auto": "自动直通"},
                                            value="manual", label="审批模式").classes("flex-1")
-                with ui.expansion("基线超参（可选，白名单内）", icon="tune").classes("w-full"):
-                    ui.label("留空 = 走 ultralytics 默认；首轮之后的调整由 Agent 决策").classes("text-[11px] opacity-50")
-                    with ui.row().classes("w-full"):
-                        a_lr0 = ui.number("lr0", step=0.001).classes("flex-1")
-                        a_momentum = ui.number("momentum", step=0.01).classes("flex-1")
-                    with ui.row().classes("w-full"):
-                        a_wd = ui.number("weight_decay", step=0.0001).classes("flex-1")
-                        a_mosaic = ui.number("mosaic", step=0.1).classes("flex-1")
-                        a_patience = ui.number("patience", precision=0).classes("flex-1")
+                with ui.expansion("训练参数（对齐 ultralytics 8.4.100 官方全量，留空走官方默认）",
+                                  icon="tune").classes("w-full"):
+                    ui.label("epoch/imgsz/batch 等顶层参数在上方；首轮之后的调整由 Agent 在其白名单内决策"
+                             ).classes("text-[11px] opacity-50")
+                    param_fields = _render_param_groups()
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=create_dialog.close).props("flat")
                     c_ok = ui.button("创建", icon="smart_toy", on_click=lambda: do_create()).props("unelevated")
@@ -1478,16 +1544,16 @@ def mount() -> None:
                     if not c_ds.value:
                         ui.notify("请选择数据集", type="warning")
                         return
-                    extra = {}
-                    for key, field in (("lr0", a_lr0), ("momentum", a_momentum),
-                                       ("weight_decay", a_wd), ("mosaic", a_mosaic), ("patience", a_patience)):
-                        if field.value is not None:
-                            extra[key] = field.value
+                    extra = _collect_params(param_fields)
                     try:
                         brief = tsvc.create_task(get_manager(), name=c_name.value.strip(),
                                                  base_model=c_model.value, dataset=c_ds.value,
                                                  epochs=int(c_epochs.value or 3),
                                                  imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16),
+                                                 patience=int(c_patience.value) if c_patience.value is not None else None,
+                                                 device=c_device.value or "0",
+                                                 workers=int(c_workers.value if c_workers.value is not None else 8),
+                                                 seed=int(c_seed.value if c_seed.value is not None else 42),
                                                  extra_args=extra or None,
                                                  agent={"max_rounds": int(c_rounds.value or 5),
                                                         "approval": c_approval.value, "objective": c_obj.value or ""})
