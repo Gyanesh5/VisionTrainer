@@ -321,39 +321,71 @@ def _default_hint(e: dict) -> str:
     return f"默认 {e['default']}" if e["default"] is not None else "默认不设置"
 
 
-def _render_param_groups() -> dict[str, tuple[dict, object]]:
-    """在当前容器内渲染官方全量训练参数的分组表单，返回 {key: (entry, widget)}。"""
+def _param_label(e: dict) -> tuple[str, str]:
+    """label「key（说明）」拆两段：表单只显 key（3 列网格下不换行），完整说明进 tooltip。"""
+    label = e["label"]
+    key = e["key"]
+    desc = label[len(key):].strip("（）()") if label.startswith(key) else label
+    full = f"{key} — {desc}｜{_default_hint(e)}" if desc else f"{key}｜{_default_hint(e)}"
+    return key, full
+
+
+def _render_param_groups(on_change=None) -> tuple[dict, object]:
+    """官方全量训练参数 → 5 组 tabs（一次点击切换，替代套娃折叠），返回 (param_fields, 计数徽章)。
+
+    on_change：任一参数变化时回调（供摘要条/计数联动）。
+    """
     param_fields: dict[str, tuple[dict, object]] = {}
+    counter = ui.badge("已设置 0 项").props("outline color=grey").style("font-size:10px")
+
+    def _recount() -> None:
+        n = len(_collect_params(param_fields))
+        counter.set_text(f"已设置 {n} 项")
+        if n:
+            counter.props("color=blue", remove="color=grey")
+        else:
+            counter.props("color=grey", remove="color=blue")
+        if on_change is not None:
+            on_change()
 
     def _add_field(e: dict) -> None:
         t = e["type"]
+        short, full = _param_label(e)
         if t in ("int", "float"):
-            w = ui.number(e["label"], precision=0 if t == "int" else None,
+            w = ui.number(short, precision=0 if t == "int" else None,
                           step=0.0001 if t == "float" else 1,
                           placeholder=_default_hint(e)).classes("flex-1")
         elif t == "bool":
             w = ui.select({"": "官方默认", True: "开", False: "关"}, value="",
-                          label=e["label"]).classes("flex-1")
+                          label=short).classes("flex-1")
         elif t == "bool|str":
             w = ui.select({"": "官方默认", True: "开", False: "关",
                            **{o: o for o in e["options"]}}, value="",
-                          label=e["label"]).classes("flex-1")
+                          label=short).classes("flex-1")
         elif t == "str" and "options" in e:
             w = ui.select({"": "官方默认", **{o: o for o in e["options"]}}, value="",
-                          label=e["label"]).classes("flex-1")
+                          label=short).classes("flex-1")
         else:  # 自由字符串 / freeze 的 int|list
-            w = ui.input(e["label"], placeholder=_default_hint(e)).classes("flex-1")
+            w = ui.input(short, placeholder=_default_hint(e)).classes("flex-1")
+        with w:
+            ui.tooltip(full)
+        w.on_value_change(lambda _e: _recount())
         param_fields[e["key"]] = (e, w)
 
-    for group_name, entries in PARAM_GROUPS.items():
-        with ui.expansion(f"{group_name}（{len(entries)} 项）").classes("w-full"):
-            # 每行两个字段，与既有表单节奏一致
-            for i in range(0, len(entries), 2):
-                with ui.row().classes("w-full"):
-                    _add_field(entries[i])
-                    if i + 1 < len(entries):
-                        _add_field(entries[i + 1])
-    return param_fields
+    with ui.tabs().props("dense inline-label outside-arrows").classes("w-full text-xs") as tabs:
+        for group_name, entries in PARAM_GROUPS.items():
+            ui.tab(group_name, icon="category").props("no-caps")
+    with ui.tab_panels(tabs, value=next(iter(PARAM_GROUPS))).classes("w-full"):
+        for group_name, entries in PARAM_GROUPS.items():
+            with ui.tab_panel(group_name).classes("q-pa-sm"):
+                for i in range(0, len(entries), 3):
+                    with ui.row().classes("w-full"):
+                        _add_field(entries[i])
+                        if i + 1 < len(entries):
+                            _add_field(entries[i + 1])
+                        if i + 2 < len(entries):
+                            _add_field(entries[i + 2])
+    return param_fields, counter
 
 
 def _collect_params(param_fields: dict[str, tuple[dict, object]]) -> dict:
@@ -376,6 +408,16 @@ def _section_header(icon: str, title: str, hint: str = "") -> None:
         ui.label(title).classes("text-base font-semibold")
         if hint:
             ui.label(hint).classes("text-xs opacity-40")
+    ui.separator().classes("q-mt-xs q-mb-sm")
+
+
+def _form_section(icon: str, title: str, hint: str = "") -> None:
+    """对话框内表单分区：图标 + 小节标题 + 细分割线（打破同质输入框堆叠的呆板感）。"""
+    with ui.row().classes("w-full items-center gap-2 q-mt-md q-mb-none"):
+        ui.icon(icon, size="15px").classes("opacity-50")
+        ui.label(title).classes("text-xs font-semibold")
+        if hint:
+            ui.label(hint).classes("text-[10px] opacity-40")
     ui.separator().classes("q-mt-xs q-mb-sm")
 
 
@@ -658,32 +700,84 @@ def mount() -> None:
 
                     ui.button("删除", color="negative", icon="delete", on_click=_do_del).props("unelevated")
 
-            with ui.dialog() as create_dialog, ui.card().classes("w-[36rem] gap-2 max-h-[85vh] overflow-y-auto"):
-                ui.label("新建训练任务").classes("font-bold")
-                c_name = ui.input("任务名", value=f"训练-{datetime.now():%m%d-%H%M}")
-                managed = {d["name"]: d["name"] for d in ds.list_datasets()
-                           if d["form"] == "managed" and d.get("active_manifest")}
-                c_ds = ui.select(managed or {"": "（暂无托管数据集，请先到数据集页导入）"}, label="数据集",
-                                 with_input=True)
-                c_model = ui.input("基模型（随数据集任务类型自动带出）", value="yolo11n")
-                c_reason = ui.label("").classes("text-xs min-h-4")
-                c_reason.classes("text-red-500")
-                with ui.row().classes("w-full"):
-                    c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("flex-1")
-                    c_imgsz = ui.number("imgsz", value=640, precision=0, min=64).classes("flex-1")
-                with ui.row().classes("w-full"):
-                    c_batch = ui.number("batch（-1=自动）", value=16, precision=0, min=-1).classes("flex-1")
-                    c_device = ui.input("device（如 0 / 0,1 / cpu）", value="0").classes("flex-1")
-                with ui.row().classes("w-full"):
-                    c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
-                    c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
-                c_patience = ui.number("patience（留空=官方默认 100）", precision=0, min=1).classes("w-full")
-                with ui.expansion("训练参数（对齐 ultralytics 8.4.100 官方全量，留空走官方默认）",
-                                  icon="tune").classes("w-full"):
-                    param_fields = _render_param_groups()
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("取消", on_click=create_dialog.close).props("flat")
-                    c_ok = ui.button("创建", on_click=lambda: do_create()).props("unelevated")
+            with ui.dialog() as create_dialog:
+              with ui.card().classes("w-[40rem] p-0 gap-0"):
+                with ui.row().classes("w-full items-center q-px-md q-pt-md pb-none"):
+                    ui.label("新建训练任务").classes("text-lg font-bold")
+                    ui.space()
+                    ui.label("创建后进入单飞队列，完成自动出指标").classes("text-[10px] opacity-40")
+                with ui.column().classes("q-px-md max-h-[64vh] overflow-y-auto gap-1 pb-2"):
+                    # ── 分区 1：数据与模型
+                    _form_section("dataset", "数据与模型")
+                    c_name = ui.input("任务名", value=f"训练-{datetime.now():%m%d-%H%M}").classes("w-full")
+                    managed = {d["name"]: d["name"] for d in ds.list_datasets()
+                               if d["form"] == "managed" and d.get("active_manifest")}
+                    c_ds = ui.select(managed or {"": "（暂无托管数据集，请先到数据集页导入）"}, label="数据集",
+                                     with_input=True).classes("w-full")
+                    c_model = ui.input("基模型", value="yolo11n").classes("w-full")
+                    with c_model:
+                        ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
+                    c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
+                    # ── 分区 2：训练核心（档位化高频参数）
+                    _form_section("speed", "训练核心")
+                    with ui.row().classes("w-full items-center gap-3 flex-nowrap"):
+                        c_ep_toggle = ui.toggle({3: "3 轮", 10: "10 轮", 50: "50 轮", 150: "150 轮"},
+                                                value=50).props("dense no-caps")
+                        ui.space()
+                        c_epochs = ui.number("epochs", value=50, precision=0, min=1, step=1).classes("w-24")
+                    with ui.row().classes("w-full"):
+                        c_imgsz = ui.select({320: "320", 416: "416", 640: "640", 800: "800",
+                                             1024: "1024", 1280: "1280"}, value=640,
+                                            label="imgsz", with_input=True).classes("flex-1")
+                        c_batch = ui.select({-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
+                                            value=16, label="batch", with_input=True).classes("flex-1")
+                    with ui.row().classes("w-full"):
+                        c_device = ui.input("device", value="0", placeholder="0 / 0,1 / cpu").classes("flex-1")
+                        c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
+                    with ui.row().classes("w-full"):
+                        c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
+                        c_patience = ui.number("patience", precision=0, min=1,
+                                               placeholder="默认 100").classes("flex-1")
+
+                    def _ep_from_toggle(e) -> None:
+                        if e.value is not None and int(c_epochs.value or 0) != int(e.value):
+                            c_epochs.set_value(int(e.value))
+
+                    def _ep_from_number(e) -> None:
+                        v = int(e.value) if e.value else None
+                        want = v if v in (3, 10, 50, 150) else None
+                        if c_ep_toggle.value != want:
+                            c_ep_toggle.set_value(want)
+
+                    c_ep_toggle.on_value_change(_ep_from_toggle)
+                    c_epochs.on_value_change(_ep_from_number)
+
+                    # ── 分区 3：高级参数（tabs 一次点开，替代套娃折叠）
+                    def _refresh_summary() -> None:
+                        n = len(_collect_params(param_fields))
+                        parts = [c_model.value or "?", c_ds.value or "未选数据集",
+                                 f"{int(c_epochs.value or 0)} epoch", f"imgsz {c_imgsz.value or 640}",
+                                 f"batch {c_batch.value if c_batch.value is not None else 16}",
+                                 f"GPU {c_device.value or '0'}"]
+                        if n:
+                            parts.append(f"高级参数 {n} 项")
+                        summary_label.set_text("🚀 将排队：" + " · ".join(str(x) for x in parts))
+
+                    with ui.expansion("高级训练参数", icon="tune",
+                                      caption="ultralytics 8.4.100 官方全量 · 留空走官方默认").classes("w-full"):
+                        param_fields, _p_counter = _render_param_groups(on_change=_refresh_summary)
+                    for _w in (c_name, c_ds, c_model, c_epochs, c_imgsz, c_batch, c_device):
+                        _w.on_value_change(lambda _e: _refresh_summary())
+
+                # ── 固定 footer：摘要 + 按钮（长表单滚动时始终可见）
+                with ui.column().classes("q-pa-md pt-2 gap-2").style(
+                        "border-top:1px solid rgba(128,128,128,.25)"):
+                    with ui.row().classes("w-full items-center gap-2 bg-blue-1 rounded-borders q-pa-sm"):
+                        summary_label = ui.label("").classes("text-xs flex-1")
+                    _refresh_summary()
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button("取消", on_click=create_dialog.close).props("flat")
+                        c_ok = ui.button("创建任务", icon="add", on_click=lambda: do_create()).props("unelevated")
                 _wire_model_dataset(c_model, c_ds, c_reason, c_ok)
 
                 def do_create() -> None:
@@ -1512,44 +1606,74 @@ def mount() -> None:
                 refresh()
                 render_detail()
 
-            # ── 新建对话框：预设档位 + 目标模板 + 官方全量训练参数（分组折叠） + 基模型联动
-            with ui.dialog() as create_dialog, ui.card().classes("w-[36rem] gap-2 max-h-[85vh] overflow-y-auto"):
-                ui.label("新建 Agent 调参任务").classes("font-bold")
-                c_name = ui.input("任务名", value=f"调参-{datetime.now():%m%d-%H%M}")
-                managed = {d["name"]: d["name"] for d in ds.list_datasets()
-                           if d["form"] == "managed" and d.get("active_manifest")}
-                c_ds = ui.select(managed or {"": "（暂无托管数据集，请先到数据集页导入）"}, label="数据集",
-                                 with_input=True)
-                c_model = ui.input("基模型（随数据集任务类型自动带出）", value="yolo11n")
-                c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
-                c_obj = ui.select(["提升小目标召回", "压制误检", "收敛过拟合", "提升整体 mAP"],
-                                  label="优化目标（可输入自定义）", with_input=True)
-                with ui.row().classes("w-full"):
-                    c_preset = ui.select({3: "快验（3 epoch）", 50: "标准（50 epoch）", 150: "深挖（150 epoch）"},
-                                         value=50, label="每轮 epochs 档位",
-                                         on_change=lambda e: c_epochs.set_value(int(e.value))).classes("flex-1")
-                    c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("w-28")
-                with ui.row().classes("w-full"):
-                    c_imgsz = ui.number("imgsz", value=640, precision=0, min=64).classes("flex-1")
-                    c_batch = ui.number("batch（-1=自动）", value=16, precision=0, min=-1).classes("flex-1")
-                with ui.row().classes("w-full"):
-                    c_device = ui.input("device（如 0 / 0,1 / cpu）", value="0").classes("flex-1")
-                    c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
-                with ui.row().classes("w-full"):
-                    c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
-                    c_patience = ui.number("patience（留空=官方默认 100）", precision=0, min=1).classes("flex-1")
-                with ui.row().classes("w-full"):
-                    c_rounds = ui.number("最大轮数", value=5, precision=0, min=1).classes("flex-1")
-                    c_approval = ui.select({"manual": "每轮人工审批", "auto": "自动直通"},
-                                           value="manual", label="审批模式").classes("flex-1")
-                with ui.expansion("训练参数（对齐 ultralytics 8.4.100 官方全量，留空走官方默认）",
-                                  icon="tune").classes("w-full"):
-                    ui.label("epoch/imgsz/batch 等顶层参数在上方；首轮之后的调整由 Agent 在其白名单内决策"
-                             ).classes("text-[11px] opacity-50")
-                    param_fields = _render_param_groups()
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("取消", on_click=create_dialog.close).props("flat")
-                    c_ok = ui.button("创建", icon="smart_toy", on_click=lambda: do_create()).props("unelevated")
+            # ── 新建对话框：分区 + 档位 + 官方全量参数 tabs + 基模型联动（与训练页同节奏）
+            with ui.dialog() as create_dialog:
+              with ui.card().classes("w-[40rem] p-0 gap-0"):
+                with ui.row().classes("w-full items-center q-px-md q-pt-md pb-none"):
+                    ui.label("新建 Agent 调参任务").classes("text-lg font-bold")
+                    ui.space()
+                    ui.label("LLM 逐轮调参 · 每轮结束人工审批放行").classes("text-[10px] opacity-40")
+                with ui.column().classes("q-px-md max-h-[64vh] overflow-y-auto gap-1 pb-2"):
+                    _form_section("dataset", "数据与模型")
+                    c_name = ui.input("任务名", value=f"调参-{datetime.now():%m%d-%H%M}").classes("w-full")
+                    managed = {d["name"]: d["name"] for d in ds.list_datasets()
+                               if d["form"] == "managed" and d.get("active_manifest")}
+                    c_ds = ui.select(managed or {"": "（暂无托管数据集，请先到数据集页导入）"}, label="数据集",
+                                     with_input=True).classes("w-full")
+                    c_model = ui.input("基模型", value="yolo11n").classes("w-full")
+                    with c_model:
+                        ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
+                    c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
+                    c_obj = ui.select(["提升小目标召回", "压制误检", "收敛过拟合", "提升整体 mAP"],
+                                      label="优化目标（可输入自定义）", with_input=True).classes("w-full")
+                    _form_section("speed", "每轮训练核心")
+                    with ui.row().classes("w-full items-center gap-3 flex-nowrap"):
+                        c_preset = ui.toggle({3: "3 轮", 50: "50 轮", 150: "150 轮"},
+                                             value=50).props("dense no-caps")
+                        ui.space()
+                        c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("w-24")
+                    with ui.row().classes("w-full"):
+                        c_imgsz = ui.select({320: "320", 416: "416", 640: "640", 800: "800",
+                                             1024: "1024", 1280: "1280"}, value=640,
+                                            label="imgsz", with_input=True).classes("flex-1")
+                        c_batch = ui.select({-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
+                                            value=16, label="batch", with_input=True).classes("flex-1")
+                    with ui.row().classes("w-full"):
+                        c_device = ui.input("device", value="0", placeholder="0 / 0,1 / cpu").classes("flex-1")
+                        c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
+                    with ui.row().classes("w-full"):
+                        c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
+                        c_patience = ui.number("patience", precision=0, min=1,
+                                               placeholder="默认 100").classes("flex-1")
+
+                    def _preset_to_epochs(e) -> None:
+                        if e.value is not None and int(c_epochs.value or 0) != int(e.value):
+                            c_epochs.set_value(int(e.value))
+
+                    def _epochs_to_preset(e) -> None:
+                        v = int(e.value) if e.value else None
+                        want = v if v in (3, 50, 150) else None
+                        if c_preset.value != want:
+                            c_preset.set_value(want)
+
+                    c_preset.on_value_change(_preset_to_epochs)
+                    c_epochs.on_value_change(_epochs_to_preset)
+
+                    _form_section("smart_toy", "调参循环")
+                    with ui.row().classes("w-full"):
+                        c_rounds = ui.number("最大轮数", value=5, precision=0, min=1).classes("flex-1")
+                        c_approval = ui.select({"manual": "每轮人工审批", "auto": "自动直通"},
+                                               value="manual", label="审批模式").classes("flex-1")
+                    with ui.expansion("高级训练参数", icon="tune",
+                                      caption="ultralytics 8.4.100 官方全量 · 留空走官方默认").classes("w-full"):
+                        ui.label("首轮基线；后续轮次的调整由 Agent 在其白名单内决策"
+                                 ).classes("text-[11px] opacity-50")
+                        param_fields, _p_counter = _render_param_groups()
+                with ui.column().classes("q-pa-md pt-2 gap-2").style(
+                        "border-top:1px solid rgba(128,128,128,.25)"):
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button("取消", on_click=create_dialog.close).props("flat")
+                        c_ok = ui.button("创建任务", icon="smart_toy", on_click=lambda: do_create()).props("unelevated")
                 _wire_model_dataset(c_model, c_ds, c_reason, c_ok)
 
                 def do_create() -> None:
