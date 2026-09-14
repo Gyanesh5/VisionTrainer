@@ -59,6 +59,12 @@ CHART_PALETTE = ["#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#dc2626", "#0891b2
 CHART_TEXT = "#94a3b8"  # 深浅两色模式下均可读的中性文字色
 
 
+def _legend() -> dict:
+    """图例统一：滚动模式 + 小图标 + 小字（窄容器下图例项多时不再互相重叠）。"""
+    return {"top": 0, "type": "scroll", "itemWidth": 14, "itemHeight": 8,
+            "textStyle": {"color": CHART_TEXT, "fontSize": 10}}
+
+
 # ---------------------------------------------------------------- 图表构造
 
 def _vals(metrics: list[dict], key: str) -> list:
@@ -95,7 +101,7 @@ def _chart_options(metrics: list[dict], task_type: str | None = None) -> dict:
         "color": CHART_PALETTE,
         "textStyle": {"color": CHART_TEXT},
         "grid": _base_grid(),
-        "legend": {"top": 0, "textStyle": {"color": CHART_TEXT}},
+        "legend": _legend(),
         "xAxis": _axis_text({"type": "category", "data": [m["epoch"] for m in metrics],
                              "name": "epoch", "nameLocation": "middle", "nameGap": 22}),
         "yAxis": _axis_text({"type": "value", "scale": True}),
@@ -119,7 +125,7 @@ def _loss_options(metrics: list[dict]) -> dict:
         "color": CHART_PALETTE,
         "textStyle": {"color": CHART_TEXT},
         "grid": _base_grid(),
-        "legend": {"top": 0, "textStyle": {"color": CHART_TEXT}},
+        "legend": _legend(),
         "xAxis": _axis_text({"type": "category", "data": [m["epoch"] for m in metrics],
                              "name": "epoch", "nameLocation": "middle", "nameGap": 22}),
         "yAxis": [_axis_text({"type": "value", "scale": True}),
@@ -140,7 +146,7 @@ def _overlay_options(curves: list[tuple[str, list[dict]]]) -> dict:
         "color": CHART_PALETTE,
         "textStyle": {"color": CHART_TEXT},
         "grid": _base_grid(),
-        "legend": {"top": 0, "type": "scroll", "textStyle": {"color": CHART_TEXT}},
+        "legend": _legend(),
         "xAxis": _axis_text({"type": "category", "data": list(range(1, epochs + 1)),
                              "name": "epoch", "nameLocation": "middle", "nameGap": 22}),
         "yAxis": _axis_text({"type": "value", "scale": True}),
@@ -217,9 +223,14 @@ def _update_rows(table, rows: list[dict]) -> None:
 
 
 def _badge_cell(field: str) -> str:
-    """通用状态徽章单元格槽：行数据需带 {field}_label / {field}_color。"""
-    return (f'<q-badge :color="props.row.{field}_color" :label="props.row.{field}_label" '
-            'class="q-py-xs" style="font-size:10px" />')
+    """通用状态徽章单元格槽：行数据需带 {field}_label / {field}_color。
+
+    Quasar 的 body-cell-* 槽输出的是整个单元格——内容必须自带 <q-td :props> 包裹，
+    否则元素会游离到 <tr> 直接子级（不占列位，整行列错位；2026-09-14 真坑）。
+    """
+    return ('<q-td :props="props">'
+            f'<q-badge :color="props.row.{field}_color" :label="props.row.{field}_label" '
+            'class="q-py-xs" style="font-size:10px" /></q-td>')
 
 
 def _no_data_cell(icon: str, text: str) -> str:
@@ -230,11 +241,12 @@ def _no_data_cell(icon: str, text: str) -> str:
 
 def _progress_cell() -> str:
     """行内进度槽：运行中 → 进度条 + epoch x/y；排队 → 位次/占用原因。"""
-    return ('<div class="column" style="min-width:96px">'
+    return ('<q-td :props="props">'
+            '<div class="column" style="min-width:96px">'
             '<q-linear-progress v-if="props.row.prog_frac != null" :value="props.row.prog_frac" '
             'size="6px" color="blue" track-color="grey-4" class="q-mb-xs" />'
             '<div class="text-[11px]" style="opacity:.75">'
-            "{{ props.row.progress || props.row.block_reason || '—' }}</div></div>")
+            "{{ props.row.progress || props.row.block_reason || '—' }}</div></div></q-td>")
 
 
 def _on_row_click(table, select) -> None:
@@ -405,7 +417,7 @@ def _nav_rail(active: str) -> None:
                 btn.classes("text-white bg-blue-600/30" if title == active else "text-gray-400")
                 with btn:
                     ui.tooltip(title)
-                ui.label(title).classes("text-[10px] " + ("text-blue-300" if title == active else "text-gray-500"))
+                ui.label(title).classes("text-[11px] " + ("text-blue-200" if title == active else "text-gray-400"))
         ui.space()
         theme_btn = ui.button(icon="contrast", on_click=_toggle_dark).props("flat round dense").classes("text-gray-400")
         with theme_btn:
@@ -501,22 +513,23 @@ def mount() -> None:
                 run = tsvc.get_run(get_manager(), uid)
                 status_label, status_color = RUN_STATUS.get(run["status"], (run["status"], "grey"))
                 with detail, ui.card().classes("w-full gap-2"):
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(f"Run {uid}").classes("text-lg font-bold")
-                        ui.badge(status_label).props(f"color={status_color} outline").style("font-size:10px")
-                        ui.label(f"{task['name']} · 轮 {run['round_no']}").classes("text-xs opacity-60")
-                        ui.space()
-                        # 操作按钮主次分明：正向动作靠左凸出，危险动作最右
-                        if run["status"] == "done":
-                            ui.button("部署到标注端", icon="rocket_launch",
-                                      on_click=lambda: do_deploy(uid)).props("unelevated dense")
-                        if run["status"] in ("done", "failed", "cancelled"):
-                            ui.button("续训", icon="replay", on_click=lambda: do_resume(uid)).props("outline dense")
-                        if run["status"] in ("queued", "running"):
-                            ui.button("停止", icon="stop", color="negative",
-                                      on_click=lambda: do_stop(uid)).props("outline dense")
-                        ui.button("删除任务", icon="delete", color="negative",
-                                  on_click=lambda: open_del(task, task_id)).props("outline dense").classes("ml-4")
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                        with ui.row().classes("items-center gap-2 flex-1 min-w-56 flex-wrap"):
+                            ui.label(f"Run {uid}").classes("text-lg font-bold")
+                            ui.badge(status_label).props(f"color={status_color} outline").style("font-size:10px")
+                            ui.label(f"{task['name']} · 轮 {run['round_no']}").classes("text-xs opacity-60")
+                        # 操作按钮独立分组：右对齐、窄视口允许换行；危险动作最右（gap 分隔）
+                        with ui.row().classes("items-center gap-2 flex-wrap justify-end"):
+                            if run["status"] == "done":
+                                ui.button("部署到标注端", icon="rocket_launch",
+                                          on_click=lambda: do_deploy(uid)).props("unelevated dense")
+                            if run["status"] in ("done", "failed", "cancelled"):
+                                ui.button("续训", icon="replay", on_click=lambda: do_resume(uid)).props("outline dense")
+                            if run["status"] in ("queued", "running"):
+                                ui.button("停止", icon="stop", color="negative",
+                                          on_click=lambda: do_stop(uid)).props("outline dense")
+                            ui.button("删除任务", icon="delete", color="negative",
+                                      on_click=lambda: open_del(task, task_id)).props("outline dense")
                     if run.get("error"):
                         ui.label(run["error"]).classes("text-xs text-red-600 break-all")
                     prog = run.get("progress")
@@ -529,11 +542,11 @@ def mount() -> None:
                             f"batch {prog.get('batch')}/{prog.get('batches_total')} · {_fmt_eta(run.get('eta_seconds'))}")
                     else:
                         prog_bar.set_visibility(False)
-                    with ui.row().classes("w-full gap-4 items-start"):
-                        with ui.column().classes("flex-1 min-w-0"):
+                    with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                        with ui.column().classes("flex-1 min-w-0 basis-96"):
                             ui.label("主指标曲线").classes("text-xs font-semibold opacity-70")
                             chart = ui.echart(_chart_options(run["metrics"], run.get("task_type"))).classes("w-full h-52")
-                        with ui.column().classes("flex-1 min-w-0"):
+                        with ui.column().classes("flex-1 min-w-0 basis-96"):
                             ui.label("Loss / 学习率").classes("text-xs font-semibold opacity-70")
                             chart_loss = ui.echart(_loss_options(run["metrics"])).classes("w-full h-52")
                     with ui.expansion("产物与日志", icon="folder").classes("w-full"):
@@ -789,24 +802,25 @@ def mount() -> None:
                 task_zh = TASK_TYPE_ZH.get(meta["task_type"], meta["task_type"])
                 ok = (meta.get("last_validation") or {}).get("ok")
                 with detail, ui.card().classes("w-full gap-2"):
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(meta["name"]).classes("text-lg font-bold")
-                        ui.badge(task_zh).props("outline").style("font-size:10px")
-                        ui.badge(FORM_ZH.get(meta["form"], meta["form"])).props("outline").style("font-size:10px")
-                        if ok is not None:
-                            ui.badge("通过" if ok else "有问题").props(
-                                f"color={'green' if ok else 'red'} outline").style("font-size:10px")
-                        ui.space()
-                        if meta["form"] == "managed":
-                            ui.button("用此数据集训练", icon="model_training",
-                                      on_click=lambda: ui.navigate.to(f"/?dataset={name}")).props("unelevated dense")
-                            val_btn = ui.button("重新校验", icon="fact_check", on_click=lambda: do_validate(name))
-                            val_btn.props("outline dense")
-                            res_btn = ui.button("重切分", icon="call_split", on_click=lambda: open_resplit(meta))
-                            res_btn.props("outline dense")
-                        del_btn = ui.button("删除", icon="delete", color="negative",
-                                            on_click=lambda: open_delete(meta))
-                        del_btn.props("outline dense").classes("ml-4")
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                        with ui.row().classes("items-center gap-2 flex-1 min-w-56 flex-wrap"):
+                            ui.label(meta["name"]).classes("text-lg font-bold")
+                            ui.badge(task_zh).props("outline").style("font-size:10px")
+                            ui.badge(FORM_ZH.get(meta["form"], meta["form"])).props("outline").style("font-size:10px")
+                            if ok is not None:
+                                ui.badge("通过" if ok else "有问题").props(
+                                    f"color={'green' if ok else 'red'} outline").style("font-size:10px")
+                        with ui.row().classes("items-center gap-2 flex-wrap justify-end"):
+                            if meta["form"] == "managed":
+                                ui.button("用此数据集训练", icon="model_training",
+                                          on_click=lambda: ui.navigate.to(f"/?dataset={name}")).props("unelevated dense")
+                                val_btn = ui.button("重新校验", icon="fact_check", on_click=lambda: do_validate(name))
+                                val_btn.props("outline dense")
+                                res_btn = ui.button("重切分", icon="call_split", on_click=lambda: open_resplit(meta))
+                                res_btn.props("outline dense")
+                            del_btn = ui.button("删除", icon="delete", color="negative",
+                                                on_click=lambda: open_delete(meta))
+                            del_btn.props("outline dense")
                     if meta["form"] == "managed":
                         with ui.row().classes("w-full gap-2 items-start"):
                             ui.label("来源目录").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
@@ -1159,8 +1173,9 @@ def mount() -> None:
                 tbl = ui.table(columns=cols, rows=rows, row_key="param")
                 _style_table(tbl)
                 tbl.classes("text-xs")
-                diff_cell = ('<span :class="props.row.diff ? \'text-red text-weight-medium\' : \'\'">'
-                             "{{ props.value }}</span>")
+                diff_cell = ('<q-td :props="props"><span :class="props.row.diff ? '
+                             '\'text-red text-weight-medium\' : \'\'">'
+                             "{{ props.value }}</span></q-td>")
                 for i in range(len(items)):
                     tbl.add_slot(f"body-cell-t{i}", diff_cell)
 
@@ -1223,9 +1238,9 @@ def mount() -> None:
                     _style_table(rtable)
                     rtable.add_slot("body-cell-status", _badge_cell("status"))
                     rtable.add_slot("body-cell-delta",
-                                    '<span :class="props.row.delta_up ? \'text-green-600\' : '
-                                    '(props.row.delta_down ? \'text-red-500\' : \'opacity-50\')">'
-                                    "{{ props.value }}</span>")
+                                    '<q-td :props="props"><span :class="props.row.delta_up ? '
+                                    '\'text-green-600\' : (props.row.delta_down ? \'text-red-500\' : '
+                                    '\'opacity-50\')">{{ props.value }}</span></q-td>')
                     rep_btn = ui.button("生成复盘报告", icon="description", on_click=lambda: do_report())
                     rep_btn.props("unelevated")
                     rep_btn_holder["btn"] = rep_btn  # do_report 忙碌态引用最新按钮实例

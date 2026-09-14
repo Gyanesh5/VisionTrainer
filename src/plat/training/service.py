@@ -87,7 +87,7 @@ def list_tasks(manager) -> list[dict]:
         for t in s.query(Task).order_by(Task.id.desc()).all():
             runs = s.query(Run).filter(Run.task_id == t.id).all()
             best = max((r.primary_metric or 0) for r in runs) if runs else None
-            # 进度摘要：running → epoch x/y；queued → 排队位次（UI 行内进度用）
+            # 进度摘要：running → epoch x/y；queued → 排队位次；已结束 → epoch 总数（列不留空）
             progress, prog_frac = "", None
             if runs:
                 last = max(runs, key=lambda r: r.round_no)
@@ -99,6 +99,9 @@ def list_tasks(manager) -> list[dict]:
                         prog_frac = min(ep / ep_total, 1.0)
                 elif last.status == "queued" and t.id in queue_pos:
                     progress = f"排队第 {queue_pos[t.id]} 位"
+                elif last.status in ("done", "failed", "cancelled"):
+                    total = (t.train_args or {}).get("epochs")
+                    progress = f"共 {total} epoch" if total else ""
             out.append({"id": t.id, "uid": t.uid, "name": t.name, "source": t.source,
                         "status": t.status, "base_model": t.base_model,
                         "runs": len(runs), "primary_metric": best,
