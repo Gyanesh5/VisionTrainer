@@ -718,14 +718,10 @@ def mount() -> None:
                     with c_model:
                         ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
                     c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
-                    # ── 分区 2：训练核心（档位化高频参数）
+                    # ── 分区 2：训练核心
                     _form_section("speed", "训练核心")
-                    with ui.row().classes("w-full items-center gap-3 flex-nowrap"):
-                        c_ep_toggle = ui.toggle({3: "3 轮", 10: "10 轮", 50: "50 轮", 150: "150 轮"},
-                                                value=50).props("dense no-caps")
-                        ui.space()
-                        c_epochs = ui.number("epochs", value=50, precision=0, min=1, step=1).classes("w-24")
                     with ui.row().classes("w-full"):
+                        c_epochs = ui.number("epochs", value=50, precision=0, min=1, step=1).classes("flex-1")
                         c_imgsz = ui.select({320: "320", 416: "416", 640: "640", 800: "800",
                                              1024: "1024", 1280: "1280"}, value=640,
                                             label="imgsz", with_input=True).classes("flex-1")
@@ -738,19 +734,6 @@ def mount() -> None:
                         c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
                         c_patience = ui.number("patience", precision=0, min=1,
                                                placeholder="默认 100").classes("flex-1")
-
-                    def _ep_from_toggle(e) -> None:
-                        if e.value is not None and int(c_epochs.value or 0) != int(e.value):
-                            c_epochs.set_value(int(e.value))
-
-                    def _ep_from_number(e) -> None:
-                        v = int(e.value) if e.value else None
-                        want = v if v in (3, 10, 50, 150) else None
-                        if c_ep_toggle.value != want:
-                            c_ep_toggle.set_value(want)
-
-                    c_ep_toggle.on_value_change(_ep_from_toggle)
-                    c_epochs.on_value_change(_ep_from_number)
 
                     # ── 分区 3：高级参数（tabs 一次点开，替代套娃折叠）
                     def _refresh_summary() -> None:
@@ -1627,12 +1610,8 @@ def mount() -> None:
                     c_obj = ui.select(["提升小目标召回", "压制误检", "收敛过拟合", "提升整体 mAP"],
                                       label="优化目标（可输入自定义）", with_input=True).classes("w-full")
                     _form_section("speed", "每轮训练核心")
-                    with ui.row().classes("w-full items-center gap-3 flex-nowrap"):
-                        c_preset = ui.toggle({3: "3 轮", 50: "50 轮", 150: "150 轮"},
-                                             value=50).props("dense no-caps")
-                        ui.space()
-                        c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("w-24")
                     with ui.row().classes("w-full"):
+                        c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("flex-1")
                         c_imgsz = ui.select({320: "320", 416: "416", 640: "640", 800: "800",
                                              1024: "1024", 1280: "1280"}, value=640,
                                             label="imgsz", with_input=True).classes("flex-1")
@@ -1645,19 +1624,6 @@ def mount() -> None:
                         c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
                         c_patience = ui.number("patience", precision=0, min=1,
                                                placeholder="默认 100").classes("flex-1")
-
-                    def _preset_to_epochs(e) -> None:
-                        if e.value is not None and int(c_epochs.value or 0) != int(e.value):
-                            c_epochs.set_value(int(e.value))
-
-                    def _epochs_to_preset(e) -> None:
-                        v = int(e.value) if e.value else None
-                        want = v if v in (3, 50, 150) else None
-                        if c_preset.value != want:
-                            c_preset.set_value(want)
-
-                    c_preset.on_value_change(_preset_to_epochs)
-                    c_epochs.on_value_change(_epochs_to_preset)
 
                     _form_section("smart_toy", "调参循环")
                     with ui.row().classes("w-full"):
