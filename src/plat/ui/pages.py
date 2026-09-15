@@ -442,6 +442,121 @@ def _select_with_sync(table, state, key: str, render, after=None):
     return select
 
 
+AI_STYLE = """
+/* ============ AI 风格主题（深浅两模式适配，只动外观不动 Quasar 行为） ============ */
+:root {
+  --ai-grad: linear-gradient(135deg, #6366f1 0%, #8b5cf6 52%, #06b6d4 100%);
+  --ai-edge: rgba(148, 163, 184, .16);
+}
+
+/* 主内容区：品牌色氛围光晕（浅色更淡，深色更明显） */
+.ai-main {
+  background-image:
+    radial-gradient(1100px 480px at 85% -8%, rgba(99, 102, 241, .06), transparent 62%),
+    radial-gradient(900px 420px at -8% 108%, rgba(6, 182, 212, .05), transparent 62%);
+}
+body.body--dark .ai-main {
+  background-image:
+    radial-gradient(1100px 480px at 85% -8%, rgba(99, 102, 241, .13), transparent 62%),
+    radial-gradient(900px 420px at -8% 108%, rgba(6, 182, 212, .09), transparent 62%);
+}
+
+/* 页面标题：品牌渐变文字 */
+.ai-title {
+  background-image: linear-gradient(118deg, #1e293b 25%, #4f46e5 68%, #0e7490 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+body.body--dark .ai-title {
+  background-image: linear-gradient(118deg, #e2e8f0 25%, #a5b4fc 68%, #67e8f9 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+
+/* 侧栏：深空渐变 + 顶部渐变 logo + 当前项发光指示 */
+.ai-nav {
+  background: linear-gradient(180deg, #090d1a 0%, #101827 100%) !important;
+  border-right: 1px solid rgba(148, 163, 184, .09) !important;
+}
+.ai-logo {
+  background-image: var(--ai-grad);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+  letter-spacing: .14em; font-size: 15px; font-weight: 800;
+}
+.ai-nav .ai-active .q-btn {
+  background: rgba(99, 102, 241, .22) !important;
+  box-shadow: 0 0 14px rgba(99, 102, 241, .38);
+  border: 1px solid rgba(129, 140, 248, .45);
+}
+
+/* 卡片：玻璃拟态（大圆角 + 细半透明边 + 背景模糊 + 柔和影） */
+main .q-card, .q-dialog .q-card {
+  border-radius: 14px !important;
+  border: 1px solid var(--ai-edge);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  box-shadow: 0 4px 22px rgba(15, 23, 42, .06);
+}
+body.body--dark main .q-card, body.body--dark .q-dialog .q-card {
+  background: rgba(29, 32, 45, .74) !important;
+  box-shadow: 0 6px 26px rgba(0, 0, 0, .38);
+}
+main .q-card:hover { box-shadow: 0 8px 30px rgba(99, 102, 241, .14); }
+
+/* 主按钮：品牌渐变 + 悬停发光（危险/成功色保持语义） */
+/* 主按钮渐变走 ::before 覆层——Quasar 按钮基类会清 background-image，伪元素无层叠竞争 */
+.q-btn--unelevated.bg-primary {
+  position: relative; overflow: hidden;
+  box-shadow: 0 2px 12px rgba(99, 102, 241, .28);
+  border-radius: 10px;
+  transition: box-shadow .2s ease, filter .2s ease;
+}
+.q-btn--unelevated.bg-primary::before {
+  content: ""; position: absolute; inset: 0;
+  background-image: var(--ai-grad);
+  border-radius: inherit; z-index: 0;
+}
+.q-btn--unelevated.bg-primary > .q-btn__content { position: relative; z-index: 1; }
+.q-btn--unelevated.bg-primary:hover {
+  box-shadow: 0 4px 20px rgba(99, 102, 241, .48);
+  filter: brightness(1.07);
+}
+.q-btn { border-radius: 10px; }
+
+/* 表格：圆角容器 + 表头微底色 + 行悬停高亮 */
+.q-table__container { border-radius: 12px !important; }
+.q-table thead tr th { background: rgba(99, 102, 241, .05) !important; }
+body.body--dark .q-table thead tr th { background: rgba(99, 102, 241, .10) !important; }
+.q-table tbody tr { transition: background .15s ease; }
+.q-table tbody tr:hover { background: rgba(99, 102, 241, .06) !important; }
+
+/* 徽章 / 横幅 / 通知圆角 */
+.q-badge { border-radius: 6px; }
+.q-banner { border-radius: 12px; }
+.q-notification { border-radius: 12px !important; }
+
+/* 输入聚焦光环 */
+.q-field--focused .q-field__control { border-radius: 10px; }
+.q-field--filled .q-field__control::before, .q-field--outlined .q-field__control::before { border-radius: 10px; }
+
+/* 对话框：毛玻璃遮罩 + 弹入动画 */
+.q-dialog__backdrop {
+  background: rgba(8, 12, 26, .45) !important;
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+.q-dialog__inner > div { animation: ai-pop .24s cubic-bezier(.34, 1.35, .64, 1); }
+@keyframes ai-pop { from { opacity: 0; transform: translateY(12px) scale(.985); } }
+
+/* 细滚动条 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, .35); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, .5); }
+
+/* 分隔线柔化 */
+.q-separator { opacity: .6; }
+"""
+
+
 def _nav_rail(active: str) -> None:
     """左侧窄导航栏：图标 + 文字小标签 + 深浅色切换 + 底部版本号。"""
     dark = ui.dark_mode(bool(app.storage.user.get("dark")))
@@ -450,16 +565,17 @@ def _nav_rail(active: str) -> None:
         dark.toggle()
         app.storage.user["dark"] = dark.value
 
-    with ui.column().classes("w-16 items-center gap-1 pt-5 border-r").style(
-            "min-height: 96vh; background: #111827"):
-        ui.label("YO").classes("text-white font-bold text-sm mb-3")
+    with ui.column().classes("w-16 items-center gap-1 pt-5 ai-nav").style("min-height: 96vh"):
+        ui.label("YO").classes("ai-logo mb-3")
         for title, icon, path in NAV_ITEMS:
-            with ui.column().classes("items-center gap-0 q-mb-xs"):
+            with ui.column().classes("items-center gap-0 q-mb-xs" +
+                                     (" ai-active" if title == active else "")):
                 btn = ui.button(icon=icon, on_click=lambda p=path: ui.navigate.to(p)).props("flat round dense")
-                btn.classes("text-white bg-blue-600/30" if title == active else "text-gray-400")
+                btn.classes("text-indigo-200" if title == active else "text-gray-400")
                 with btn:
                     ui.tooltip(title)
-                ui.label(title).classes("text-[11px] " + ("text-blue-200" if title == active else "text-gray-400"))
+                ui.label(title).classes("text-[11px] " +
+                                        ("text-indigo-300 font-semibold" if title == active else "text-gray-500"))
         ui.space()
         theme_btn = ui.button(icon="contrast", on_click=_toggle_dark).props("flat round dense").classes("text-gray-400")
         with theme_btn:
@@ -469,11 +585,12 @@ def _nav_rail(active: str) -> None:
 
 def _page_frame(active: str, title: str, actions=None, body=None) -> None:
     """页面骨架：导航栏 + 标题行（含动作按钮）+ 内容区。"""
+    ui.add_head_html(f"<style>{AI_STYLE}</style>")
     with ui.row().classes("w-full m-0 p-0 gap-0 items-stretch"):
         _nav_rail(active)
-        with ui.column().classes("flex-1 p-6 gap-4 w-full"):
+        with ui.column().classes("flex-1 p-6 gap-4 w-full ai-main"):
             with ui.row().classes("w-full items-center"):
-                ui.label(title).classes("text-xl font-bold")
+                ui.label(title).classes("text-xl font-bold ai-title")
                 ui.space()
                 if actions:
                     actions()
