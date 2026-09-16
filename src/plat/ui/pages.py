@@ -330,13 +330,22 @@ def _param_label(e: dict) -> tuple[str, str]:
     return key, full
 
 
-def _render_param_groups(on_change=None) -> tuple[dict, object]:
-    """官方全量训练参数 → 5 组 tabs（一次点击切换，替代套娃折叠），返回 (param_fields, 计数徽章)。
+# 高频可调参数（用户视角精选，置顶常显；其余按组收纳，搜索可达）
+COMMON_PARAM_KEYS = ["optimizer", "lr0", "momentum", "weight_decay", "warmup_epochs", "cos_lr",
+                     "mosaic", "mixup", "degrees", "translate", "scale", "fliplr",
+                     "hsv_h", "hsv_s", "hsv_v"]
 
+
+def _render_param_groups(on_change=None) -> tuple[dict, object]:
+    """官方全量训练参数 → 搜索 + 常用置顶 + 按组收纳，返回 (param_fields, 计数徽章)。
+
+    用户主诉「64 项平铺看着不舒服、不方便」：
+    - 常用 15 项常显置顶（两列）；其余 5 组默认收起
+    - 搜索框跨组即时过滤（匹配 key 或中文说明）——命中组自动展开并显示「匹配 x/N」，
+      无命中组整组隐藏；清空恢复
     on_change：任一参数变化时回调（供摘要条/计数联动）。
     """
     param_fields: dict[str, tuple[dict, object]] = {}
-    counter = ui.badge("已设置 0 项").props("outline color=grey").style("font-size:10px")
 
     def _recount() -> None:
         n = len(_collect_params(param_fields))
@@ -372,19 +381,80 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
         w.on_value_change(lambda _e: _recount())
         param_fields[e["key"]] = (e, w)
 
-    with ui.tabs().props("dense inline-label outside-arrows").classes("w-full text-xs") as tabs:
-        for group_name, entries in PARAM_GROUPS.items():
-            ui.tab(group_name, icon="category").props("no-caps")
-    with ui.tab_panels(tabs, value=next(iter(PARAM_GROUPS))).classes("w-full"):
-        for group_name, entries in PARAM_GROUPS.items():
-            with ui.tab_panel(group_name).classes("q-pa-sm"):
-                for i in range(0, len(entries), 3):
-                    with ui.row().classes("w-full"):
-                        _add_field(entries[i])
-                        if i + 1 < len(entries):
-                            _add_field(entries[i + 1])
-                        if i + 2 < len(entries):
-                            _add_field(entries[i + 2])
+    # 行级注册表：搜索时整行 show/hide（半空行不留缝）
+    row_registry: list[tuple[object, list[dict]]] = []
+
+    def _render_rows(entries: list[dict]) -> None:
+        for i in range(0, len(entries), 2):
+            with ui.row().classes("w-full no-wrap") as r:
+                _add_field(entries[i])
+                if i + 1 < len(entries):
+                    _add_field(entries[i + 1])
+            row_registry.append((r, entries[i:i + 2]))
+
+    all_entries = [e for entries in PARAM_GROUPS.values() for e in entries]
+    common_entries = [e for k in COMMON_PARAM_KEYS for e in all_entries if e["key"] == k]
+
+    # ── 搜索框 + 计数
+    with ui.row().classes("w-full items-center gap-2"):
+        search = ui.input("搜索参数（名称或中文说明）").props("dense outlined clearable").classes("flex-1")
+        with search:
+            ui.tooltip("示例：搜「学习率」「mosaic」「角度」即时过滤全部 64 项")
+        counter = ui.badge("已设置 0 项").props("outline color=grey").style("font-size:10px")
+
+    # ── 常用参数（常显置顶）
+    with ui.column().classes("w-full gap-0") as common_box:
+        with ui.row().classes("w-full items-center gap-2 q-mt-xs"):
+            ui.icon("star", size="13px").classes("opacity-50")
+            ui.label(f"常用参数（{len(common_entries)}）").classes("text-xs font-semibold")
+        _render_rows(common_entries)
+
+    # ── 其余按组收纳（默认收起）
+    group_states: list[dict] = []
+    for group_name, entries in PARAM_GROUPS.items():
+        rest = [e for e in entries if e["key"] not in COMMON_PARAM_KEYS]
+        if not rest:
+            continue
+        base_label = f"{group_name}（{len(rest)} 项）"
+        exp = ui.expansion(base_label, icon="folder_open").classes("w-full")
+        group_rows: list[tuple[object, list[dict]]] = []
+        with exp:
+            for i in range(0, len(rest), 2):
+                with ui.row().classes("w-full no-wrap") as r:
+                    _add_field(rest[i])
+                    if i + 1 < len(rest):
+                        _add_field(rest[i + 1])
+                group_rows.append((r, rest[i:i + 2]))
+        row_registry.extend(group_rows)
+        group_states.append({"exp": exp, "name": group_name, "base": base_label, "rows": group_rows})
+
+    def _match(e: dict, term: str) -> bool:
+        return term in e["key"].lower() or term in e["label"].lower()
+
+    def _apply_search(e) -> None:
+        term = (e.value or "").strip().lower()
+        if not term:
+            for row, _ents in row_registry:
+                row.set_visibility(True)
+            for g in group_states:
+                g["exp"].set_visibility(True)
+                g["exp"].set_value(False)
+                g["exp"]._props["label"] = g["base"]
+                g["exp"].update()
+            return
+        for row, ents in row_registry:
+            row.set_visibility(any(_match(x, term) for x in ents))
+        for g in group_states:
+            hits = sum(1 for _r, ents in g["rows"] if any(_match(x, term) for x in ents))
+            # 匹配 x/N 按参数个数计
+            hit_params = sum(1 for _r, ents in g["rows"] for x in ents if _match(x, term))
+            g["exp"].set_visibility(hits > 0)
+            if hits:
+                g["exp"].set_value(True)
+                g["exp"]._props["label"] = f'{g["name"]}（匹配 {hit_params}/{sum(len(x) for _r, x in g["rows"])}）'
+                g["exp"].update()
+
+    search.on_value_change(_apply_search)
     return param_fields, counter
 
 
@@ -421,15 +491,17 @@ def _form_section(icon: str, title: str, hint: str = "") -> None:
     ui.separator().classes("q-mt-xs q-mb-sm")
 
 
-def _select_with_sync(table, state, key: str, render, after=None):
+def _select_with_sync(table, state, key: str, render, after=None, sync_selected=True):
     """构造带防重入的选中函数：行点击/复选框/程序化同步三条路径共用。
 
     程序化设置 table.selected 可能再次触发 on_select——以 rendered_id 防环。
+    sync_selected=False 用于 multiple 选择表格：勾选归批量操作，详情选中不再回写
+    table.selected（否则行点击会清掉用户已勾的多选）。
     """
 
     def select(row) -> None:
         new_id = (row or {}).get(key) if isinstance(row, dict) else None
-        if isinstance(row, dict):
+        if isinstance(row, dict) and sync_selected:
             table.selected = [row]
         if state.get("rendered_id") == new_id:
             return
@@ -621,8 +693,13 @@ def mount() -> None:
 
         state: dict = {"selected": None, "open_create": lambda: ui.notify("页面初始化中…"),
                        "auto": False}
+        bulk_btn_holder: dict = {"btn": None}
+        state["open_bulk_del"] = lambda: None
 
         def actions() -> None:
+            bulk_btn_holder["btn"] = ui.button(
+                "删除所选", icon="delete_sweep", color="negative",
+                on_click=lambda: state["open_bulk_del"]()).props("outline dense").set_enabled(False)
             ui.button("新建训练", icon="add", on_click=lambda: state["open_create"]()).props("unelevated")
 
         def rows_data() -> list[dict]:
@@ -646,8 +723,8 @@ def mount() -> None:
                 {"name": "runs", "label": "轮数", "field": "runs"},
                 {"name": "source", "label": "来源", "field": "source"},
             ]
-            table = ui.table(columns=columns, rows=rows_data(), row_key="uid", selection="single",
-                             on_select=lambda e: select((e.selection or [None])[0]))
+            table = ui.table(columns=columns, rows=rows_data(), row_key="uid", selection="multiple",
+                             on_select=lambda e: sync_bulk_btn())
             _style_table(table)
             table.add_slot("body-cell-status", _badge_cell("status"))
             table.add_slot("body-cell-progress", _progress_cell())
@@ -746,8 +823,57 @@ def mount() -> None:
 
                         ui.timer(1.0, poll)
 
-            select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail))
+            select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail),
+                                       sync_selected=False)
             _on_row_click(table, select)
+
+            # ── 批量删除（勾选归批量，行点击归详情；运行中的任务会被服务层拒绝并逐个汇报）
+            def sync_bulk_btn() -> None:
+                n = len(table.selected or [])
+                btn = bulk_btn_holder.get("btn")
+                if btn is not None:
+                    btn.set_text(f"删除所选（{n}）")
+                    btn.set_enabled(n > 0)
+
+            with ui.dialog() as bulk_del_dialog, ui.card().classes("w-96 gap-2"):
+                bulk_title = ui.label("").classes("font-bold")
+                bulk_names = ui.label("").classes("text-xs opacity-60 break-all")
+                bulk_files = ui.checkbox("同时删除磁盘产物（runs 目录）")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=bulk_del_dialog.close).props("flat")
+
+                    async def _do_bulk_del() -> None:
+                        targets = [(r["id"], r["name"]) for r in (table.selected or [])]
+                        bulk_del_dialog.close()
+                        ok, fails = 0, []
+                        for tid, _name in targets:
+                            try:
+                                await _io(tsvc.delete_task, get_manager(), tid, bulk_files.value)
+                                ok += 1
+                            except Exception as exc:  # noqa: BLE001
+                                fails.append(f"{_name}：{exc}")
+                        if ok:
+                            ui.notify(f"已删除 {ok} 个任务", type="positive")
+                        for f in fails:
+                            ui.notify(f"删除失败 {f}", type="negative")
+                        table.selected = []
+                        state["selected"] = None
+                        state["rendered_id"] = None
+                        refresh()
+                        render_detail()
+
+                    ui.button("删除", color="negative", icon="delete_sweep", on_click=_do_bulk_del
+                              ).props("unelevated")
+
+            def open_bulk_del() -> None:
+                sel = table.selected or []
+                if not sel:
+                    return
+                bulk_title.set_text(f"批量删除 {len(sel)} 个任务")
+                bulk_names.set_text("；".join(r["name"] for r in sel))
+                bulk_del_dialog.open()
+
+            state["open_bulk_del"] = open_bulk_del
 
             def _artifact_gallery(run_dir) -> None:
                 if not run_dir:
@@ -946,7 +1072,13 @@ def mount() -> None:
     def page_datasets() -> None:
         state: dict = {"selected": None}
 
+        bulk_btn_holder: dict = {"btn": None}
+        state["open_bulk_del"] = lambda: None
+
         def actions() -> None:
+            bulk_btn_holder["btn"] = ui.button(
+                "删除所选", icon="delete_sweep", color="negative",
+                on_click=lambda: state["open_bulk_del"]()).props("outline dense").set_enabled(False)
             ui.button("导入标注目录", icon="upload", on_click=lambda: state["open_import"]()).props("unelevated")
             ui.button("注册外部目录", icon="link", on_click=lambda: state["open_external"]()).props("outline")
 
@@ -976,8 +1108,8 @@ def mount() -> None:
                 {"name": "validation", "label": "校验", "field": "validation_label"},
                 {"name": "created_str", "label": "创建时间", "field": "created_str", "align": "left"},
             ]
-            table = ui.table(columns=columns, rows=rows_data(), row_key="name", selection="single",
-                             on_select=lambda e: select((e.selection or [None])[0]))
+            table = ui.table(columns=columns, rows=rows_data(), row_key="name", selection="multiple",
+                             on_select=lambda e: sync_bulk_btn())
             _style_table(table)
             table.add_slot("body-cell-validation", _badge_cell("validation"))
             table.add_slot("no-data", _no_data_cell(
@@ -1064,8 +1196,57 @@ def mount() -> None:
                         else:
                             ui.label("data.yaml 存在：类别以其为准").classes("text-xs opacity-60")
 
-            select = _select_with_sync(table, state, "name", render_detail, lambda: _scroll_to(detail))
+            select = _select_with_sync(table, state, "name", render_detail, lambda: _scroll_to(detail),
+                                       sync_selected=False)
             _on_row_click(table, select)
+
+            # ── 批量删除（勾选归批量，行点击归详情；托管/外部混合也可，标注源目录永不触碰）
+            def sync_bulk_btn() -> None:
+                n = len(table.selected or [])
+                btn = bulk_btn_holder.get("btn")
+                if btn is not None:
+                    btn.set_text(f"删除所选（{n}）")
+                    btn.set_enabled(n > 0)
+
+            with ui.dialog() as bulk_del_dialog, ui.card().classes("w-96 gap-2"):
+                bulk_title = ui.label("").classes("font-bold")
+                bulk_names = ui.label("").classes("text-xs opacity-60 break-all")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=bulk_del_dialog.close).props("flat")
+
+                    async def _do_bulk_del() -> None:
+                        targets = [r["name"] for r in (table.selected or [])]
+                        bulk_del_dialog.close()
+                        ok, fails = 0, []
+                        for name in targets:
+                            try:
+                                await _io(ds.delete_dataset, name)
+                                if state["selected"] == name:
+                                    state["selected"] = None
+                                    state["rendered_id"] = None
+                                ok += 1
+                            except Exception as exc:  # noqa: BLE001
+                                fails.append(f"{name}：{exc}")
+                        if ok:
+                            ui.notify(f"已删除 {ok} 个数据集（标注源目录永不触碰）", type="positive")
+                        for f in fails:
+                            ui.notify(f"删除失败 {f}", type="negative")
+                        table.selected = []
+                        refresh()
+                        render_detail()
+
+                    ui.button("删除", color="negative", icon="delete_sweep", on_click=_do_bulk_del
+                              ).props("unelevated")
+
+            def open_bulk_del() -> None:
+                sel = table.selected or []
+                if not sel:
+                    return
+                bulk_title.set_text(f"批量删除 {len(sel)} 个数据集")
+                bulk_names.set_text("；".join(r["name"] for r in sel))
+                bulk_del_dialog.open()
+
+            state["open_bulk_del"] = open_bulk_del
 
             async def do_validate(name: str) -> None:
                 ui.notify("校验中…")
@@ -1533,8 +1714,13 @@ def mount() -> None:
         from ..training.manager import get_manager
 
         state: dict = {"selected": None, "auto": False}
+        bulk_btn_holder: dict = {"btn": None}
+        state["open_bulk_del"] = lambda: None
 
         def actions() -> None:
+            bulk_btn_holder["btn"] = ui.button(
+                "删除所选", icon="delete_sweep", color="negative",
+                on_click=lambda: state["open_bulk_del"]()).props("outline dense").set_enabled(False)
             ui.button("新建 Agent 任务", icon="smart_toy", on_click=lambda: state["open_create"]()).props("unelevated")
 
         def rows_data() -> list[dict]:
@@ -1564,8 +1750,8 @@ def mount() -> None:
                 {"name": "progress", "label": "进度", "field": "progress", "align": "left"},
                 {"name": "metric_str", "label": "最优主指标", "field": "metric_str"},
             ]
-            table = ui.table(columns=columns, rows=rows_data(), row_key="id", selection="single",
-                             on_select=lambda e: select((e.selection or [None])[0]))
+            table = ui.table(columns=columns, rows=rows_data(), row_key="id", selection="multiple",
+                             on_select=lambda e: sync_bulk_btn())
             _style_table(table)
             table.add_slot("body-cell-agent_state", _badge_cell("agent"))
             table.add_slot("body-cell-status", _badge_cell("status"))
@@ -1694,8 +1880,56 @@ def mount() -> None:
                                     if r.get("error"):
                                         ui.label(r["error"]).classes("text-[11px] text-red-500 break-all flex-1")
 
-            select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail))
+            select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail),
+                                       sync_selected=False)
             _on_row_click(table, select)
+
+            # ── 批量删除（勾选归批量，行点击归详情）
+            def sync_bulk_btn() -> None:
+                n = len(table.selected or [])
+                btn = bulk_btn_holder.get("btn")
+                if btn is not None:
+                    btn.set_text(f"删除所选（{n}）")
+                    btn.set_enabled(n > 0)
+
+            with ui.dialog() as bulk_del_dialog, ui.card().classes("w-96 gap-2"):
+                bulk_title = ui.label("").classes("font-bold")
+                bulk_names = ui.label("").classes("text-xs opacity-60 break-all")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=bulk_del_dialog.close).props("flat")
+
+                    async def _do_bulk_del() -> None:
+                        targets = [(r["id"], r["name"]) for r in (table.selected or [])]
+                        bulk_del_dialog.close()
+                        ok, fails = 0, []
+                        for tid, _name in targets:
+                            try:
+                                await _io(tsvc.delete_task, get_manager(), tid, False)
+                                ok += 1
+                            except Exception as exc:  # noqa: BLE001
+                                fails.append(f"{_name}：{exc}")
+                        if ok:
+                            ui.notify(f"已删除 {ok} 个任务", type="positive")
+                        for f in fails:
+                            ui.notify(f"删除失败 {f}", type="negative")
+                        table.selected = []
+                        state["selected"] = None
+                        state["rendered_id"] = None
+                        refresh()
+                        render_detail()
+
+                    ui.button("删除", color="negative", icon="delete_sweep", on_click=_do_bulk_del
+                              ).props("unelevated")
+
+            def open_bulk_del() -> None:
+                sel = table.selected or []
+                if not sel:
+                    return
+                bulk_title.set_text(f"批量删除 {len(sel)} 个 Agent 任务")
+                bulk_names.set_text("；".join(r["name"] for r in sel))
+                bulk_del_dialog.open()
+
+            state["open_bulk_del"] = open_bulk_del
 
             def do_approve(action: str) -> None:
                 try:

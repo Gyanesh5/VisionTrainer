@@ -294,3 +294,16 @@ def test_adopted_run_natural_exit_judged_done(tmp_path, datasets_root, detect_so
         assert status == "done", f"收养后自然跑完应判 done，实际 {status}"
         detail = c2.get(f"/api/v1/runs/{run['uid']}").json()
         assert detail["artifacts"]["best_pt"], f"收养完成的 best_pt 应回填：{detail['artifacts']}"
+
+
+def test_bulk_delete_tasks(training_client):
+    """批量删除：多任务循环删除全数成功（UI 批量删除按钮的服务层链路，2026-09-16）。"""
+    c = training_client
+    uids = [_create_task(c, epochs=1, name=f"bulk-{i}") for i in range(3)]
+    ids = {t["id"] for t in c.get("/api/v1/tasks").json() if t["uid"] in uids}
+    assert len(ids) == 3
+    for tid in ids:  # UI 批量删除 = 对勾选任务循环调用同一删除端点
+        r = c.delete(f"/api/v1/tasks/{tid}")
+        assert r.status_code == 200, r.text
+    left = {t["uid"] for t in c.get("/api/v1/tasks").json()}
+    assert not (left & set(uids)), "批量删除后不应残留勾选任务"
