@@ -174,47 +174,136 @@ def _local_image(path: str, width: str = "100%") -> None:
     ui.image(f"data:image/{mime};base64,{b64encode(data).decode()}").style(f"width:{width}")
 
 
-def _native_pick_directory(start: str = "") -> tuple[str, "str | None"]:
-    """系统原生目录选择框，跨平台（2026-09-17 用户要求用系统内置而非自研）。
+def _win_explorer_pick(start: str = "") -> str:
+    """Windows 资源管理器风格目录选择（Vista+ IFileOpenDialog + FOS_PICKFOLDERS）。
 
-    级联：tkinter（Windows/macOS 系统自带、Linux 需 python-tk；弹 OS 原生目录框，
-    start 作为初始目录）→ zenity（GNOME/GTK）→ kdialog（KDE）。
-    返回 ("ok", 路径|None)：ok=原生后端可用（None=用户取消）；
-    ("unavailable", None)=本机三者皆无（UI 落内置网页浏览器）。
-    服务进程继承桌面 DISPLAY/DBUS（单机自用成立）。
+    纯 ctypes 调 COM，无第三方依赖——导航窗格/地址栏/新建文件夹的 Explorer 弹窗
+    （tkinter 在 Windows 上是老式 SHBrowseForFolder 树，用户嫌丑，2026-09-17 裁决）。
+    返回选中路径；取消/失败返回 ""。Windows 分支无法在 Linux 开发机上实测。
     """
+    import ctypes
+    from ctypes import POINTER, byref, c_ulong, c_void_p, c_wchar_p
+    from uuid import UUID
+
+    CoInitializeEx = ctypes.oledll.ole32.CoInitializeEx
+    CoCreateInstance = ctypes.oledll.ole32.CoCreateInstance
+    CoTaskMemFree = ctypes.windll.ole32.CoTaskMemFree
+    CLSCTX_INPROC_SERVER = 0x1
+
+    class GUID(ctypes.Structure):
+        _fields_ = [("a", c_ulong), ("b", ctypes.c_ushort), ("c", ctypes.c_ushort),
+                    ("d", ctypes.c_ubyte * 8)]
+
+    def guid(u: str) -> GUID:
+        g = UUID(u)
+        return GUID(g.fields[0][0], g.fields[1][0], g.fields[2][0],
+                    (ctypes.c_ubyte * 8)(*g.bytes_le[-8:]))
+
+    CLSID_FILE_OPEN_DIALOG = guid("DC1C5A9C-E88A-4dde-A5A1-60F82A20AEF7")
+    IID_IFILEDIALOG = guid("D57C7288-D4AD-4768-BE02-9D969532D960")
+    IID_ISHELLITEM = guid("43826D1E-E718-42EE-BC55-A1E261C37BFE")
+    FOS_PICKFOLDERS, FOS_FORCEFILESYSTEM, FOS_PATHMUSTEXIST = 0x20, 0x1000, 0x800
+    SIGDN_FILESYSPATH = 0x80058000  # 超大枚举值，按 c_ulong 传
+
+    CoInitializeEx(None, 0x2)  # APARTMENTTHREADED（重复调用返回 S_FALSE 也无妨）
+    dlg = c_void_p()
+    CoCreateInstance(byref(CLSID_FILE_OPEN_DIALOG), None, CLSCTX_INPROC_SERVER,
+                     byref(IID_IFILEDIALOG), byref(dlg))
+    try:
+        def vcall(this: c_void_p, idx: int, *args):
+            vtbl = ctypes.cast(this, POINTER(POINTER(c_void_p)))[0]
+            return ctypes.HRESULT(vtbl[idx])(this, *args)
+
+        opts = c_ulong()
+        vcall(dlg, 8, byref(opts))  # IFileDialog::GetOptions
+        vcall(dlg, 7, c_ulong(opts.value | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM
+                              | FOS_PATHMUSTEXIST))  # SetOptions
+        vcall(dlg, 15, f"选择目录")  # SetTitle
+        if start:
+            SHCreateItemFromParsingName = ctypes.oledll.shell32.SHCreateItemFromParsingName
+            si = c_void_p()
+            if SHCreateItemFromParsingName(start, None, byref(IID_ISHELLITEM),
+                                           byref(si)) == 0 and si:
+                vcall(dlg, 10, si)  # SetFolder（对话框内部会 AddRef）
+                vcall(si, 2)  # 释放自己的引用
+        if vcall(dlg, 3, None) != 0:  # IModalWindow::Show —— 取消也返回非零
+            return ""
+        item = c_void_p()
+        if vcall(dlg, 18, byref(item)) != 0 or not item:  # GetResult
+            return ""
+        try:
+            ppath = c_wchar_p()
+            if vcall(item, 5, c_ulong(SIGDN_FILESYSPATH), byref(ppath)) != 0 or not ppath:
+                return ""
+            return ppath.value or ""
+        finally:
+            vcall(item, 2)  # IShellItem::Release
+    finally:
+        vcall(dlg, 2)  # IFileDialog::Release
+        ctypes.windll.ole32.CoUninitialize()
+
+
+def _win_forms_pick(start: str = "") -> str:
+    """Windows 兜底：PowerShell FolderBrowserDialog（.NET Framework 自带，老式但零依赖）。"""
+    import subprocess
+
+    ps = ("Add-Type -AssemblyName System.Windows.Forms; "
+          "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+          f"$d.SelectedPath = '{start}'; "
+          "if ($d.ShowDialog() -eq 'OK') { Write-Output $d.SelectedPath }")
+    r = subprocess.run(["powershell", "-NoProfile", "-STA", "-Command", ps],
+                       capture_output=True, text=True, timeout=600)
+    return (r.stdout or "").strip()
+
+
+def _native_pick_directory(start: str = "") -> tuple[str, "str | None"]:
+    """按平台调系统原生目录选择（2026-09-17 用户裁决：Linux=zenity/KDE，Windows=资源管理器）。
+
+    Windows：IFileOpenDialog Explorer 风格 → PowerShell FolderBrowserDialog 兜底
+    Linux：zenity（GTK）→ kdialog（KDE）——tkinter 的 GTK/X 简易框被用户嫌丑，弃用
+    macOS：osascript choose folder（原生）
+    返回 ("ok", 路径|None)：ok=原生后端可用（None=用户取消）；
+    ("unavailable", None)=本机无原生后端（UI 落内置网页浏览器）。
+    """
+    import platform
     import shutil
     import subprocess
 
+    system = platform.system()
     base = Path(start).expanduser() if start else Path.home()
     if not base.is_dir():
         base = Path.home()
 
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-
-        root = tk.Tk()
-        root.withdraw()
-        root.attributes("-topmost", True)
+    if system == "Windows":
         try:
-            path = filedialog.askdirectory(title="选择目录", initialdir=str(base))
-        finally:
-            root.destroy()
-        return "ok", path or None
-    except Exception:  # noqa: BLE001 — 无 DISPLAY / 缺 python-tk → 落命令行工具
-        pass
+            return "ok", (_win_explorer_pick(str(base)) or None)
+        except Exception:  # noqa: BLE001 — COM 布局异常时退老式对话框
+            try:
+                return "ok", (_win_forms_pick(str(base)) or None)
+            except Exception:  # noqa: BLE001
+                return "unavailable", None
 
-    for cmd in (["zenity", "--file-selection", "--directory", "--filename", str(base) + "/",
-                 "--title", "选择目录"],
-                ["kdialog", "--getexistingdirectory", str(base)]):
-        if not shutil.which(cmd[0]):
-            continue
+    if system == "Linux":
+        for cmd in (["zenity", "--file-selection", "--directory", "--filename",
+                     str(base) + "/", "--title", "选择目录"],
+                    ["kdialog", "--getexistingdirectory", str(base)]):
+            if not shutil.which(cmd[0]):
+                continue
+            try:
+                r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+                return "ok", (r.stdout or "").strip() or None
+            except Exception:  # noqa: BLE001
+                continue
+        return "unavailable", None
+
+    if system == "Darwin":
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
-            return "ok", (r.stdout or "").strip() or None
-        except Exception:  # noqa: BLE001 — 该工具弹窗失败/超时，试下一个
-            continue
+            r = subprocess.run(["osascript", "-e",
+                                'POSIX path of (choose folder with prompt "选择目录")'],
+                               capture_output=True, text=True, timeout=600)
+            return "ok", (r.stdout or "").strip().rstrip("/") or None
+        except Exception:  # noqa: BLE001
+            return "unavailable", None
     return "unavailable", None
 
 
