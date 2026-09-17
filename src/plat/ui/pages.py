@@ -174,6 +174,50 @@ def _local_image(path: str, width: str = "100%") -> None:
     ui.image(f"data:image/{mime};base64,{b64encode(data).decode()}").style(f"width:{width}")
 
 
+def _native_pick_directory(start: str = "") -> tuple[str, "str | None"]:
+    """系统原生目录选择框，跨平台（2026-09-17 用户要求用系统内置而非自研）。
+
+    级联：tkinter（Windows/macOS 系统自带、Linux 需 python-tk；弹 OS 原生目录框，
+    start 作为初始目录）→ zenity（GNOME/GTK）→ kdialog（KDE）。
+    返回 ("ok", 路径|None)：ok=原生后端可用（None=用户取消）；
+    ("unavailable", None)=本机三者皆无（UI 落内置网页浏览器）。
+    服务进程继承桌面 DISPLAY/DBUS（单机自用成立）。
+    """
+    import shutil
+    import subprocess
+
+    base = Path(start).expanduser() if start else Path.home()
+    if not base.is_dir():
+        base = Path.home()
+
+    try:
+        import tkinter as tk
+        from tkinter import filedialog
+
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        try:
+            path = filedialog.askdirectory(title="选择目录", initialdir=str(base))
+        finally:
+            root.destroy()
+        return "ok", path or None
+    except Exception:  # noqa: BLE001 — 无 DISPLAY / 缺 python-tk → 落命令行工具
+        pass
+
+    for cmd in (["zenity", "--file-selection", "--directory", "--filename", str(base) + "/",
+                 "--title", "选择目录"],
+                ["kdialog", "--getexistingdirectory", str(base)]):
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            return "ok", (r.stdout or "").strip() or None
+        except Exception:  # noqa: BLE001 — 该工具弹窗失败/超时，试下一个
+            continue
+    return "unavailable", None
+
+
 def _list_subdirs(path: str) -> dict:
     """列子目录（服务端文件系统；单机自用场景，只读列举）。"""
     p = Path(path).expanduser()
@@ -194,9 +238,21 @@ def _path_picker_field(label: str, placeholder: str = "", value: str = ""):
     """
     with ui.row().classes("w-full items-center gap-1"):
         inp = ui.input(label, value=value, placeholder=placeholder).classes("flex-1")
-        browse = ui.button(icon="folder_open", on_click=lambda: _open()).props("flat dense round")
+        browse = ui.button(icon="folder_open").props("flat dense round")
         with browse:
-            ui.tooltip("浏览选择目录")
+            ui.tooltip("浏览选择目录（系统文件选择框；不可用时用内置浏览器）")
+
+        async def _browse_native() -> None:
+            status, path = await _io(_native_pick_directory, inp.value or "")
+            if status == "ok":
+                if path:
+                    inp.set_value(path)
+                    ui.notify(f"已选择：{path}", type="info")
+                return  # 用户取消：保持原值，不打扰
+            ui.notify("系统文件对话框不可用，已改用内置目录浏览器", type="warning")
+            _open()  # 本机无原生后端 → 内置网页浏览器兜底
+
+        browse.on_click(_browse_native)
 
         current: dict = {"path": ""}
 
