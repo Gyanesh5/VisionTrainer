@@ -502,11 +502,14 @@ class SubprocessHandle:
     """subprocess.Popen 的薄封装（可被测试替换）。"""
 
     def __init__(self, cmd: list[str], log_f):
+        import os
         import subprocess
 
+        # NO_COLOR：ultralytics 重定向到文件仍强制 ANSI 着色（2026-09-16 日志乱码根因）
+        env = {**os.environ, "NO_COLOR": "1", "TERM": "dumb"}
         self._p = subprocess.Popen(
             cmd, stdout=log_f, stderr=subprocess.STDOUT,
-            stdin=subprocess.DEVNULL, start_new_session=True,
+            stdin=subprocess.DEVNULL, start_new_session=True, env=env,
         )
         self._log_f = log_f
 

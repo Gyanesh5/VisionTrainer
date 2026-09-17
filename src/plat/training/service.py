@@ -215,6 +215,21 @@ def resume_run(manager, uid: str) -> str:
         raise _http_err("state_conflict", str(exc), 409)
 
 
+_ANSI_RE = None  # 惰性编译（import 期省启动）
+
+
+def _clean_log_line(line: str) -> str:
+    """剥 ANSI 转义/控制符（ultralytics 重定向到文件仍强制着色，\r 覆盖行只留末段）。"""
+    global _ANSI_RE
+    import re
+
+    if _ANSI_RE is None:
+        _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*(?:\x07|\x1b\\)|[\x00-\x08\x0b\x0c\x0e-\x1f]")
+    if "\r" in line:
+        line = line.split("\r")[-1]
+    return _ANSI_RE.sub("", line).rstrip()
+
+
 def run_logs(manager, uid: str, tail: int = 200) -> list[str]:
     from plat.db.models import Run
 
@@ -225,7 +240,13 @@ def run_logs(manager, uid: str, tail: int = 200) -> list[str]:
     log_path = Path(r.run_dir) / "training.log"
     if not log_path.exists():
         return []
-    return log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
+    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()[-tail:]
+    out = []
+    for x in lines:
+        cleaned = _clean_log_line(x)
+        if cleaned:
+            out.append(cleaned)
+    return out
 
 
 # ---------------------------------------------------------------- M3：对比与复盘报告

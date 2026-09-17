@@ -787,11 +787,33 @@ def mount() -> None:
                             chart_loss = ui.echart(_loss_options(run["metrics"])).classes("w-full h-52")
                     with ui.expansion("产物与日志", icon="folder").classes("w-full"):
                         art = run.get("artifacts") or {}
+
+                        def _artifact_row(label: str, path: str | None) -> None:
+                            """产物行：名称 + 存在徽章 + 完整路径（悬停看全） + 一键复制。"""
+                            exists = bool(path) and Path(path).exists()
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.label(label).classes("text-xs font-semibold shrink-0")
+                                ui.badge("在盘" if exists else ("—" if not path else "缺失")).props(
+                                    f"color={'green' if exists else 'grey'} outline").style("font-size:9px")
+                                if path:
+                                    p_label = ui.label(path).classes("text-[11px] opacity-60 break-all flex-1 min-w-0")
+                                    with p_label:
+                                        ui.tooltip(path)
+
+                                    def _copy(p=path):
+                                        ui.clipboard.write(p)
+                                        ui.notify("路径已复制", type="info")
+
+                                    cp_btn = ui.button(icon="content_copy", on_click=_copy).props(
+                                        "flat dense round size=xs color=grey")
+                                    with cp_btn:
+                                        ui.tooltip(f"复制完整路径：{path}")
+
                         with ui.column().classes("w-full gap-1"):
-                            for text, cls in ((f"best.pt：{art.get('best_pt') or '—'}", "text-xs break-all"),
-                                              (f"last.pt：{art.get('last_pt') or '—'}", "text-xs break-all"),
-                                              (f"results.csv：{art.get('results_csv') or '—'}", "text-xs break-all")):
-                                ui.label(text).classes(cls)
+                            _artifact_row("运行目录", run.get("run_dir"))
+                            _artifact_row("best.pt", art.get("best_pt"))
+                            _artifact_row("last.pt", art.get("last_pt"))
+                            _artifact_row("results.csv", art.get("results_csv"))
                             if art.get("last_pt"):
                                 lp_btn = ui.button("清理 last.pt", icon="cleaning_services",
                                                    on_click=lambda: do_clear_last(uid))
