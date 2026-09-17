@@ -25,7 +25,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 ### 2.1 数据集管理 [T5]
 
 - **双形态**：托管（平台管理）/ 外部（标准 YOLO 目录，只读不改写；X-AnyLabeling 标注目录必须走导入转托管）。
-- **根目录**：Ultralytics `datasets_dir` 设置（缺省 `~/datasets`），config 可覆盖。每个数据集 `task_type ∈ {detect, segment, obb, pose, classify}`。
+- **根目录**：平台专属 `~/xany-platform/datasets`（2026-09-17 用户裁决：目录须可识别归属且数据集与训练产物分离；config 可覆盖）。每个数据集 `task_type ∈ {detect, segment, obb, pose, classify}`。
 - **转换**：导入时自动 X-AnyLabeling JSON → YOLO（搬运 `custom_to_yolo`/`create_yolo_dataset`）；原始目录只注册路径不复制（图片 symlink）；**JSON 为唯一真源**。
 - **切分**：版本层 **Split manifest**（seed、比例默认 8:2、可选按类别分层、文件快照）；同数据集所有 Run 共用一份（Agent 各轮 val 恒定、指标可比）；图片集漂移检测警告；空标注图默认负样本进 train。
 - **类别**：`classes.txt` 行序即 id 唯一真源；`data.yaml` 平台生成；改名/重排为显式操作。
@@ -69,7 +69,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 - **手动启动** `uv run plat`（端口 8600）；平台离线不伤训练（脱离 + 收养）。
 - 日志：`logs/plat.log` 轮转 10MB×5；访问日志走控制台。
-- 磁盘：不自动清理；删 Task 勾选删文件 + Run 级清 last.pt 留 best.pt；runs_dir 默认 `~/datasets/runs`。
+- 磁盘：不自动清理；删 Task 勾选删文件 + Run 级清 last.pt 留 best.pt；runs_dir 默认 `~/xany-platform/runs`（与数据集根分离）。
 
 ## 3. 数据规格
 

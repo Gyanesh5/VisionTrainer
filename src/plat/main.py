@@ -40,7 +40,7 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         training_python=training.get("python", __import__("sys").executable),
         trainer_entry=training.get("trainer_entry", _default_trainer_entry()),
         export_entry=training.get("export_entry", _default_export_entry()),
-        runs_dir=__import__("pathlib").Path(training.get("runs_dir", "~/datasets/runs")).expanduser(),
+        runs_dir=__import__("pathlib").Path(training.get("runs_dir", "~/xany-platform/runs")).expanduser(),
         check_occupancy=training.get("check_occupancy", True),
     )
     session_factory = init_db(training.get("db_url", "sqlite:///data/platform.db"))

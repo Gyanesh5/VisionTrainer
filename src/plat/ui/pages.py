@@ -174,6 +174,75 @@ def _local_image(path: str, width: str = "100%") -> None:
     ui.image(f"data:image/{mime};base64,{b64encode(data).decode()}").style(f"width:{width}")
 
 
+def _list_subdirs(path: str) -> dict:
+    """列子目录（服务端文件系统；单机自用场景，只读列举）。"""
+    p = Path(path).expanduser()
+    if not p.is_dir():
+        return {"ok": False, "error": f"不是目录：{p}"}
+    try:
+        entries = sorted(p.iterdir(), key=lambda x: x.name.lower())
+    except PermissionError:
+        return {"ok": False, "error": "无权限访问该目录"}
+    return {"ok": True, "path": str(p), "parent": str(p.parent),
+            "dirs": [{"name": d.name, "full": str(d)} for d in entries if d.is_dir()]}
+
+
+def _path_picker_field(label: str, placeholder: str = "", value: str = ""):
+    """路径输入框 + 浏览按钮：对话框内逐级浏览服务端目录，确认后回填。返回输入框元素。
+
+    （2026-09-17 用户诉求：手输绝对路径易错，要可视化选择；单机自用=浏览器即本机。）
+    """
+    with ui.row().classes("w-full items-center gap-1"):
+        inp = ui.input(label, value=value, placeholder=placeholder).classes("flex-1")
+        browse = ui.button(icon="folder_open", on_click=lambda: _open()).props("flat dense round")
+        with browse:
+            ui.tooltip("浏览选择目录")
+
+        current: dict = {"path": ""}
+
+        with ui.dialog() as picker, ui.card().classes("w-[34rem] gap-2"):
+            crumb = ui.label("").classes("text-xs opacity-70 break-all")
+            lst = ui.column().classes("w-full max-h-[52vh] overflow-y-auto gap-0 q-pa-xs")
+            with ui.row().classes("w-full justify-between q-mt-sm"):
+                up_btn = ui.button("上一级", icon="arrow_upward").props("outline dense")
+                sel_btn = ui.button("选择此目录", icon="check").props("unelevated dense")
+
+            def _render() -> None:
+                lst.clear()
+                info = _list_subdirs(current["path"])
+                crumb.set_text(info.get("path") or current["path"])
+                with lst:
+                    if not info.get("ok"):
+                        ui.label(info["error"]).classes("text-xs text-red-500")
+                        return
+                    if not info["dirs"]:
+                        ui.label("（无子目录——可直接选择当前目录）").classes("text-xs opacity-40")
+                    for d in info["dirs"]:
+                        b = ui.button(d["name"], icon="folder").props("flat dense align=left no-caps"
+                                                                      ).classes("w-full justify-start text-xs")
+                        b.on_click(lambda dd=d: (current.update(path=dd["full"]), _render()))
+
+            def _up() -> None:
+                cur = Path(current["path"])
+                if cur.parent != cur:
+                    current["path"] = str(cur.parent)
+                _render()
+
+            def _pick() -> None:
+                inp.set_value(current["path"])
+                picker.close()
+
+            def _open() -> None:
+                v = (inp.value or "").strip()
+                current["path"] = v if v and Path(v).expanduser().is_dir() else str(Path.home())
+                _render()
+                picker.open()
+
+            up_btn.on_click(_up)
+            sel_btn.on_click(_pick)
+    return inp
+
+
 def _fmt_eta(sec) -> str:
     if sec is None:
         return ""
@@ -1329,7 +1398,7 @@ def mount() -> None:
                 i_name = ui.input("数据集名")
                 i_task = ui.select({k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
                                    value="detect", label="任务类型")
-                i_src = ui.input("标注目录绝对路径", placeholder="/home/you/annotations")
+                i_src = _path_picker_field("标注目录绝对路径", placeholder="/home/you/annotations")
                 with ui.row().classes("w-full"):
                     i_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05).classes("flex-1")
                     i_seed = ui.number("随机种子", value=42, precision=0).classes("flex-1")
@@ -1418,7 +1487,7 @@ def mount() -> None:
                 e_name = ui.input("数据集名")
                 e_task = ui.select({k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
                                    value="detect", label="任务类型")
-                e_path = ui.input("目录绝对路径", placeholder="…/yolo_ds（需含 data.yaml 或 labels/）")
+                e_path = _path_picker_field("目录绝对路径", placeholder="…/yolo_ds（需含 data.yaml 或 labels/）")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=external_dialog.close).props("flat")
                     e_ok = ui.button("注册", icon="link", on_click=lambda: do_external()).props("unelevated")
@@ -1485,11 +1554,14 @@ def mount() -> None:
         def body() -> None:
             tasks = [t for t in tsvc.list_tasks(get_manager()) if t["status"] in ("done", "failed", "cancelled")]
 
-            # ── 跨任务对比
-            with ui.row().classes("w-full items-center q-mt-md"):
-                ui.icon("insights", size="18px").classes("opacity-50")
-                ui.label("跨任务对比").classes("text-base font-semibold")
-                ui.label("勾选 2 个以上任务叠加最优轮曲线与超参差异").classes("text-xs opacity-40")
+            # ── 跨任务对比（按钮固定在标题行右侧——结果渲染不会挤动它）
+            with ui.row().classes("w-full items-center q-mt-md flex-wrap"):
+                with ui.row().classes("items-center gap-2 flex-1 min-w-56 flex-wrap"):
+                    ui.icon("insights", size="18px").classes("opacity-50")
+                    ui.label("跨任务对比").classes("text-base font-semibold")
+                    ui.label("勾选 2 个以上任务叠加最优轮曲线与超参差异").classes("text-xs opacity-40")
+                cmp_btn = ui.button("对比所选（0）", icon="compare_arrows",
+                                    on_click=lambda: do_cross()).props("unelevated dense")
             ui.separator().classes("q-mt-xs q-mb-sm")
 
             cross_rows = []
@@ -1576,8 +1648,6 @@ def mount() -> None:
                 for i in range(len(items)):
                     tbl.add_slot(f"body-cell-t{i}", diff_cell)
 
-            with ui.row().classes("w-full justify-end q-mt-sm"):
-                cmp_btn = ui.button("对比所选（0）", icon="compare_arrows", on_click=do_cross).props("unelevated")
             cmp_holder["btn"] = cmp_btn
 
             # ── 任务内跨轮对比 + 复盘报告
@@ -2087,8 +2157,8 @@ def mount() -> None:
             with ui.card().classes("w-full gap-2"):
                 ui.label("当前配置（config.toml）").classes("font-semibold")
                 _kv("训练 python", str(training.get("python", "未配置")), wrap=True)
-                _kv("数据集根目录", str(training.get("datasets_dir", "~/datasets")), wrap=True)
-                _kv("产物根目录", str(training.get("runs_dir", "~/datasets/runs")), wrap=True)
+                _kv("数据集根目录", str(training.get("datasets_dir", "~/xany-platform/datasets")), wrap=True)
+                _kv("产物根目录", str(training.get("runs_dir", "~/xany-platform/runs")), wrap=True)
                 _kv("模型库目录", str(training.get("model_lib_dir", "~/Documents/x-anylabeling-models")),
                     wrap=True)
                 key = llm.get("api_key") or ""

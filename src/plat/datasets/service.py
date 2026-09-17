@@ -30,7 +30,7 @@ class DatasetError(Exception):
 def get_datasets_root() -> Path:
     from ..config import load_config
 
-    root = Path(load_config().get("training", {}).get("datasets_dir", "~/datasets")).expanduser()
+    root = Path(load_config().get("training", {}).get("datasets_dir", "~/xany-platform/datasets")).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
