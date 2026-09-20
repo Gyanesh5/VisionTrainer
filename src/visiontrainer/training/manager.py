@@ -585,4 +585,4 @@ def _now():
 
 
 # Run/Task 延迟导入避免循环（db.models 不依赖本模块）
-from plat.db.models import EpochMetric, Run, Task  # noqa: E402
+from visiontrainer.db.models import EpochMetric, Run, Task  # noqa: E402

@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from plat.main import create_app
+from visiontrainer.main import create_app
 
 STUB = str(Path(__file__).parent / "stub_trainer.py")
 
@@ -30,7 +30,7 @@ def _scripted_chat(responses: list[str]):
 
 @pytest.fixture()
 def agent_client(tmp_path: Path, datasets_root, detect_source):
-    from plat.datasets import service as svc
+    from visiontrainer.datasets import service as svc
 
     svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
@@ -54,7 +54,7 @@ def _wait_agent_state(client: TestClient, task_id: int, states: set[str], timeou
 
 def test_agent_auto_loop_two_rounds(agent_client, monkeypatch):
     """auto 模式：LLM 每轮给出 lr0 调整，跑满 2 轮后正常收官。"""
-    from plat.agent import tuner as tuner_mod
+    from visiontrainer.agent import tuner as tuner_mod
 
     responses = [
         json_tune("0.05", "第一轮偏低，提高学习率"),
@@ -82,7 +82,7 @@ def json_tune(lr0: str, analysis: str) -> str:
 
 def test_agent_manual_approval_and_stop(agent_client, monkeypatch):
     """manual 模式：轮 1 后停在审批门；approve stop → terminated。"""
-    from plat.agent import tuner as tuner_mod
+    from visiontrainer.agent import tuner as tuner_mod
 
     responses = [json_tune("0.05", "建议提高学习率")]
     monkeypatch.setattr(tuner_mod, "chat", _scripted_chat(responses))
@@ -103,7 +103,7 @@ def test_agent_manual_approval_and_stop(agent_client, monkeypatch):
 
 def test_agent_approve_continue_runs_next_round(agent_client, monkeypatch):
     """manual 模式：approve continue → 下一轮自动排队跑完。"""
-    from plat.agent import tuner as tuner_mod
+    from visiontrainer.agent import tuner as tuner_mod
 
     responses = [json_tune("0.05", "round1 决策"), json_tune("0.03", "round2 决策")]
     monkeypatch.setattr(tuner_mod, "chat", _scripted_chat(responses))
@@ -123,7 +123,7 @@ def test_agent_approve_continue_runs_next_round(agent_client, monkeypatch):
 
 def test_agent_clamps_out_of_range(agent_client, tmp_path, monkeypatch):
     """白名单 clamp：lr0 越界被压回边界，clamp 记录归档。"""
-    from plat.agent import tuner as tuner_mod
+    from visiontrainer.agent import tuner as tuner_mod
 
     responses = [
         json.dumps({"analysis": "lr 拉满", "action": "tune", "hyperparameters": {"lr0": 99.0, "not_allowed": 1}}),
@@ -153,8 +153,8 @@ def test_agent_clamps_out_of_range(agent_client, tmp_path, monkeypatch):
 
 def test_agent_llm_failure_pauses(agent_client, monkeypatch):
     """LLM 不可达 → paused 等人（绝不静默烧卡）。"""
-    from plat.agent import tuner as tuner_mod
-    from plat.agent.llm import LLMError
+    from visiontrainer.agent import tuner as tuner_mod
+    from visiontrainer.agent.llm import LLMError
 
     def failing_chat(messages, **kwargs):
         raise LLMError("端点不可达")
@@ -173,7 +173,7 @@ def test_agent_llm_failure_pauses(agent_client, monkeypatch):
 def test_agent_no_improve_terminates(agent_client, monkeypatch):
     """终止条件：连续 2 轮主指标无提升（stub 每轮主指标恒定 0.1）→ 自动收官。"""
     flat = json.dumps({"analysis": "指标平台期", "action": "tune", "hyperparameters": {"lr0": 0.01}})
-    monkeypatch.setattr("plat.agent.tuner.chat", _scripted_chat([flat]))
+    monkeypatch.setattr("visiontrainer.agent.tuner.chat", _scripted_chat([flat]))
 
     r = agent_client.post("/api/v1/tasks", json={
         "name": "agent-flat", "base_model": "stub", "dataset": "plate", "epochs": 2,

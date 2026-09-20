@@ -40,10 +40,10 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         training_python=training.get("python", __import__("sys").executable),
         trainer_entry=training.get("trainer_entry", _default_trainer_entry()),
         export_entry=training.get("export_entry", _default_export_entry()),
-        runs_dir=__import__("pathlib").Path(training.get("runs_dir", "~/xany-platform/runs")).expanduser(),
+        runs_dir=__import__("pathlib").Path(training.get("runs_dir", "~/visiontrainer/runs")).expanduser(),
         check_occupancy=training.get("check_occupancy", True),
     )
-    session_factory = init_db(training.get("db_url", "sqlite:///data/platform.db"))
+    session_factory = init_db(training.get("db_url", "sqlite:///data/visiontrainer.db"))
     manager = TrainingManager(session_factory, settings)
 
     @asynccontextmanager
@@ -55,7 +55,7 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         tuner.recover(manager)
         yield
 
-    app = FastAPI(title="X-Any 训练平台", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="VisionTrainer", version="0.1.0", lifespan=lifespan)
     app.include_router(api_router, prefix="/api")
     app.state.manager = manager
     set_manager(manager)
@@ -75,7 +75,7 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     if with_ui:
         mount_ui()
         # language=zh-CN：Quasar 内置组件文案中文化（NiceGUI 自带 zh-CN 语言包）
-        ui.run_with(app, title="X-Any 训练平台", storage_secret="plat-dev-secret", language="zh-CN")
+        ui.run_with(app, title="VisionTrainer", storage_secret="visiontrainer-dev-secret", language="zh-CN")
     return app
 
 
@@ -87,10 +87,10 @@ def main() -> None:
     from logging.handlers import RotatingFileHandler
 
     server = load_config().get("server", {})
-    # spec 2.7：logs/plat.log 轮转 10MB×5；访问日志只走控制台
+    # spec 2.7：logs/visiontrainer.log 轮转 10MB×5；访问日志只走控制台
     log_dir = Path(__file__).parent.parent.parent / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    file_handler = RotatingFileHandler(log_dir / "plat.log", maxBytes=10 * 1024 * 1024,
+    file_handler = RotatingFileHandler(log_dir / "visiontrainer.log", maxBytes=10 * 1024 * 1024,
                                        backupCount=5, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
     root = logging.getLogger()

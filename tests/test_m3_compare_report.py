@@ -11,9 +11,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from plat.charts.render import render_run_charts
-from plat.datasets import service as svc
-from plat.main import create_app
+from visiontrainer.charts.render import render_run_charts
+from visiontrainer.datasets import service as svc
+from visiontrainer.main import create_app
 
 STUB = str(Path(__file__).parent / "stub_trainer.py")
 
@@ -67,7 +67,7 @@ def test_compare_invalid_args(two_done_tasks):
 
 
 def test_render_charts_produces_pngs(tmp_path):
-    from plat.charts.render import confusion_matrix_png
+    from visiontrainer.charts.render import confusion_matrix_png
 
     metrics = [
         {"epoch": 1, "metrics": {"metrics/mAP50(B)": 0.2, "metrics/mAP50-95(B)": 0.1}, "loss": {"box_loss": 2.0}},
@@ -102,8 +102,8 @@ def test_report_generation_with_mock_llm(two_done_tasks, tmp_path):
     assert r.status_code in (200, 502)  # 无 config 时走默认 502；此处直接注入 mock 客户端验证
 
     # 直接调 service 注入 mock transport，验证完整链路
-    from plat.training import service as tsvc
-    from plat.training.manager import get_manager
+    from visiontrainer.training import service as tsvc
+    from visiontrainer.training.manager import get_manager
 
     result = tsvc.generate_report(get_manager(), run_uid, client=httpx.Client(transport=transport))
     assert result["chars"] > 0

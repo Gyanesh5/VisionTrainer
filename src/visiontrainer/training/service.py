@@ -32,7 +32,7 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
     """extra_args：用户设定的训练参数（对齐 ultralytics 官方全量，见 training/params.py），
     按 params schema 校验后并入 train_args；Agent 调参决策仍走 agent/allowlist.py 白名单。"""
     from .manager import new_uid
-    from plat.db.models import Run, Task
+    from visiontrainer.db.models import Run, Task
 
     try:
         meta = ds.get_dataset(dataset)
@@ -78,7 +78,7 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
 
 
 def list_tasks(manager) -> list[dict]:
-    from plat.db.models import Run, Task
+    from visiontrainer.db.models import Run, Task
 
     with manager.Session() as s:
         queued_runs = s.query(Run).filter(Run.status == "queued").order_by(Run.id).all()
@@ -112,7 +112,7 @@ def list_tasks(manager) -> list[dict]:
 
 
 def get_task(manager, task_id: int) -> dict:
-    from plat.db.models import Run, Task
+    from visiontrainer.db.models import Run, Task
 
     with manager.Session() as s:
         t = s.get(Task, task_id)
@@ -131,7 +131,7 @@ def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
 
     from sqlalchemy import text
 
-    from plat.db.models import EpochMetric, Run, Task
+    from visiontrainer.db.models import EpochMetric, Run, Task
 
     with manager.Session() as s:
         t = s.get(Task, task_id)
@@ -150,7 +150,7 @@ def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
 
 
 def get_run(manager, uid: str) -> dict:
-    from plat.db.models import EpochMetric, Run, Task
+    from visiontrainer.db.models import EpochMetric, Run, Task
 
     with manager.Session() as s:
         r = s.query(Run).filter(Run.uid == uid).one_or_none()
@@ -180,7 +180,7 @@ def get_run(manager, uid: str) -> dict:
 
 def clear_last_pt(manager, uid: str) -> dict:
     """Run 级磁盘管理（11 号票）：删 last.pt 留 best.pt。"""
-    from plat.db.models import Run
+    from visiontrainer.db.models import Run
 
     with manager.Session() as s:
         r = s.query(Run).filter(Run.uid == uid).one_or_none()
@@ -231,7 +231,7 @@ def _clean_log_line(line: str) -> str:
 
 
 def run_logs(manager, uid: str, tail: int = 200) -> list[str]:
-    from plat.db.models import Run
+    from visiontrainer.db.models import Run
 
     with manager.Session() as s:
         r = s.query(Run).filter(Run.uid == uid).one_or_none()
@@ -273,7 +273,7 @@ def _dataset_meta_of_task(task) -> dict:
 
 def compare_runs(manager, task_id: int) -> dict:
     """Task 内跨 Run 对比：各轮主指标曲线与最佳 epoch（07 号票对比视图数据）。"""
-    from plat.db.models import EpochMetric, Run, Task
+    from visiontrainer.db.models import EpochMetric, Run, Task
 
     with manager.Session() as s:
         task = s.get(Task, task_id)
@@ -303,7 +303,7 @@ def compare_runs(manager, task_id: int) -> dict:
 
 def compare_tasks(manager, task_ids: list[int]) -> dict:
     """跨 Task 对比：各任务最优主指标终值 + 最优 Run 的主指标曲线 + 超参（叠加与 diff 用，06 号票）。"""
-    from plat.db.models import EpochMetric, Run, Task
+    from visiontrainer.db.models import EpochMetric, Run, Task
 
     with manager.Session() as s:
         items = []
@@ -403,7 +403,7 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
     导出子进程在训练 venv 执行（真实链路需 ultralytics+onnxruntime；测试可注入 stub）。
     """
     from ..config import load_config
-    from plat.db.models import Deployment, Run, Task
+    from visiontrainer.db.models import Deployment, Run, Task
 
     cfg = load_config().get("training", {})
     lib_dir = Path(model_lib_dir or cfg.get("model_lib_dir", "~/Documents/x-anylabeling-models")).expanduser()
@@ -509,7 +509,7 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
 
 
 def list_deployments(manager) -> dict:
-    from plat.db.models import Deployment, Run, Task
+    from visiontrainer.db.models import Deployment, Run, Task
 
     with manager.Session() as s:
         rows = (s.query(Deployment, Run, Task)

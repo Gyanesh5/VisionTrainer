@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from plat.main import app
-from plat.datasets import service as svc
+from visiontrainer.main import app
+from visiontrainer.datasets import service as svc
 
 
 @pytest.fixture()

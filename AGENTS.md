@@ -1,6 +1,6 @@
 # AGENTS.md
 
-单机 YOLO 训练平台（FastAPI + NiceGUI + SQLite）。规划蓝图见 `.scratch/training-platform/`（wayfinder 地图 + 13 张决策票），功能与架构 spec 见 `docs/spec.md`，接口契约见 `docs/api.md`。实现前先读这三样。
+单机 YOLO 训练平台（FastAPI + NiceGUI + SQLite）。规划蓝图见 `.scratch/visiontrainer-build/`（wayfinder 地图 + 13 张决策票），功能与架构 spec 见 `docs/spec.md`，接口契约见 `docs/api.md`。实现前先读这三样。
 
 ## Agent skills
 

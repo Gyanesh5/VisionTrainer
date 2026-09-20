@@ -1,4 +1,4 @@
-"""训练子进程入口——在训练 venv 的 python 里以独立文件运行（不 import plat 包）。
+"""训练子进程入口——在训练 venv 的 python 里以独立文件运行（不 import visiontrainer 包）。
 
 用法：python trainer_entry.py <payload_path>
 payload：{"run_dir", "base_model", "data_yaml", "args": {...}}

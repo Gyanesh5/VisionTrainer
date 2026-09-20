@@ -1,10 +1,10 @@
 """数据库层测试（10 号票六表 + schema_version）。"""
 
-from plat.db.models import AgentDecision, Deployment, EpochMetric, Run, Task, init_db
+from visiontrainer.db.models import AgentDecision, Deployment, EpochMetric, Run, Task, init_db
 
 
 def test_init_db_creates_six_tables(tmp_path):
-    db = tmp_path / "platform.db"
+    db = tmp_path / "visiontrainer.db"
     session_factory = init_db(f"sqlite:///{db}")
     with session_factory() as s:
         t = Task(uid="t1" * 4, name="demo", base_model="yolo11n", train_args={"epochs": 5})

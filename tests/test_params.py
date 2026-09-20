@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from plat.training.params import (
+from visiontrainer.training.params import (
     FIRST_CLASS,
     NON_TRAIN_ARGS,
     PARAMS,
@@ -108,8 +108,8 @@ def api_client(tmp_path, datasets_root, detect_source, monkeypatch):
 
     from fastapi.testclient import TestClient
 
-    from plat.datasets import service as svc
-    from plat.main import create_app
+    from visiontrainer.datasets import service as svc
+    from visiontrainer.main import create_app
 
     svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {
@@ -117,11 +117,11 @@ def api_client(tmp_path, datasets_root, detect_source, monkeypatch):
             "python": sys.executable,
             "trainer_entry": str(Path(__file__).parent / "stub_trainer.py"),
             "runs_dir": str(tmp_path / "runs"),
-            "db_url": f"sqlite:///{tmp_path / 'platform.db'}",
+            "db_url": f"sqlite:///{tmp_path / 'visiontrainer.db'}",
             "check_occupancy": False,
         },
     }
-    monkeypatch.setattr("plat.datasets.service.get_datasets_root", lambda: datasets_root)
+    monkeypatch.setattr("visiontrainer.datasets.service.get_datasets_root", lambda: datasets_root)
     app = create_app(cfg=cfg, with_ui=False)
     with TestClient(app) as c:
         yield c

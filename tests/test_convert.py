@@ -1,6 +1,6 @@
 """转换器测试：hbb/seg/obb/pose/classify 五种 task_type + 边界。"""
 
-from plat.datasets.convert import json_to_yolo_lines, shape_matches_task
+from visiontrainer.datasets.convert import json_to_yolo_lines, shape_matches_task
 
 
 def test_detect_rectangle():

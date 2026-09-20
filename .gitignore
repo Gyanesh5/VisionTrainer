@@ -11,3 +11,4 @@ dist/
 .pyplaywright/
 *.pt
 .nicegui/
+.playwright-mcp/

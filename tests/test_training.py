@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from plat.datasets import service as svc
-from plat.main import create_app
+from visiontrainer.datasets import service as svc
+from visiontrainer.main import create_app
 
 STUB = str(Path(__file__).parent / "stub_trainer.py")
 
@@ -35,11 +35,11 @@ def training_client(tmp_path: Path, datasets_root, detect_source, monkeypatch: p
             "python": sys.executable,
             "trainer_entry": STUB,
             "runs_dir": str(tmp_path / "runs"),
-            "db_url": f"sqlite:///{tmp_path / 'platform.db'}",
+            "db_url": f"sqlite:///{tmp_path / 'visiontrainer.db'}",
             "check_occupancy": False,
         },
     }
-    monkeypatch.setattr("plat.datasets.service.get_datasets_root", lambda: datasets_root)
+    monkeypatch.setattr("visiontrainer.datasets.service.get_datasets_root", lambda: datasets_root)
     app = create_app(cfg=cfg, with_ui=False)
     with TestClient(app) as c:
         yield c
@@ -107,7 +107,7 @@ def test_resume_after_done(training_client):
 
 def test_event_bus_stream(training_client):
     """WS 契约的总线级验证：真实 watchdog 发布 → 订阅者收到 metrics 与终态。"""
-    from plat import ws as wsmod
+    from visiontrainer import ws as wsmod
 
     q = wsmod.subscribe()
     try:
@@ -161,7 +161,7 @@ def test_run_progress_snapshot(training_client):
 
 def test_orphan_adoption_after_platform_restart(tmp_path, datasets_root, detect_source):
     """M2 验收④：平台重启不杀训练；重启后收养存活进程恢复监控（ADR 0001）。"""
-    from plat.datasets import service as svc
+    from visiontrainer.datasets import service as svc
 
     svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     monkey_root = datasets_root

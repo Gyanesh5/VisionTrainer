@@ -15,7 +15,7 @@ from pathlib import Path
 from fastapi import Request
 from nicegui import app, ui
 
-from ..config import load_config
+from ..config import load_config, update_config
 from ..datasets import service as ds
 from ..training.params import GROUPS as PARAM_GROUPS
 
@@ -535,6 +535,16 @@ def _default_hint(e: dict) -> str:
     return f"默认 {e['default']}" if e["default"] is not None else "默认不设置"
 
 
+def _select_default_label(e: dict) -> str:
+    """下拉「不设置」项直接标出官方默认值——不开下拉也能看到默认是什么。"""
+    d = e["default"]
+    if d is None:
+        return "默认不设置"
+    if isinstance(d, bool):
+        return "默认开" if d else "默认关"
+    return f"默认 {d}"
+
+
 def _param_label(e: dict) -> tuple[str, str]:
     """label「key（说明）」拆两段：表单只显 key（3 列网格下不换行），完整说明进 tooltip。"""
     label = e["label"]
@@ -574,24 +584,25 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
     def _add_field(e: dict) -> None:
         t = e["type"]
         short, full = _param_label(e)
-        if t in ("int", "float"):
+        is_select = t in ("bool", "bool|str") or (t == "str" and "options" in e)
+        if is_select:
+            options: dict = {"": _select_default_label(e)}
+            if t in ("bool", "bool|str"):
+                options.update({True: "开", False: "关"})
+            if "options" in e:
+                options.update({o: o for o in e["options"]})
+            w = ui.select(options, value="", label=short).classes("flex-1")
+        elif t in ("int", "float"):
             w = ui.number(short, precision=0 if t == "int" else None,
-                          step=0.0001 if t == "float" else 1,
-                          placeholder=_default_hint(e)).classes("flex-1")
-        elif t == "bool":
-            w = ui.select({"": "官方默认", True: "开", False: "关"}, value="",
-                          label=short).classes("flex-1")
-        elif t == "bool|str":
-            w = ui.select({"": "官方默认", True: "开", False: "关",
-                           **{o: o for o in e["options"]}}, value="",
-                          label=short).classes("flex-1")
-        elif t == "str" and "options" in e:
-            w = ui.select({"": "官方默认", **{o: o for o in e["options"]}}, value="",
-                          label=short).classes("flex-1")
+                          step=0.0001 if t == "float" else 1).classes("flex-1")
         else:  # 自由字符串 / freeze 的 int|list
-            w = ui.input(short, placeholder=_default_hint(e)).classes("flex-1")
+            w = ui.input(short).classes("flex-1")
         with w:
             ui.tooltip(full)
+        if not is_select:
+            # 默认值常显在输入框右侧灰字——不聚焦、不悬停也能看到
+            with w.add_slot("append"):
+                ui.label(_default_hint(e)).classes("text-xs opacity-40").style("white-space: nowrap")
         w.on_value_change(lambda _e: _recount())
         param_fields[e["key"]] = (e, w)
 
@@ -1211,8 +1222,9 @@ def mount() -> None:
                         c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
                     with ui.row().classes("w-full"):
                         c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
-                        c_patience = ui.number("patience", precision=0, min=1,
-                                               placeholder="默认 100").classes("flex-1")
+                        c_patience = ui.number("patience", precision=0, min=1).classes("flex-1")
+                        with c_patience.add_slot("append"):
+                            ui.label("默认 100").classes("text-xs opacity-40").style("white-space: nowrap")
 
                     # ── 分区 3：高级参数（tabs 一次点开，替代套娃折叠）
                     def _refresh_summary() -> None:
@@ -2210,8 +2222,9 @@ def mount() -> None:
                         c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
                     with ui.row().classes("w-full"):
                         c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
-                        c_patience = ui.number("patience", precision=0, min=1,
-                                               placeholder="默认 100").classes("flex-1")
+                        c_patience = ui.number("patience", precision=0, min=1).classes("flex-1")
+                        with c_patience.add_slot("append"):
+                            ui.label("默认 100").classes("text-xs opacity-40").style("white-space: nowrap")
 
                     _form_section("smart_toy", "调参循环")
                     with ui.row().classes("w-full"):
@@ -2299,21 +2312,42 @@ def mount() -> None:
                                                app.storage.user.__setitem__("dark", e.value)))
                 ui.label("仅影响当前浏览器；图表配色两种模式下均可读。").classes("text-xs opacity-50")
 
-            with ui.card().classes("w-full gap-2"):
-                ui.label("当前配置（config.toml）").classes("font-semibold")
-                _kv("训练 python", str(training.get("python", "未配置")), wrap=True)
-                _kv("数据集根目录", str(training.get("datasets_dir", "~/xany-platform/datasets")), wrap=True)
-                _kv("产物根目录", str(training.get("runs_dir", "~/xany-platform/runs")), wrap=True)
-                _kv("模型库目录", str(training.get("model_lib_dir", "~/Documents/x-anylabeling-models")),
-                    wrap=True)
-                key = llm.get("api_key") or ""
-                masked = (key[:6] + "…" + key[-4:]) if len(key) > 12 else ("已配置" if key else "未配置")
-                _kv("LLM", f"{llm.get('model', '未配置')} @ {llm.get('base_url', '未配置')}（key：{masked}）",
-                    wrap=True)
-                ui.label("密钥只存本地 config.toml，不进 git。修改后重启平台生效。").classes("text-xs opacity-50")
+            def _notify_saved(restart: bool) -> None:
+                ui.notify("已保存；重启平台后生效" if restart else "已保存，即时生效", type="positive")
 
-                test_btn = ui.button("测试 LLM 连通性", icon="wifi", on_click=lambda: do_test())
-                test_btn.props("outline")
+            def _save_fail(exc: Exception) -> None:
+                ui.notify(f"保存失败：{getattr(exc, 'message', exc)}", type="negative")
+
+            with ui.card().classes("w-full gap-2"):
+                ui.label("Agent 调参（LLM）").classes("font-semibold")
+                ui.label("保存后立即生效（下一次调用读取新值）；测试连通性前请先保存。"
+                         "密钥只存本地 config.toml，不进 git。").classes("text-xs opacity-50")
+                l_base = ui.input("base_url（OpenAI 兼容端点）", value=str(llm.get("base_url", ""))).classes("w-full")
+                l_key = ui.input("api_key", value=str(llm.get("api_key", ""))).props("type=password").classes("w-full")
+                key_shown = {"on": False}
+
+                def _toggle_key() -> None:
+                    key_shown["on"] = not key_shown["on"]
+                    l_key.props("type=text" if key_shown["on"] else "type=password")
+
+                with l_key.add_slot("append"):
+                    ui.button(icon="visibility", on_click=_toggle_key).props("flat dense round")
+                l_model = ui.input("model", value=str(llm.get("model", ""))).classes("w-full")
+                with ui.row().classes("gap-2"):
+                    llm_btn = ui.button("保存", icon="save", on_click=lambda: do_save_llm())
+                    test_btn = ui.button("测试 LLM 连通性", icon="wifi", on_click=lambda: do_test())
+                    test_btn.props("outline")
+
+                async def do_save_llm() -> None:
+                    updates = {"llm": {"base_url": (l_base.value or "").strip(),
+                                       "api_key": (l_key.value or "").strip(),
+                                       "model": (l_model.value or "").strip()}}
+                    with _busy(llm_btn):
+                        try:
+                            _, restart = await _io(update_config, updates)
+                            _notify_saved(restart)
+                        except Exception as exc:  # noqa: BLE001
+                            _save_fail(exc)
 
                 async def do_test() -> None:
                     def _test() -> str:
@@ -2332,6 +2366,57 @@ def mount() -> None:
                             ui.notify(f"LLM 连通正常，回复：{text[:40]}", type="positive")
                         except Exception as exc:  # noqa: BLE001
                             ui.notify(f"LLM 不可达：{exc}", type="negative")
+
+            with ui.card().classes("w-full gap-2"):
+                ui.label("训练与目录").classes("font-semibold")
+                ui.label("保存后需重启平台生效（训练子进程与目录根在启动时装配）。").classes("text-xs opacity-50")
+                t_python = ui.input("训练 python（torch/ultralytics 所在环境）",
+                                    value=str(training.get("python", ""))).classes("w-full")
+                t_ds = ui.input("数据集根目录 datasets_dir",
+                                value=str(training.get("datasets_dir", "~/visiontrainer/datasets"))).classes("w-full")
+                t_runs = ui.input("产物根目录 runs_dir",
+                                  value=str(training.get("runs_dir", "~/visiontrainer/runs"))).classes("w-full")
+                t_lib = ui.input("模型库目录 model_lib_dir",
+                                 value=str(training.get("model_lib_dir", "~/Documents/x-anylabeling-models"))).classes(
+                    "w-full")
+                t_occ = ui.switch("启动前检测 GPU 外部占用（check_occupancy）",
+                                  value=bool(training.get("check_occupancy", True)))
+                train_btn = ui.button("保存", icon="save", on_click=lambda: do_save_training())
+
+                async def do_save_training() -> None:
+                    updates = {"training": {"python": (t_python.value or "").strip(),
+                                            "datasets_dir": (t_ds.value or "").strip(),
+                                            "runs_dir": (t_runs.value or "").strip(),
+                                            "model_lib_dir": (t_lib.value or "").strip(),
+                                            "check_occupancy": bool(t_occ.value)}}
+                    with _busy(train_btn):
+                        try:
+                            _, restart = await _io(update_config, updates)
+                            _notify_saved(restart)
+                        except Exception as exc:  # noqa: BLE001
+                            _save_fail(exc)
+
+                _kv("trainer_entry", str(training.get("trainer_entry", "未配置（用包内默认）")), wrap=True)
+                _kv("export_entry", str(training.get("export_entry", "未配置（用包内默认）")), wrap=True)
+
+            with ui.card().classes("w-full gap-2"):
+                ui.label("服务（server）").classes("font-semibold")
+                ui.label("修改监听地址/端口后需重启平台。").classes("text-xs opacity-50")
+                s_host = ui.input("监听地址 host",
+                                  value=str(cfg.get("server", {}).get("host", "127.0.0.1"))).classes("w-full")
+                s_port = ui.number("端口 port", value=int(cfg.get("server", {}).get("port", 8600)),
+                                   min=1, max=65535).classes("w-full")
+                srv_btn = ui.button("保存", icon="save", on_click=lambda: do_save_server())
+
+                async def do_save_server() -> None:
+                    updates = {"server": {"host": (s_host.value or "").strip(),
+                                          "port": int(s_port.value or 0)}}
+                    with _busy(srv_btn):
+                        try:
+                            _, restart = await _io(update_config, updates)
+                            _notify_saved(restart)
+                        except Exception as exc:  # noqa: BLE001
+                            _save_fail(exc)
 
             with ui.card().classes("w-full gap-2"):
                 ui.label("GPU 状态").classes("font-semibold")

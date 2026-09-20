@@ -1,4 +1,4 @@
-"""导出部署子进程入口——在训练 venv 的 python 里以独立文件运行（不 import plat 包）。
+"""导出部署子进程入口——在训练 venv 的 python 里以独立文件运行（不 import visiontrainer 包）。
 
 用法：python export_entry.py <payload_path>
 payload：{"weights", "run_dir", "target_dir", "name", "display_name", "base_model",

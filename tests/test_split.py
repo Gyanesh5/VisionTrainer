@@ -1,6 +1,6 @@
 """切分清单测试：可复现性（M1 验收核心）、比例、分层、负样本去向。"""
 
-from plat.datasets.split import build_manifest
+from visiontrainer.datasets.split import build_manifest
 
 
 def _entries(n: int, label_prefix: str = "car") -> list[dict]:

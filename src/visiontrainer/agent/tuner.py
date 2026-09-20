@@ -57,7 +57,7 @@ def _set_state(s, task, state: str) -> None:
 
 def _get_state(Session, task_id: int) -> str:
     with Session() as s:
-        from plat.db.models import Task
+        from visiontrainer.db.models import Task
 
         t = s.get(Task, task_id)
         return (t.agent_config or {}).get("state", "idle")
@@ -81,7 +81,7 @@ def launch_or_resume(manager, task_id: int) -> None:
 def recover(manager) -> None:
     """平台重启后：所有未完成 agent 任务恢复循环线程。"""
     with manager.Session() as s:
-        from plat.db.models import Task
+        from visiontrainer.db.models import Task
 
         for t in s.query(Task).filter(Task.source == "agent").all():
             if (t.agent_config or {}).get("state") in ("running", "waiting_approval", "paused", "idle"):
@@ -91,7 +91,7 @@ def recover(manager) -> None:
 def approve(manager, task_id: int, action: str) -> dict:
     """审批门/暂停恢复裁决：continue（放行）或 stop（终止循环）。"""
     with manager.Session() as s:
-        from plat.db.models import Run, Task
+        from visiontrainer.db.models import Run, Task
 
         t = s.get(Task, task_id)
         if t is None:
@@ -130,7 +130,7 @@ def _loop_safe(manager, task_id: int, stop: threading.Event) -> None:
 
 
 def _loop(manager, task_id: int, stop: threading.Event) -> None:
-    from plat.db.models import AgentDecision, Run, Task
+    from visiontrainer.db.models import AgentDecision, Run, Task
 
     Session = manager.Session
 
@@ -266,7 +266,7 @@ def _await_verdict(Session, task_id: int, stop: threading.Event) -> str:
 
 def _queued_run_uid(Session, task_id: int) -> str | None:
     with Session() as s:
-        from plat.db.models import Run
+        from visiontrainer.db.models import Run
 
         r = s.query(Run).filter(Run.task_id == task_id, Run.status == "queued").first()
         return r.uid if r else None
@@ -274,7 +274,7 @@ def _queued_run_uid(Session, task_id: int) -> str | None:
 
 def _last_run(Session, task_id: int) -> dict | None:
     with Session() as s:
-        from plat.db.models import Run
+        from visiontrainer.db.models import Run
 
         r = s.query(Run).filter(Run.task_id == task_id, Run.status != "queued") \
             .order_by(Run.round_no.desc()).first()
@@ -288,7 +288,7 @@ def _wait_run(manager, run_uid: str, stop: threading.Event, timeout: float = 360
     deadline = time.time() + timeout
     while not stop.is_set() and time.time() < deadline:
         with manager.Session() as s:
-            from plat.db.models import Run
+            from visiontrainer.db.models import Run
 
             r = s.query(Run).filter(Run.uid == run_uid).one_or_none()
             if r and r.status not in ("queued", "running", "stopping"):
@@ -298,7 +298,7 @@ def _wait_run(manager, run_uid: str, stop: threading.Event, timeout: float = 360
 
 def _append_history(Session, task_id: int, decision: dict, changes: dict, clamps: list) -> list[dict]:
     with Session() as s:
-        from plat.db.models import Task
+        from visiontrainer.db.models import Task
 
         t = s.get(Task, task_id)
         cfg = dict(t.agent_config or {})
@@ -316,7 +316,7 @@ def _append_history(Session, task_id: int, decision: dict, changes: dict, clamps
 def _decide(Session, task_id: int, objective: str, history: list[dict], best: float | None):
     """多模态决策：指标 JSON + 渲染图 → LLM。返回 (decision, error)。"""
     from ..charts.render import confusion_matrix_png, render_run_charts
-    from plat.db.models import EpochMetric, Run, Task
+    from visiontrainer.db.models import EpochMetric, Run, Task
 
     with Session() as s:
         t = s.get(Task, task_id)

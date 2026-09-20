@@ -100,7 +100,7 @@ class Deployment(Base):
 SCHEMA_VERSION = 1
 
 
-def init_db(db_url: str = "sqlite:///data/platform.db") -> sessionmaker:
+def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
     """建表 + 记录 schema 版本；返回会话工厂。幂等。"""
     if db_url.startswith("sqlite:///"):
         from pathlib import Path

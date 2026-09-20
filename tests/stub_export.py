@@ -20,12 +20,12 @@ target.mkdir(parents=True, exist_ok=True)
 time.sleep(0.3)  # 模拟导出耗时
 
 (target / "model.onnx").write_bytes(b"ONNX-STUB" + b"\x00" * 64)
-from plat.training.export_entry import desktop_type  # 与真实导出器同规则（04 号票）
+from visiontrainer.training.export_entry import desktop_type  # 与真实导出器同规则（04 号票）
 
 config = {
     "type": desktop_type(payload.get("base_model", ""), payload.get("task_type", "detect")),
     "name": payload["name"],
-    "provider": "xany-training-platform",
+    "provider": "VisionTrainer",
     "display_name": payload["display_name"],
     "model_path": "model.onnx",
     "iou_threshold": payload.get("iou", 0.45),

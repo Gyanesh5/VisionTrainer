@@ -10,8 +10,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from plat.datasets import service as svc
-from plat.main import create_app
+from visiontrainer.datasets import service as svc
+from visiontrainer.main import create_app
 
 STUB = str(Path(__file__).parent / "stub_trainer.py")
 STUB_EXPORT = str(Path(__file__).parent / "stub_export.py")
@@ -19,7 +19,7 @@ STUB_EXPORT = str(Path(__file__).parent / "stub_export.py")
 
 @pytest.fixture()
 def deploy_client(tmp_path: Path, datasets_root, detect_source):
-    from plat.datasets import service as svc
+    from visiontrainer.datasets import service as svc
 
     svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
@@ -91,8 +91,8 @@ def _run_uid(client: TestClient, task_id: int) -> str:
 
 
 def test_lru_hint_after_six(tmp_path, datasets_root, detect_source):
-    from plat.db.models import Deployment, Run
-    from plat.training import service as tsvc
+    from visiontrainer.db.models import Deployment, Run
+    from visiontrainer.training import service as tsvc
 
     svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
@@ -116,7 +116,7 @@ def test_lru_hint_after_six(tmp_path, datasets_root, detect_source):
 
 
 def test_family_parsing():
-    from plat.training.service import parse_model_family
+    from visiontrainer.training.service import parse_model_family
 
     assert parse_model_family("yolo11n") == "yolo11"  # 11+ 无 v（04 号票修正）
     assert parse_model_family("yolo26s") == "yolo26"
@@ -126,7 +126,7 @@ def test_family_parsing():
 
 def test_desktop_type_mapping():
     """04 号票：type 家族号归一 × 任务后缀 + 未收录家族兜底（调研报告 4.2/4.3）。"""
-    from plat.training.export_entry import desktop_type, family_slug
+    from visiontrainer.training.export_entry import desktop_type, family_slug
 
     assert family_slug("yolo11n-obb") == "yolo11"
     assert family_slug("yolov8n") == "yolov8"

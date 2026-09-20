@@ -1,21 +1,21 @@
-# X-Any 训练平台（xany-training-platform）
+# VisionTrainer
 
 单机 YOLO 训练平台：数据集管理、GPU 调度训练队列、实时曲线监控、结果归档对比，以及 **Agent 自动调参**（核心卖点）。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录打通。
 
-规划蓝图（wayfinder 地图、12 张决策票、ADR）见 `.scratch/training-platform/`；**当前推进地图：生产可用** 见 `.scratch/production-ready/`——**实现前先读地图**。
+规划蓝图（wayfinder 地图、12 张决策票、ADR）见 `.scratch/visiontrainer-build/`；生产可用与 UI 打磨地图见 `.scratch/production-ready/`、`.scratch/ui-polish/`；**当前推进地图：竞品对标与功能优化** 见 `.scratch/competitive-optimization/`（spec v1.1，滚动三波 M6→M7→M8）——**实现前先读地图**。
 
 ## 快速开始
 
 ```bash
 uv sync                # 创建 .venv 并安装依赖
 cp config.example.toml config.toml   # 按需修改（密钥只存这里）
-uv run plat            # 启动，默认 http://127.0.0.1:8600
+uv run visiontrainer            # 启动，默认 http://127.0.0.1:8600
 ```
 
 ## 结构
 
 ```
-src/plat/
+src/visiontrainer/
 ├── main.py       # 入口：FastAPI + NiceGUI 挂载 + WS 通道
 ├── config.py     # config.toml 加载（密钥不进 git）
 ├── api/          # REST 契约层（框架无关）

@@ -5,12 +5,14 @@
 
 from fastapi import APIRouter
 
+from .config import router as config_router
 from .datasets import router as datasets_router
 from .tasks import router as tasks_router
 
 router = APIRouter()
 
 v1 = APIRouter(prefix="/v1")
+v1.include_router(config_router)
 v1.include_router(datasets_router)
 v1.include_router(tasks_router)
 router.include_router(v1)

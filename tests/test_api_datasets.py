@@ -6,8 +6,8 @@ import pytest
 
 from conftest import make_annotation, make_image
 
-from plat.datasets import service as svc
-from plat.datasets.service import DatasetError
+from visiontrainer.datasets import service as svc
+from visiontrainer.datasets.service import DatasetError
 
 
 def test_import_lifecycle(datasets_root, detect_source):

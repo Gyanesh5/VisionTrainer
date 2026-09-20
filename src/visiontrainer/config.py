@@ -1,0 +1,109 @@
+"""配置加载：单一来源 config.toml（模板见 config.example.toml）。
+
+约定（04/08 号票）：密钥只存本地 config.toml，不进数据库、不进 git。
+update_config 供设置页 / PUT /api/v1/config 白名单合并写入：llm 改动即存即生效
+（agent 每次调用重新读盘），server/training 在启动时装配、改动须重启。
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import tomllib
+from pathlib import Path
+
+DEFAULTS: dict = {
+    "server": {"host": "127.0.0.1", "port": 8600},
+}
+
+# 接口/设置页可改键白名单；库外其余键（如 training.db_url）只能手改文件
+EDITABLE: dict[str, set[str]] = {
+    "server": {"host", "port"},
+    "llm": {"base_url", "api_key", "model"},
+    "training": {"python", "trainer_entry", "export_entry", "datasets_dir",
+                 "runs_dir", "model_lib_dir", "check_occupancy"},
+}
+RESTART_SECTIONS = ("server", "training")
+
+
+class ConfigError(Exception):
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+def load_config(path: Path | None = None) -> dict:
+    cfg_path = path or Path("config.toml")
+    cfg = {**DEFAULTS}
+    if cfg_path.exists():
+        cfg.update(tomllib.loads(cfg_path.read_text(encoding="utf-8")))
+    return cfg
+
+
+def _validate(section: str, key: str, value: object) -> None:
+    full = f"{section}.{key}"
+    if full == "server.port":
+        if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
+            raise ConfigError("invalid_value", "server.port 须为 1-65535 的整数")
+        return
+    if full == "training.check_occupancy":
+        if not isinstance(value, bool):
+            raise ConfigError("invalid_value", "training.check_occupancy 须为布尔值")
+        return
+    if not isinstance(value, str):
+        raise ConfigError("invalid_value", f"{full} 须为字符串")
+    if full == "llm.api_key":
+        return  # 允许空串（本地端点无鉴权场景）
+    if not value.strip():
+        raise ConfigError("invalid_value", f"{full} 不能为空")
+    if full == "llm.base_url" and not value.startswith(("http://", "https://")):
+        raise ConfigError("invalid_value", "llm.base_url 须以 http:// 或 https:// 开头")
+
+
+def _dump_toml(cfg: dict) -> str:
+    """序列化为 TOML 文本（本配置形状：一层节 + 标量；json 转义即合法 basic string）。"""
+    lines: list[str] = []
+
+    def emit(d: dict, prefix: str) -> None:
+        scalars = [(k, v) for k, v in d.items() if not isinstance(v, dict)]
+        tables = [(k, v) for k, v in d.items() if isinstance(v, dict)]
+        for k, v in scalars:
+            text = "true" if v is True else "false" if v is False else (
+                str(v) if isinstance(v, (int, float)) else json.dumps(v, ensure_ascii=False))
+            lines.append(f"{k} = {text}")
+        for k, v in tables:
+            header = f"{prefix}.{k}" if prefix else k
+            lines.append("")
+            lines.append(f"[{header}]")
+            emit(v, header)
+
+    emit(cfg, "")
+    return "\n".join(lines).strip("\n") + "\n"
+
+
+def update_config(updates: dict, path: Path | None = None) -> tuple[dict, bool]:
+    """白名单校验 + 深合并写回 config.toml（临时文件 + 原子替换）。
+
+    返回 (合并后的完整配置, 是否需要重启平台)——llm 改动即时生效，
+    server/training 任一值变化则 restart_required=True。
+    """
+    cfg_path = path or Path("config.toml")
+    for section, kv in updates.items():
+        if not isinstance(kv, dict) or section not in EDITABLE:
+            raise ConfigError("unknown_section", f"不可修改的配置节：[{section}]")
+        for key, value in kv.items():
+            if key not in EDITABLE[section]:
+                raise ConfigError("unknown_key", f"不可修改的键：{section}.{key}")
+            _validate(section, key, value)
+
+    current = load_config(cfg_path)
+    merged: dict = dict(current)
+    for section, kv in updates.items():
+        merged[section] = {**current.get(section, {}), **kv}
+    restart = any(merged.get(s) != current.get(s) for s in RESTART_SECTIONS)
+
+    tmp = cfg_path.with_name(cfg_path.name + ".tmp")
+    tmp.write_text(_dump_toml(merged), encoding="utf-8")
+    os.replace(tmp, cfg_path)
+    return merged, restart

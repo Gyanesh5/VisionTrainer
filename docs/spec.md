@@ -1,6 +1,6 @@
-# X-Any 训练平台 功能与架构 Spec
+# VisionTrainer 功能与架构 Spec
 
-Version 1.0 · 2026-09-06 · 由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，细节与理由见 `.scratch/training-platform/issues/`）
+Version 1.1 · 2026-09-20 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，见 `.scratch/visiontrainer-build/issues/`）；**v1.1 增补竞品对标优化 17 条 + quick-win**（新条目标注 [M6/M7/M8]，来源 `.scratch/competitive-optimization/`）
 
 单机 YOLO 训练平台：**数据集管理 → GPU 调度训练队列 → 实时曲线监控 → 结果归档对比**核心闭环，以 **Agent 自动调参**为核心卖点。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录与模型库打通 [T0]。
 
@@ -25,11 +25,14 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 ### 2.1 数据集管理 [T5]
 
 - **双形态**：托管（平台管理）/ 外部（标准 YOLO 目录，只读不改写；X-AnyLabeling 标注目录必须走导入转托管）。
-- **根目录**：平台专属 `~/xany-platform/datasets`（2026-09-17 用户裁决：目录须可识别归属且数据集与训练产物分离；config 可覆盖）。每个数据集 `task_type ∈ {detect, segment, obb, pose, classify}`。
+- **根目录**：平台专属 `~/visiontrainer/datasets`（2026-09-17 用户裁决：目录须可识别归属且数据集与训练产物分离；config 可覆盖）。每个数据集 `task_type ∈ {detect, segment, obb, pose, classify}`。
 - **转换**：导入时自动 X-AnyLabeling JSON → YOLO（搬运 `custom_to_yolo`/`create_yolo_dataset`）；原始目录只注册路径不复制（图片 symlink）；**JSON 为唯一真源**。
 - **切分**：版本层 **Split manifest**（seed、比例默认 8:2、可选按类别分层、文件快照）；同数据集所有 Run 共用一份（Agent 各轮 val 恒定、指标可比）；图片集漂移检测警告；空标注图默认负样本进 train。
 - **类别**：`classes.txt` 行序即 id 唯一真源；`data.yaml` 平台生成；改名/重排为显式操作。
 - **校验**：图片可解码 / JSON 可解析 / shapes 匹配 task_type / 类别存在 / 负样本计数；报告持久化 `validation_report.json`。
+- **健康报告** [M6]：导入/校验一次遍历聚合入 SQLite（dataset_stats）——逐切分 per-class 分布、每图目标数直方图、图像尺寸散点、标注中心热力图；热图框选/点柱筛图 → 图片清单 +「在 X-AnyLabeling 中打开」。回答「数据长什么样」。
+- **质量审计** [M6]：按需「跑体检」+ 结果缓存——sha256 精确重复、感知哈希（imagehash，唯一新增依赖）近似重复与跨切分泄漏、类别失衡警告；**只报告不动标注真源**，处置限定「从切分清单排除文件」。
+- **校验修复指引** [M6]：五条规则各配「错误→原因→修法」三行文案，错误列表可视化。
 
 ### 2.2 训练执行与调度 [T4, T1, ADR 0001]
 
@@ -38,16 +41,24 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **生命周期**：训练子进程 `start_new_session` 脱离；平台重启**孤儿收养**（pid + csv 恢复监控）；停止链 SIGTERM → `trainer.stop` → 超时 killpg SIGKILL。
 - **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余。
 - **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供"续训"（新 Run）。
+- **运行快照** [M6]：Run 启动冻结全量训练输入（切分清单 + classes.txt 哈希 + 增强参数 + 基础权重标识）入 Run manifest；历史 Run 可复现、跨 Run diff 完整。
+- **失败 Retry** [M7]：Failed/Cancelled Run 一键以相同参数重开 Task。
+- **表单工程学** [M7]：超参失焦 clamp 反馈、只存非默认值、「已修改」徽章——超参 diff 天然只剩差异。
+- **预设实验模板** [M8]：尺寸扫描（640/800/960 一键三 Task）/lr 扫描模板 + 少样本快训预设；不做自然语言入口。
 
 ### 2.3 实时监控 [T7]
 
 - WS 五事件：`run.metrics`（逐 epoch）/ `run.progress`（1Hz）/ `run.status` / `task.updated`（含 agent_state）/ `queue.updated`；断线 REST 补齐不回放；日志独立通道，stdout 只透传落 `training.log`。
 - 四类视图：任务/队列页、Run 详情页（loss 分项 + P/R/mAP50/mAP50-95/lr 曲线 + 产物区）、Agent 循环页（轮次时间线 + 审批门）、对比页（Task 内跨 Run + 跨 Task）。
+- **监控增强** [M7]：GPU 利用率/显存/温度采样入库（pynvml，5–10s）——Run 详情 System 卡 + 多 Run 显存对比；训练时长预估（历史 Run 中位数，提交确认页）；桌面通知（完成/失败/审批请求 → notify-send）；train/val loss 同图双线（实线训练/虚线验证）。
 
 ### 2.4 结果归档与复盘 [T7, T10]
 
 - Run 归档：全量 args、逐 epoch 指标（**入库，单一数据源**）、results.csv、training.log、ultralytics 全套产物图（混淆矩阵/PR/F1/P/R 曲线不自绘）、best/last.pt、Agent 轮 LLM 决策记录（输入摘要/输出/clamp）。
 - 复盘报告：一键生成 markdown（复用 Agent 多模态管线）存 Run 目录；PDF 不做。
+- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——最差样本榜（fp+fn 降序）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格下钻（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。
+- **复盘升级** [M8]：结构化错误统计（Top 混淆类对/缺数据类/FP-FN 失衡/小目标占比）作 LLM 输入 schema；报告固定加「**下一步实验推荐**」章节（超参改动+理由+预期收益，与审批门共享输出结构）。
+- **对比页六件套** [M8]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键。
 
 ### 2.5 Agent 自动调参（核心卖点）[T6]
 
@@ -57,6 +68,9 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **循环**：默认 max 5 轮；终止 = 达上限 / 连续 2 轮主指标提升 <0.001 / LLM 输出 `{"action":"stop"}` / 轮失败；审批门默认 **manual**（auto 可配）。
 - **兜底**：三级解析降级 → 带错重试 1 次；API 指数退避 3 次；穷尽 → paused 等人，**不静默烧卡**；训练失败循环即终止。
 - **主指标**：detect/segment/obb→mAP50-95，pose→pose mAP50-95，classify→top1；**终止只认数字**。
+- **Agent 页重做** [M7，/prototype 原型先行]：循环总览卡（轮次进度/主指标趋势/剩余轮数/状态）、决策卡三段式（改了什么=超参 diff / 为什么=LLM 理由摘要 / 效果=主指标 delta↑↓）、审批门重设计（主按钮「放行下一轮」+次按钮终止+确认，桌面通知联动）。
+- **参数重要性** [M7]：历史 Run 算「超参→主指标」相关性（Spearman/随机森林，单人规模秒级）——对比页 bar 图 + **注入 LLM 调参上下文** + 统计证据写进决策归档。
+- **烂轮早停** [M7]：新轮行至 1/2 epoch 检查点，主指标 < 历史 Run 同期中位数 − δ（默认 0.05 mAP，保守可配、可全局关）→ 优雅终止标记 pruned；被剪事实作为证据进入下一轮 LLM 决策。
 
 ### 2.6 模型回注 [T9]
 
@@ -64,24 +78,29 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - 自动组装"一模型一目录"（model.onnx + config.yaml 按 `_template` 规范，classes 同步 data.yaml）进 `~/Documents/x-anylabeling-models/`；**不直写 ~/.xanylabelingrc**，用户桌面端一次性手动登记（UI 引导卡）。
 - 5 上限：提示式缓解（LRU 只挤下拉不删文件）；命名 `{家族}_{任务}_{run短id}`，只增不改；Agent 循环默认推荐主指标最高轮。
 - Run 详情页一键部署进一期，含 pt/onnx 导出验证（同图推理比对）；桌面端人工冒烟为终验。
+- **阈值探索器** [M8]：全阈值扫 P/R/F1 + 建议置信度（F1 最大点）；部署时把阈值写进模型配置——补「只搬权重不带阈值」缺口，桌面端推理直接用对阈值。
+- **训后 Test 页** [M8]：Run 详情「试跑」标签——选本地图片/视频，已导出 ONNX 推理+叠加框可视化；回注前最后一道人工验收。
+- **部署清单与模型库管理** [M8]：已部署列表（deployments 表）+ 模型库目录视图 + 旧版清理入口（删目录同步记录）。
 
 ### 2.7 部署与运行 [T11]
 
-- **手动启动** `uv run plat`（端口 8600）；平台离线不伤训练（脱离 + 收养）。
-- 日志：`logs/plat.log` 轮转 10MB×5；访问日志走控制台。
-- 磁盘：不自动清理；删 Task 勾选删文件 + Run 级清 last.pt 留 best.pt；runs_dir 默认 `~/xany-platform/runs`（与数据集根分离）。
+- **手动启动** `uv run visiontrainer`（端口 8600）；平台离线不伤训练（脱离 + 收养）。
+- 日志：`logs/visiontrainer.log` 轮转 10MB×5；访问日志走控制台。
+- 磁盘：不自动清理；删 Task 勾选删文件 + Run 级清 last.pt 留 best.pt；runs_dir 默认 `~/visiontrainer/runs`（与数据集根分离）。
+- **启动/配置简化** [M6]：启动自检（训练 venv/目录指向校验）与配置引导，降低首次与日常启动摩擦。
+- **配置页**（2026-09-20）：设置页可视化编辑 config.toml——Agent LLM（base_url/api_key/model，保存即生效）、训练与目录（python/数据集根/产物根/模型库/占用检测）、服务（host/port，含 LLM 连通性测试）；经 `PUT /api/v1/config` 白名单校验原子写入，server/training 改动提示重启生效；密钥仍只存本地不进 git。
 
 ## 3. 数据规格
 
 - **六表** [T10]：tasks（uid/source/聚合 status/train_args/agent_config/manifest 路径）、runs（uid/round_no/状态/pid/run_dir/权重路径/primary_metric）、epoch_metrics（(run_id,epoch) 主键 + JSON 整存）、agent_decisions、deployments、schema_version。删除 Task 级联删行，磁盘默认保留。
 - **产物布局**：Run 目录即 ultralytics save_dir（`project=<runs_dir>/<task_uid>`、`name=<run_uid>`、exist_ok=True）；training.log/report.md/export/ 同目录；约定优于登记。
 - **迁移**：create_all + schema_version 幂等迁移函数，不上 Alembic（二期可引）。
-- **接口**：全部端点与消息 schema 见 [docs/api.md](./api.md)；Pydantic 硬契约 `src/plat/api/schemas.py`。
+- **接口**：全部端点与消息 schema 见 [docs/api.md](./api.md)；Pydantic 硬契约 `src/visiontrainer/api/schemas.py`。
 - **词汇表**：根目录 [CONTEXT.md](../CONTEXT.md)（Task/Run/单飞/切分清单/审批门……），实现与文档统一用语。
 
 ## 4. 非目标（Out of scope）
 
-标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · 工具调用业务 Agent · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理 · 跨数据集合并训练（雾区待需求）· 平台内模型测试模块（二期评估）。
+标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · 工具调用业务 Agent · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理。v1.1 竞品对标再裁决的不做项（2026-09-20）：跨数据集合并训练 · 平台内模型测试模块（Test 页+改标清单已覆盖）· 离线增强管道 · 嵌入级分析（FiftyOne 内嵌或引导）· Optuna 模式 · 终端提交入口 · PWA 移动端 · 拖 .pt 导入历史权重。
 
 ## 5. 路线图（M1–M5）
 
@@ -92,5 +111,8 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 | **M3 归档对比+报告** [T7,T10] | 六表落库、归档管线、对比页、report.md | ① 两个不同超参 Run 对比页曲线叠加+超参 diff；② 一键生成 report.md；③ 删 Task 默认磁盘保留 |
 | **M4 Agent 调参循环** [T6] | LLM 接入、白名单、循环控制、审批门、兜底 | ① Agent 任务（manual）每轮暂停等放行，analysis 与超参 diff 可见；② 连续 2 轮无提升自动终止；③ 断开 LLM 端点 → paused 不烧卡；④ 决策记录完整归档 |
 | **M5 回注闭环** [T9] | deploy 链（导出/验证/组装）、已部署清单 | ① 一键部署 → 模型库新目录 classes 与 data.yaml 一致；② 导出验证框数一致；③ 桌面端加载后单图推理正确；④ 第 6 个部署出现 LRU 提示 |
+| **M6 数据有底** [v1.1] | 健康报告 / 质量审计 / 校验修复指引 / 运行快照 / 启动配置简化 | ① 导入后健康报告四图可见，热图框选筛图并可「在 X-AnyLabeling 中打开」；②「跑体检」报重复/泄漏/失衡，重复项可从切分清单排除；③ 校验错误带「原因→修法」；④ 数据集变动后旧 Run manifest 仍完整可查；⑤ 启动时 config 问题有自检引导 |
+| **M7 Agent 锋利+训练顺滑** [v1.1] | Agent 页重做（原型先行）/ 参数重要性 / 烂轮早停 / 监控四件 / Retry / 表单工程学 | ① 原型过目后实装：循环总览+决策卡三段式+审批门主次分明；② Agent 决策含参数重要性统计且证据归档可回溯；③ 明显劣化轮在 1/2 epoch 被剪并记 pruned；④ Run 详情见 GPU 曲线、提交页见时长预估、完成有桌面通知、loss 双线；⑤ 失败 Run 一键重开；⑥ 表单只存非默认值 |
+| **M8 病根与价值可见** [v1.1] | 错误分析 / 复盘升级 / 阈值探索器 / Test 页 / 对比六件套 / 部署管理 / 实验模板 | ① Run 后最差样本榜+叠加大图+矩阵点格下钻可用；② FN/FP 清单可导出回 X-AnyLabeling；③ 复盘含「下一步实验推荐」且引用错误统计；④ 部署时建议置信度写入模型配置；⑤ 试跑页 ONNX 叠框正确；⑥ 对比页 diff 三件套+「与当前部署版对比」；⑦ 模板一键生成多 Task |
 
-依赖：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。
+依赖（v1.0）：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。依赖（v1.1 滚动三波）：M6 → M7 → M8 串行推进（每波落地一波验收一波）；M8 内复盘升级与阈值探索器依赖错误分析先落地。

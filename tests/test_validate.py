@@ -4,7 +4,7 @@ from pathlib import Path
 
 from conftest import JPG_MAGIC, make_annotation, make_image
 
-from plat.datasets.validate import validate_dataset
+from visiontrainer.datasets.validate import validate_dataset
 
 
 def _src(tmp_path: Path) -> Path:

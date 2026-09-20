@@ -11,6 +11,8 @@
 | :--- | :--- | :--- |
 | GET | `/api/health` | 存活探针（不版本化） |
 | GET | `/api/v1/system/gpu` | GPU 状态：显存/利用率/外部占用（pynvml，04） |
+| GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地） |
+| PUT | `/api/v1/config` | 白名单部分更新。body: `{server?:{host,port}, llm?:{base_url,api_key,model}, training?:{python,trainer_entry,export_entry,datasets_dir,runs_dir,model_lib_dir,check_occupancy}}`（节/键均可省略）；返回 `{config, restart_required}`——llm 即存即生效，server/training 改动须重启（设置页，2026-09-20） |
 
 ### 数据集域（05 号票）
 
@@ -29,7 +31,7 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| POST | `/api/v1/tasks` | 创建任务。body: `{name, base_model, dataset, manifest_id, epochs, imgsz, batch, patience, device, workers, seed, extra_args, agent}`；`extra_args` 为对齐 ultralytics 8.4.100 的全量官方训练参数（见 `src/plat/training/params.py`，非法键/越界值 400 拒绝）；含 `agent:{max_rounds, approval, objective}` 即调参任务（06），Agent 轮内决策仍受其白名单 clamp |
+| POST | `/api/v1/tasks` | 创建任务。body: `{name, base_model, dataset, manifest_id, epochs, imgsz, batch, patience, device, workers, seed, extra_args, agent}`；`extra_args` 为对齐 ultralytics 8.4.100 的全量官方训练参数（见 `src/visiontrainer/training/params.py`，非法键/越界值 400 拒绝）；含 `agent:{max_rounds, approval, objective}` 即调参任务（06），Agent 轮内决策仍受其白名单 clamp |
 | GET | `/api/v1/tasks` | 列表（status、source、primary_metric） |
 | GET | `/api/v1/tasks/{id}` | 详情（含 runs 概要与 Agent 轮次时间线数据） |
 | DELETE | `/api/v1/tasks/{id}?delete_files=` | 删除（级联删行，磁盘默认保留） |
@@ -77,6 +79,7 @@
 {"error": {"code": "state_conflict", "message": "任务不在审批等待状态", "detail": {}}}
 // 错误码枚举（起步集，实现时扩充）：
 // invalid_args      — 参数不合法/训练参数校验失败（HTTP 400）；Agent 决策越白名单则 clamp 并记录、不报错
+// unknown_section / unknown_key / invalid_value — PUT /config 越白名单或值非法（400，设置页）
 // not_found         — 404
 // state_conflict    — 状态机不允许的操作，如停止未运行任务（409）
 // gpu_busy          — 外部占用导致的排队拒绝类提示（409，或作为 block_reason 走队列）
