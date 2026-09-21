@@ -242,6 +242,36 @@ def test_thumb_src_roundtrip(tmp_path):
     assert _thumb_src(str(tmp_path / "missing.png")) is None
 
 
+def test_thumb_cache_lru_eviction(tmp_path):
+    """缩略图缓存 LRU 淘汰（2026-09-21 断连事故）：原 300 上限全清——390 张的
+    plate-579-580 审计集每次访问都全冷重解码。改为逐条淘汰 + 刚访问的保留。"""
+    from PIL import Image
+
+    from visiontrainer.ui import pages as pg
+
+    pg._thumb_cache_reset()
+    old_max = pg._THUMB_CACHE_MAX
+    pg._THUMB_CACHE_MAX = 4
+    try:
+        paths = []
+        for i in range(6):
+            p = tmp_path / f"t{i}.png"
+            Image.new("RGB", (32, 32), (i * 40, 0, 0)).save(p)
+            paths.append(str(p))
+        for p in paths[:4]:
+            assert pg._thumb_src(p)
+        first = pg._thumb_src(paths[0])  # 提升到 LRU 最新
+        for p in paths[4:]:              # 淘汰应从最旧开始：t1/t2 出局，t0 因刚访问保留
+            pg._thumb_src(p)
+        assert pg._thumb_cache_get(paths[0]) == first, "刚访问的条目应保留"
+        assert pg._thumb_cache_get(paths[1]) is None, "最旧未访问的应被逐条淘汰"
+        assert pg._thumb_cache_get(paths[5]) is not None
+        assert 0 < len(pg._THUMB_CACHE) <= 4, "不应全清"
+    finally:
+        pg._THUMB_CACHE_MAX = old_max
+        pg._thumb_cache_reset()
+
+
 def test_exclude_files_batch_multi(tmp_path, datasets_root, tmp_db, detect_source):
     """批量排除（网格多选的服务底座）：一次多文件、归属稳定、逐个入排除日志。"""
     name = "batchexc"

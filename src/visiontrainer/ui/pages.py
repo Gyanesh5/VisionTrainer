@@ -7,8 +7,10 @@
 - 反馈：导入进度条、排队位次、Agent 待审批横幅、决策历史 chip 化、部署完成全局通知、深色模式
 """
 
+import asyncio
 import json
 from base64 import b64encode
+from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
@@ -511,8 +513,8 @@ def _open_in_xal(image: str) -> None:
         ui.notify(f"调起失败：{exc}（训练 python 须指向 X-AnyLabeling 环境，见设置页）", type="negative")
 
 
-_THUMB_CACHE: dict = {}          # (path, mtime, box) -> data URL
-_THUMB_CACHE_MAX = 300
+_THUMB_CACHE: OrderedDict = OrderedDict()  # (path, mtime, box) -> data URL，LRU
+_THUMB_CACHE_MAX = 2000
 
 
 def _thumb_cache_reset() -> None:
@@ -520,10 +522,25 @@ def _thumb_cache_reset() -> None:
     _THUMB_CACHE.clear()
 
 
+def _thumb_cache_get(path: str, box: int = 260) -> str | None:
+    """热缓存直取（命中提升 LRU 位）；未命中返回 None，调用方再走线程生成。"""
+    try:
+        mtime = Path(path).stat().st_mtime
+    except OSError:
+        return None
+    key = (path, mtime, box)
+    src = _THUMB_CACHE.get(key)
+    if src is not None:
+        _THUMB_CACHE.move_to_end(key)
+    return src
+
+
 def _thumb_src(path: str, box: int = 260) -> str | None:
-    """缩略图 data URL：PIL 服务端生成（约 box×box 内接），按 (路径, mtime) 缓存。
+    """缩略图 data URL：PIL 服务端生成（约 box×box 内接），按 (路径, mtime) LRU 缓存。
 
     解码失败返回 None（对应校验规则「图片不可读」，网格里落坏图占位）。
+    注意：全尺寸解码单张数十 ms，事件循环内批量调用会冻结页面——UI 侧应经
+    _thumb_cache_get 判热 + 线程池回填（_audit_grid，2026-09-21 断连事故）。
     """
     p = Path(path)
     try:
@@ -532,6 +549,7 @@ def _thumb_src(path: str, box: int = 260) -> str | None:
         return None
     key = (path, mtime, box)
     if key in _THUMB_CACHE:
+        _THUMB_CACHE.move_to_end(key)
         return _THUMB_CACHE[key]
     import io
 
@@ -546,8 +564,8 @@ def _thumb_src(path: str, box: int = 260) -> str | None:
         data = "data:image/jpeg;base64," + b64encode(buf.getvalue()).decode()
     except Exception:  # noqa: BLE001 — 坏图/格式不支持：占位而不是炸页面
         return None
-    if len(_THUMB_CACHE) >= _THUMB_CACHE_MAX:
-        _THUMB_CACHE.clear()
+    while len(_THUMB_CACHE) >= _THUMB_CACHE_MAX:  # LRU 逐条淘汰（原全清会让大审计集每次访问全冷）
+        _THUMB_CACHE.popitem(last=False)
     _THUMB_CACHE[key] = data
     return data
 
@@ -2380,13 +2398,30 @@ def mount() -> None:
                             ui.tab("audit", label="质量审计", icon="health_and_safety")
                         with ui.tab_panels(dtabs, value=state.get("ds_tab") or "overview"
                                            ).classes("w-full") as dpanels:
-                            dpanels.on_value_change(lambda e: state.__setitem__("ds_tab", e.value))
                             with ui.tab_panel("overview"):
                                 _render_overview(meta)
                             with ui.tab_panel("health"):
                                 _render_health(name, meta)
                             with ui.tab_panel("audit"):
-                                _render_audit(name, meta)
+                                # 质量审计内容延迟到页签首次激活才构建：服务端急切构建 +
+                                # 客户端页签激活时一次性挂载几百卡（含动画 spinner）会卡住
+                                # 浏览器主线程 >2s，pong 迟到被服务端掐线（NiceGUI 引擎
+                                # ping_timeout=2s，2026-09-21 审计页断连根因）
+                                audit_box = ui.column().classes("w-full gap-2")
+                                state["audit_built"] = False  # render_detail 重建时重开懒构建
+
+                            def _ensure_audit_panel(tab: str) -> None:
+                                if tab == "audit" and not state.get("audit_built"):
+                                    state["audit_built"] = True
+                                    with audit_box:
+                                        _render_audit(name, meta)
+
+                            def _on_ds_tab(e) -> None:
+                                state["ds_tab"] = e.value
+                                _ensure_audit_panel(e.value)
+
+                            dpanels.on_value_change(_on_ds_tab)
+                            _ensure_audit_panel(state.get("ds_tab") or "overview")
                     else:
                         with ui.row().classes("w-full gap-2 items-start"):
                             ui.label("外部路径").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
@@ -2649,35 +2684,76 @@ def mount() -> None:
                 dlg.open()
 
             def _audit_grid(name: str, items: list[dict]) -> None:
-                """审计发现成员 → 缩略图网格：点图看原图、勾选进批量排除。"""
-                with ui.row().classes("w-full flex-wrap gap-2 q-mt-xs"):
-                    for item in items:
-                        p = item["image"]
-                        with ui.card().classes("p-1 gap-0 w-[10.5rem]").style("border-radius:10px"):
-                            src = _thumb_src(p)
-                            if src:
-                                img = ui.image(src).classes(
-                                    "w-full h-28 object-cover cursor-pointer"
-                                ).style("border-radius:6px")
-                                img.on("click", lambda it=item, n=name: _view_audit_img(n, it))
-                                with img:
-                                    ui.tooltip("点击查看原图")
-                            else:
+                """审计发现成员 → 缩略图网格：卡片分块渲染 + 缩略图线程池回填。
+
+                2026-09-21 两起事故：同步批量生成 390 张缩略图把事件循环冻结 20s+（心跳
+                超时断连）；异步化后一次性创建 390 张占位卡（约 3000 元素）的消息风暴仍会
+                打断 websocket——首块同步渲染保立即可见，其余分块补建、逐块回填。"""
+                CHUNK = 40
+                row_el = ui.row().classes("w-full flex-wrap gap-2 q-mt-xs")
+
+                def _build_cards(chunk: list[dict]) -> list[tuple[str, object]]:
+                    jobs = []
+                    with row_el:
+                        for item in chunk:
+                            p = item["image"]
+                            with ui.card().classes("p-1 gap-0 w-[10.5rem]").style("border-radius:10px"):
                                 ph = ui.element("div").classes(
-                                    "w-full h-28 flex column items-center justify-center gap-1"
+                                    "w-full h-28 flex column items-center justify-center gap-1 cursor-pointer"
                                 ).style("border-radius:6px;background:rgba(148,163,184,.12)")
+                                ph.on("click", lambda _e, it=item, n=name: _view_audit_img(n, it))
                                 with ph:
-                                    ui.icon("broken_image", size="22px").classes("opacity-40")
-                                    ui.label("无法解码").classes("text-[9px] opacity-40")
-                            with ui.row().classes("w-full items-center gap-1 no-wrap q-px-xs"):
-                                ui.checkbox(value=p in (state.get("audit_sel") or set()),
-                                            on_change=lambda e, f=p: _toggle_sel(f, e.value)
-                                            ).props("dense size=sm").classes("q-mt-none")
-                                nm = ui.label(item["name"]).classes(
-                                    "text-[10px] flex-1 min-w-0 truncate cursor-pointer")
-                                nm.on("click", lambda it=item, n=name: _view_audit_img(n, it))
-                                ui.badge(item.get("split", "?")).props("outline square").style(
-                                    "font-size:8px")
+                                    ui.tooltip("点击查看原图")
+                                    ui.spinner(size="18px").classes("opacity-30")
+                                with ui.row().classes("w-full items-center gap-1 no-wrap q-px-xs"):
+                                    ui.checkbox(value=p in (state.get("audit_sel") or set()),
+                                                on_change=lambda e, f=p: _toggle_sel(f, e.value)
+                                                ).props("dense size=sm").classes("q-mt-none")
+                                    nm = ui.label(item["name"]).classes(
+                                        "text-[10px] flex-1 min-w-0 truncate cursor-pointer")
+                                    nm.on("click", lambda it=item, n=name: _view_audit_img(n, it))
+                                    ui.badge(item.get("split", "?")).props("outline square").style(
+                                        "font-size:8px")
+                            jobs.append((p, ph))
+                    return jobs
+
+                jobs: list[tuple[str, object]] = []  # 全部异步分块建卡：页签激活 handler 里不做重活
+
+                async def _render_and_fill() -> None:
+                    from nicegui import run
+
+                    for i in range(0, len(items), CHUNK):  # 分块建卡（含首块）
+                        if getattr(row_el, "is_deleted", False):
+                            return  # 页面已离开/重建
+                        jobs.extend(_build_cards(items[i:i + CHUNK]))  # extend 而非 +=（重绑定会把 jobs 变协程局部）
+                        await asyncio.sleep(0)  # 消息分批出队，websocket 不被风暴打断
+
+                    async def _one(path: str) -> str | None:
+                        src = _thumb_cache_get(path)  # 热缓存直取（二次访问免线程跳）
+                        return src if src is not None else await run.io_bound(_thumb_src, path)
+
+                    BATCH = 8
+                    for i in range(0, len(jobs), BATCH):
+                        batch = jobs[i:i + BATCH]
+                        results = await asyncio.gather(*[_one(p) for p, _ in batch])
+                        for (_path, holder), src in zip(batch, results):
+                            if getattr(holder, "is_deleted", False):
+                                return  # 页面已离开/重建：剩余回填作废
+                            holder.clear()
+                            with holder:
+                                if src:
+                                    ui.image(src).classes("w-full h-28 object-cover").style(
+                                        "border-radius:6px")
+                                else:
+                                    with ui.element("div").classes(
+                                            "w-full h-28 flex column items-center justify-center gap-1"
+                                    ).style("border-radius:6px"):
+                                        ui.icon("broken_image", size="22px").classes("opacity-40")
+                                        ui.label("无法解码").classes("text-[9px] opacity-40")
+                        await asyncio.sleep(0)  # 让出循环：心跳与交互不受影响
+
+                if items:
+                    asyncio.get_running_loop().create_task(_render_and_fill())
 
             def _render_audit(name: str, meta: dict) -> None:
                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
