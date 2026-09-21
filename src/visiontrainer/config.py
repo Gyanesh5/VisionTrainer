@@ -14,6 +14,9 @@ from pathlib import Path
 
 DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8600},
+    # M7：桌面通知（notify-send）与烂轮早停的全局开关/参数（按任务可在 Agent 对话框覆盖）
+    "notifications": {"desktop": True},
+    "agent": {"prune_enabled": True, "prune_delta": 0.05},
 }
 
 # 接口/设置页可改键白名单；库外其余键（如 training.db_url）只能手改文件
@@ -22,6 +25,8 @@ EDITABLE: dict[str, set[str]] = {
     "llm": {"base_url", "api_key", "model"},
     "training": {"python", "trainer_entry", "export_entry", "datasets_dir",
                  "runs_dir", "model_lib_dir", "check_occupancy"},
+    "notifications": {"desktop"},
+    "agent": {"prune_enabled", "prune_delta"},
 }
 RESTART_SECTIONS = ("server", "training")
 
@@ -47,9 +52,13 @@ def _validate(section: str, key: str, value: object) -> None:
         if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= 65535:
             raise ConfigError("invalid_value", "server.port 须为 1-65535 的整数")
         return
-    if full == "training.check_occupancy":
+    if full in ("training.check_occupancy", "notifications.desktop", "agent.prune_enabled"):
         if not isinstance(value, bool):
-            raise ConfigError("invalid_value", "training.check_occupancy 须为布尔值")
+            raise ConfigError("invalid_value", f"{full} 须为布尔值")
+        return
+    if full == "agent.prune_delta":
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not 0 < float(value) <= 1:
+            raise ConfigError("invalid_value", "agent.prune_delta 须为 (0, 1] 的数值（主指标差）")
         return
     if not isinstance(value, str):
         raise ConfigError("invalid_value", f"{full} 须为字符串")

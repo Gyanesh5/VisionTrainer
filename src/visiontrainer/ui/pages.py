@@ -109,20 +109,34 @@ def _chart_options(metrics: list[dict], task_type: str | None = None) -> dict:
     }
 
 
+def _val_loss_at(m: dict, key: str):
+    """取某条 epoch 记录的 val/<key>：回调路径在嵌套 metrics 里，csv 兜底路径在平铺键上。"""
+    mm = m.get("metrics")
+    if isinstance(mm, dict) and f"val/{key}" in mm:
+        return mm[f"val/{key}"]
+    return m.get(f"val/{key}")
+
+
 def _loss_options(metrics: list[dict]) -> dict:
-    """loss 分项（左轴）+ lr（右轴，双轴不互相挤压；数值取 6 位小数防刻度挤压）。"""
+    """loss 分项（左轴，实线）+ 对应 val 分项（虚线，M7 双线）+ lr（右轴）。"""
     first = metrics[0] if metrics else {}
     loss_keys = sorted((first.get("loss") or {}).keys())
     series = [
         {"name": k, "type": "line", "smooth": True, "showSymbol": False, "yAxisIndex": 0,
          "data": [(m.get("loss") or {}).get(k) for m in metrics]} for k in loss_keys
     ]
+    for k in loss_keys:  # M7：train 实线 / val 虚线同图
+        vals = [_val_loss_at(m, k) for m in metrics]
+        if any(v is not None for v in vals):
+            series.append({"name": f"val/{k}", "type": "line", "smooth": True, "showSymbol": False,
+                           "yAxisIndex": 0, "lineStyle": {"type": "dashed", "opacity": 0.75},
+                           "data": vals})
     if any(m.get("lr") for m in metrics):
         series.append({"name": "lr", "type": "line", "yAxisIndex": 1, "showSymbol": False,
                        "data": [round((m.get("lr") or [None])[0], 6) for m in metrics]})
     return {
         "backgroundColor": "transparent",
-        "color": CHART_PALETTE,
+        "color": CHART_PALETTE + ["#f472b6", "#a3e635", "#fb923c"],
         "textStyle": {"color": CHART_TEXT},
         "grid": _base_grid(),
         "legend": _legend(),
@@ -132,6 +146,177 @@ def _loss_options(metrics: list[dict]) -> dict:
                   _axis_text({"type": "value", "scale": True, "splitNumber": 3,
                               "axisLabel": {"formatter": "{value}"}})],
         "series": series,
+    }
+
+
+def _gpu_options(samples: list[dict]) -> dict:
+    """Run 详情 System 卡（M7 01 号票）：利用率/显存/温度三线，时间轴为相对分钟。"""
+    ts = [round(s["t"] / 60.0, 2) for s in samples]
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": _base_grid(),
+        "legend": _legend(),
+        "tooltip": {"trigger": "axis"},
+        "xAxis": _axis_text({"type": "value", "name": "分钟", "nameLocation": "middle", "nameGap": 22,
+                             "scale": True}),
+        "yAxis": [_axis_text({"type": "value", "name": "利用率 %", "scale": True, "max": 100}),
+                  _axis_text({"type": "value", "name": "显存 MB / °C", "scale": True})],
+        "series": [
+            {"name": "GPU 利用率 %", "type": "line", "showSymbol": False, "yAxisIndex": 0,
+             "data": [[ts[i], s["util"]] for i, s in enumerate(samples) if s.get("util") is not None],
+             "itemStyle": {"color": CHART_PALETTE[0]}},
+            {"name": "显存已用 MB", "type": "line", "showSymbol": False, "yAxisIndex": 1,
+             "data": [[ts[i], s["mem_used"]] for i, s in enumerate(samples) if s.get("mem_used") is not None],
+             "itemStyle": {"color": CHART_PALETTE[2]}},
+            {"name": "温度 °C", "type": "line", "showSymbol": False, "yAxisIndex": 1,
+             "data": [[ts[i], s["temp"]] for i, s in enumerate(samples) if s.get("temp") is not None],
+             "itemStyle": {"color": CHART_PALETTE[3]}},
+        ],
+    }
+
+
+def _mem_overlay_options(curves: list[tuple[str, list]]) -> dict:
+    """多 Run 显存对比（M7）：curves = [(标签, [[t秒, MB]...])]。"""
+    mx = max((max((p[0] for p in c), default=0) for _, c in curves), default=0)
+    return {
+        "backgroundColor": "transparent",
+        "color": CHART_PALETTE + ["#f472b6", "#a3e635", "#fb923c"],
+        "textStyle": {"color": CHART_TEXT},
+        "grid": _base_grid(),
+        "legend": _legend(),
+        "tooltip": {"trigger": "axis"},
+        "xAxis": _axis_text({"type": "value", "name": "分钟", "nameLocation": "middle",
+                             "nameGap": 22, "scale": True, "max": (mx / 60) or None}),
+        "yAxis": _axis_text({"type": "value", "name": "显存 MB", "scale": True}),
+        "series": [{"name": label, "type": "line", "showSymbol": False, "smooth": True,
+                    "data": [[round(t / 60.0, 2), mb] for t, mb in pts]} for label, pts in curves],
+    }
+
+
+def _importance_options(imp: dict) -> dict:
+    """参数重要性 bar（M7 05 号票）：正负 ρ 分色，|ρ| 排序已由后端完成。"""
+    keys = imp.get("keys") or []
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": _base_grid(bottom=44),
+        "tooltip": {"trigger": "axis"},
+        "xAxis": _axis_text({"type": "category", "data": [k["key"] for k in keys],
+                             "axisLabel": {"rotate": 30, "interval": 0, "fontSize": 9}}),
+        "yAxis": _axis_text({"type": "value", "name": "Spearman ρ", "min": -1, "max": 1}),
+        "series": [{"name": "ρ", "type": "bar",
+                    "data": [{"value": k["rho"],
+                              "itemStyle": {"color": "#16a34a" if k["rho"] >= 0 else "#dc2626"}}
+                             for k in keys]}],
+    }
+
+
+def _spark_options(vals: list) -> dict:
+    """主指标趋势迷你图（M7 06 号票循环总览卡）：隐藏坐标轴，只留趋势线。"""
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": {"left": 6, "right": 6, "top": 6, "bottom": 6},
+        "xAxis": {"show": False, "type": "category", "data": [str(i + 1) for i in range(len(vals))]},
+        "yAxis": {"show": False, "type": "value", "scale": True},
+        "series": [{"type": "line", "data": vals, "showSymbol": True, "symbolSize": 5,
+                    "lineStyle": {"color": "#3b82f6", "width": 2},
+                    "itemStyle": {"color": "#3b82f6"}, "areaStyle": {"opacity": 0.12,
+                                                                     "color": "#3b82f6"}}],
+    }
+
+
+def _confusion_options(matrix: dict) -> dict:
+    """自绘混淆矩阵（M8 02 号票）：行 GT × 列 Pred（含背景），点格下钻。"""
+    axis = matrix.get("axis") or []
+    cells = matrix.get("cells") or []
+    data = [[j, i, cells[i][j]] for i in range(len(axis)) for j in range(len(axis))
+            if cells[i][j]]
+    mx = max((d[2] for d in data), default=0)
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": {"left": 70, "right": 80, "top": 10, "bottom": 60},
+        "tooltip": {"formatter": "{b}"},
+        "xAxis": {"type": "category", "data": axis, "name": "Pred →", "nameLocation": "middle",
+                  "nameGap": 40, "axisLabel": {"color": CHART_TEXT, "fontSize": 10,
+                                               "rotate": 30, "interval": 0},
+                  "axisLine": {"lineStyle": {"color": "#64748b"}}},
+        "yAxis": {"type": "category", "data": axis, "name": "GT", "axisLabel": {"color": CHART_TEXT,
+                                                                               "fontSize": 10},
+                  "axisLine": {"lineStyle": {"color": "#64748b"}}},
+        "visualMap": {"min": 0, "max": mx or 1, "calculable": False, "orient": "vertical",
+                      "right": 0, "top": "center", "textStyle": {"color": CHART_TEXT, "fontSize": 9},
+                      "inRange": {"color": ["#f1f5f9", "#93c5fd", "#3b82f6", "#1e3a8a"]}},
+        "series": [{"name": "框数", "type": "heatmap", "data": data,
+                    "label": {"show": True, "color": "#0f172a", "fontSize": 9,
+                              "formatter": "{c}"},
+                    "emphasis": {"itemStyle": {"borderColor": "#f59e0b", "borderWidth": 2}}}],
+    }
+
+
+def _parallel_options(items: list[dict]) -> dict:
+    """平行坐标（M8 06 号票）：数值超参轴 + 主指标轴（末轴），线色按主指标名次固定。"""
+    numeric_keys: list[str] = []
+    for it in items:
+        for k, v in (it.get("train_args") or {}).items():
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and k not in numeric_keys:
+                numeric_keys.append(k)
+    varying = [k for k in numeric_keys
+               if len({str((it.get("train_args") or {}).get(k)) for it in items}) > 1][:6]
+    dims = varying + ["主指标"]
+    rows = []
+    for rank, it in enumerate(items):
+        vals = [float((it.get("train_args") or {}).get(k) or 0) for k in varying]
+        vals.append(float(it.get("best_primary_metric") or 0))
+        rows.append({"name": it["name"][:14],
+                     "value": vals,
+                     "lineStyle": {"color": (CHART_PALETTE + ["#f472b6", "#a3e635", "#fb923c"])[rank % 9],
+                                   "width": 2}})
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "legend": _legend(),
+        "tooltip": {"trigger": "item"},
+        "parallelAxis": [{"dim": i, "name": k, "nameTextStyle": {"color": CHART_TEXT, "fontSize": 10},
+                          "axisLine": {"lineStyle": {"color": "#64748b"}},
+                          "axisLabel": {"color": CHART_TEXT, "fontSize": 9}}
+                         for i, k in enumerate(dims)],
+        "parallel": {"left": 60, "right": 120, "top": 40, "bottom": 40},
+        "series": [{"type": "parallel", "name": "Runs", "smooth": True, "data": rows,
+                    "emphasis": {"lineStyle": {"width": 4}}}],
+    }
+
+
+def _threshold_options(sweep: dict) -> dict:
+    """阈值探索曲线（M8 04 号票）：P/R/F1 vs conf + F1 最大点参考线。"""
+    curve = (sweep or {}).get("curve") or []
+    xs = [c["conf"] for c in curve]
+    mk = (sweep or {}).get("recommended_conf")
+
+    def series(key, color, dashed=False):
+        return {"name": key, "type": "line", "smooth": True, "showSymbol": False,
+                "lineStyle": {"color": color, "type": "dashed" if dashed else "solid"},
+                "itemStyle": {"color": color}, "data": [c[key] for c in curve]}
+
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": _base_grid(),
+        "legend": _legend(),
+        "tooltip": {"trigger": "axis"},
+        "xAxis": _axis_text({"type": "value", "name": "conf 阈值", "nameLocation": "middle",
+                             "nameGap": 22, "min": 0, "max": 1}),
+        "yAxis": _axis_text({"type": "value", "name": "P / R / F1", "min": 0, "max": 1}),
+        "series": [series("precision", CHART_PALETTE[0]), series("recall", CHART_PALETTE[2]),
+                   series("f1", CHART_PALETTE[1], dashed=True),
+                   {"name": "建议 conf", "type": "line", "showSymbol": False, "data": [],
+                    "markLine": {"silent": True, "symbol": "none", "lineStyle": {"color": "#f59e0b"},
+                                 "label": {"formatter": f"F1 最大 conf={mk}", "color": "#f59e0b"},
+                                 "data": [{"xAxis": mk}]}}] if mk is not None else
+                  [series("precision", CHART_PALETTE[0]), series("recall", CHART_PALETTE[2]),
+                   series("f1", CHART_PALETTE[1], dashed=True)],
     }
 
 
@@ -152,6 +337,219 @@ def _overlay_options(curves: list[tuple[str, list[dict]]]) -> dict:
         "yAxis": _axis_text({"type": "value", "scale": True}),
         "series": series,
     }
+
+
+# ---------------------------------------------------------------- 健康报告（M6 01/02 号票）
+
+HEAT_GRID = 20  # 与 datasets.stats.HEATMAP_GRID 保持一致（前端不再引后端常量，双端各持一份）
+
+
+def _class_dist_options(payload: dict) -> dict:
+    """逐切分类别分布（堆叠柱：train/val 实例数）——点柱筛图。"""
+    by_split = payload.get("agg", {}).get("by_split", {})
+    train_c = by_split.get("train", {}).get("by_class", {})
+    val_c = by_split.get("val", {}).get("by_class", {})
+    cats = list(dict.fromkeys([*(payload.get("classes") or []), *train_c, *val_c]))
+    if payload["task_type"] == "classify":
+        cats = list(dict.fromkeys([*train_c, *val_c]))  # 分类任务类别来自 flags，不套 classes.txt
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": _base_grid(),
+        "legend": _legend(),
+        "tooltip": {"trigger": "axis"},
+        "xAxis": _axis_text({"type": "category", "data": cats,
+                             "axisLabel": {"rotate": 30, "interval": 0, "fontSize": 9}}),
+        "yAxis": _axis_text({"type": "value", "name": "图数" if payload["task_type"] == "classify" else "实例数"}),
+        "series": [
+            {"name": "train", "type": "bar", "stack": "n", "data": [train_c.get(c, 0) for c in cats],
+             "itemStyle": {"color": CHART_PALETTE[0]}},
+            {"name": "val", "type": "bar", "stack": "n", "data": [val_c.get(c, 0) for c in cats],
+             "itemStyle": {"color": CHART_PALETTE[2]}},
+        ],
+    }
+
+
+def _obj_hist_options(payload: dict) -> dict:
+    """每图目标数直方图——点柱筛图。"""
+    hist = dict(payload.get("agg", {}).get("obj_hist") or [])
+    top = max(hist, default=0)
+    data = [hist.get(i, 0) for i in range(top + 1)]
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": _base_grid(),
+        "tooltip": {"trigger": "axis"},
+        "xAxis": _axis_text({"type": "category", "data": [str(i) for i in range(top + 1)],
+                             "name": "每图目标数", "nameLocation": "middle", "nameGap": 22}),
+        "yAxis": _axis_text({"type": "value", "name": "图数"}),
+        "series": [{"name": "图数", "type": "bar", "data": data,
+                    "itemStyle": {"color": CHART_PALETTE[1]}}],
+    }
+
+
+def _size_scatter_options(payload: dict) -> dict:
+    """图像尺寸散点（宽×高，标注 JSON 声明值）。"""
+    sizes = payload.get("agg", {}).get("sizes") or []
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": _base_grid(),
+        "tooltip": {"trigger": "item", "formatter": "{c}"},
+        "xAxis": _axis_text({"type": "value", "name": "宽 px", "scale": True}),
+        "yAxis": _axis_text({"type": "value", "name": "高 px", "scale": True}),
+        "series": [{"name": "图像", "type": "scatter", "symbolSize": 4, "data": sizes,
+                    "itemStyle": {"color": CHART_PALETTE[5], "opacity": 0.55}}],
+    }
+
+
+def _center_heat_options(payload: dict) -> dict:
+    """标注中心热力图（归一化 20×20 网格，y 轴反转贴合图像方向）。
+
+    echarts 笛卡尔 heatmap 只支持 category 轴（value 轴静默不画格子）——
+    轴刻度用「:formatter」动态属性转成百分比文案。点格筛选 + 工具箱矩形框选。
+    """
+    heat = payload.get("agg", {}).get("heatmap") or []
+    data = [[j, i, c] for i, row in enumerate(heat) for j, c in enumerate(row) if c]
+    mx = max((d[2] for d in data), default=0)
+    bins = [str(k) for k in range(HEAT_GRID)]
+    return {
+        "backgroundColor": "transparent",
+        "textStyle": {"color": CHART_TEXT},
+        "grid": {"left": 44, "right": 90, "top": 30, "bottom": 34},
+        "tooltip": {"formatter": "{c} 个标注中心"},
+        "toolbox": {"right": 0, "top": -4, "showTitle": False,
+                    "feature": {"brush": {"type": ["rect"]}}},
+        "brush": {"xAxisIndex": 0, "yAxisIndex": 0, "toolbox": ["rect"],
+                  "brushStyle": {"borderColor": "#2563eb", "color": "rgba(37,99,235,.15)"}},
+        "xAxis": {"type": "category", "data": bins, "name": "中心 x", "nameLocation": "middle",
+                  "nameGap": 22, "axisTick": {"show": False},
+                  "axisLabel": {"color": CHART_TEXT, "fontSize": 9, "interval": 4,
+                                ":formatter": "(idx) => idx * 5 + '%'"},
+                  "nameTextStyle": {"color": CHART_TEXT}, "axisLine": {"lineStyle": {"color": "#64748b"}}},
+        "yAxis": {"type": "category", "data": bins, "inverse": True, "name": "中心 y",
+                  "axisTick": {"show": False}, "splitLine": {"show": False},
+                  "axisLabel": {"color": CHART_TEXT, "fontSize": 9, "interval": 4,
+                                ":formatter": "(idx) => idx * 5 + '%'"},
+                  "nameTextStyle": {"color": CHART_TEXT}, "axisLine": {"lineStyle": {"color": "#64748b"}}},
+        "visualMap": {"min": 0, "max": mx or 1, "calculable": False, "orient": "vertical",
+                      "right": 0, "bottom": "center", "textStyle": {"color": CHART_TEXT, "fontSize": 9},
+                      "inRange": {"color": ["#1e3a8a", "#3b82f6", "#22d3ee", "#fde047"]}},
+        "series": [{"name": "标注中心", "type": "heatmap", "data": data,
+                    "emphasis": {"itemStyle": {"borderColor": "#fff"}}}],
+    }
+
+
+def _rect_from_areas(areas) -> list[float] | None:
+    """echarts brushEnd 的 areas → 归一化矩形 [x0, x1, y0, y1]（空刷清除筛选）。"""
+    for a in reversed(areas or []):
+        cr = a.get("coordRange")
+        if not cr:
+            continue
+        if isinstance(cr[0], (list, tuple)):
+            cr = [cr[0][0], cr[0][1], cr[1][0], cr[1][1]]
+        x0, x1, y0, y1 = (float(v) for v in cr)
+        return [min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1)]
+    return None
+
+
+def _drill_rows(payload: dict, drill: dict) -> list[tuple[dict, list[str]]]:
+    """按当前筛选项过滤逐图行，返回 (行, 命中原因) 列表。多筛选取交集。"""
+    cls = drill.get("class")
+    bucket = drill.get("bucket")
+    rect = drill.get("rect")
+    out = []
+    for r in payload.get("per_image") or []:
+        why = []
+        if cls is not None:
+            c, sp = cls
+            hit = (c in r.get("labels") or r.get("cls") == c) and (sp is None or r["split"] == sp)
+            if not hit:
+                continue
+            why.append(f"类别 {c}" + (f" @{sp}" if sp else ""))
+        if bucket is not None:
+            if r.get("n") != bucket:
+                continue
+            why.append(f"目标数 {bucket}")
+        if rect is not None:
+            x0, x1, y0, y1 = rect
+            if not any(x0 <= cx <= x1 and y0 <= cy <= y1 for cx, cy in r.get("centers") or []):
+                continue
+            why.append(f"中心 ∈ [{x0:.2f},{x1:.2f}]×[{y0:.2f},{y1:.2f}]")
+        out.append((r, why))
+    return out
+
+
+def _drill_desc(drill: dict) -> str:
+    parts = []
+    if drill.get("class") is not None:
+        c, sp = drill["class"]
+        parts.append(f"类别 {c}" + (f"（仅 {sp}）" if sp else ""))
+    if drill.get("bucket") is not None:
+        parts.append(f"每图目标数 = {drill['bucket']}")
+    if drill.get("rect") is not None:
+        x0, x1, y0, y1 = drill["rect"]
+        parts.append(f"标注中心 x∈[{x0:.2f},{x1:.2f}] y∈[{y0:.2f},{y1:.2f}]")
+    return " ∩ ".join(parts)
+
+
+def _open_in_xal(image: str) -> None:
+    """在 X-AnyLabeling 桌面端打开指定图片（训练 python 即其 venv；平台自身零 Qt）。"""
+    import subprocess
+    import sys
+
+    from ..config import load_config
+
+    py = load_config().get("training", {}).get("python") or sys.executable
+    try:
+        subprocess.Popen(
+            [py, "-c", "from anylabeling.app import main; main()", "--filename", image],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+        ui.notify(f"已在 X-AnyLabeling 中打开 {Path(image).name}", type="positive")
+    except OSError as exc:
+        ui.notify(f"调起失败：{exc}（训练 python 须指向 X-AnyLabeling 环境，见设置页）", type="negative")
+
+
+_THUMB_CACHE: dict = {}          # (path, mtime, box) -> data URL
+_THUMB_CACHE_MAX = 300
+
+
+def _thumb_cache_reset() -> None:
+    """清空缩略图缓存（测试隔离用）。"""
+    _THUMB_CACHE.clear()
+
+
+def _thumb_src(path: str, box: int = 260) -> str | None:
+    """缩略图 data URL：PIL 服务端生成（约 box×box 内接），按 (路径, mtime) 缓存。
+
+    解码失败返回 None（对应校验规则「图片不可读」，网格里落坏图占位）。
+    """
+    p = Path(path)
+    try:
+        mtime = p.stat().st_mtime
+    except OSError:
+        return None
+    key = (path, mtime, box)
+    if key in _THUMB_CACHE:
+        return _THUMB_CACHE[key]
+    import io
+
+    from PIL import Image
+
+    try:
+        with Image.open(p) as im:
+            im = im.convert("RGB")
+            im.thumbnail((box, box))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=82)
+        data = "data:image/jpeg;base64," + b64encode(buf.getvalue()).decode()
+    except Exception:  # noqa: BLE001 — 坏图/格式不支持：占位而不是炸页面
+        return None
+    if len(_THUMB_CACHE) >= _THUMB_CACHE_MAX:
+        _THUMB_CACHE.clear()
+    _THUMB_CACHE[key] = data
+    return data
 
 
 # ---------------------------------------------------------------- 通用工具
@@ -395,6 +793,21 @@ def _fmt_eta(sec) -> str:
     return f"预计剩余 {m} 分 {s:02d} 秒" if m else f"预计剩余 {s} 秒"
 
 
+def _fmt_duration(sec) -> str:
+    """总时长预估文案（M7 02 号票）：秒 → 人类可读（<90s 近似整数，避免 0.9s 显示成 0 秒）。"""
+    if sec is None:
+        return "—"
+    sec = round(sec)
+    if sec < 1:
+        return "＜1 秒"
+    if sec < 90:
+        return f"{sec} 秒"
+    m = sec // 60
+    if m < 90:
+        return f"{m} 分钟"
+    return f"{m // 60} 小时 {m % 60} 分"
+
+
 def _fmt_ts(iso) -> str:
     """ISO 时间戳 → 「YYYY-MM-DD HH:MM」（视觉审计：ISO 原样直出不友好）。"""
     if not iso:
@@ -573,13 +986,23 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
 
     def _recount() -> None:
         n = len(_collect_params(param_fields))
-        counter.set_text(f"已设置 {n} 项")
+        counter.set_text(f"已修改 {n} 项")
         if n:
             counter.props("color=blue", remove="color=grey")
         else:
             counter.props("color=grey", remove="color=blue")
+        # M7 表单工程学：非默认项左侧蓝条标记（视觉可辨「我改过哪些」）
+        for key, (e, w) in param_fields.items():
+            modified = key in _collect_params(param_fields)
+            w.style("box-shadow: inset 2px 0 0 #2563eb" if modified else "")
         if on_change is not None:
             on_change()
+
+    def _reset_all() -> None:
+        for _key, (e, w) in param_fields.items():
+            is_sel = e["type"] in ("bool", "bool|str") or (e["type"] == "str" and "options" in e)
+            w.set_value("" if is_sel else None)
+        _recount()
 
     def _add_field(e: dict) -> None:
         t = e["type"]
@@ -603,7 +1026,22 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
             # 默认值常显在输入框右侧灰字——不聚焦、不悬停也能看到
             with w.add_slot("append"):
                 ui.label(_default_hint(e)).classes("text-xs opacity-40").style("white-space: nowrap")
-        w.on_value_change(lambda _e: _recount())
+
+        def _on_change(_ev, entry=e, widget=w) -> None:
+            # M7 表单工程学：越界失焦即时 clamp + 可见反馈（不等提交才报错）
+            if entry["type"] in ("int", "float") and widget.value is not None:
+                lo, hi = entry.get("min"), entry.get("max")
+                v, cv = widget.value, widget.value
+                if lo is not None and v < lo:
+                    cv = lo
+                if hi is not None and v > hi:
+                    cv = hi
+                if cv != v:
+                    widget.set_value(cv)  # 触发一次 onchange 复核（此时已不越界，无循环）
+                    ui.notify(f"{entry['key']} 越界，已修正为 {cv}（范围 {lo}–{hi}）", type="warning")
+            _recount()
+
+        w.on_value_change(_on_change)
         param_fields[e["key"]] = (e, w)
 
     # 行级注册表：搜索时整行 show/hide（半空行不留缝）
@@ -620,12 +1058,16 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
     all_entries = [e for entries in PARAM_GROUPS.values() for e in entries]
     common_entries = [e for k in COMMON_PARAM_KEYS for e in all_entries if e["key"] == k]
 
-    # ── 搜索框 + 计数
+    # ── 搜索框 + 已修改徽章 + 一键复位（M7 表单工程学）
     with ui.row().classes("w-full items-center gap-2"):
         search = ui.input("搜索参数（名称或中文说明）").props("dense outlined clearable").classes("flex-1")
         with search:
             ui.tooltip("示例：搜「学习率」「mosaic」「角度」即时过滤全部 64 项")
-        counter = ui.badge("已设置 0 项").props("outline color=grey").style("font-size:10px")
+        counter = ui.badge("已修改 0 项").props("outline color=grey").style("font-size:10px")
+        reset_btn = ui.button(icon="restart_alt", on_click=lambda: _reset_all()).props(
+            "flat dense round size=sm color=grey")
+        with reset_btn:
+            ui.tooltip("全部复位为官方默认（清空已修改项）")
 
     # ── 常用参数（常显置顶）
     with ui.column().classes("w-full gap-0") as common_box:
@@ -684,7 +1126,9 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
 
 
 def _collect_params(param_fields: dict[str, tuple[dict, object]]) -> dict:
-    """收集用户显式设置的参数（空/空白 = 不设置，走官方默认）。"""
+    """收集非默认值（M7 表单工程学）：空/空白不设置，等于官方默认的项也不提交。"""
+    from ..training.params import strip_defaults
+
     extra: dict = {}
     for key, (_e, w) in param_fields.items():
         v = w.value
@@ -693,7 +1137,7 @@ def _collect_params(param_fields: dict[str, tuple[dict, object]]) -> dict:
         if isinstance(v, str) and not v.strip():
             continue
         extra[key] = v
-    return extra
+    return strip_defaults(extra)
 
 
 def _section_header(icon: str, title: str, hint: str = "") -> None:
@@ -938,6 +1382,38 @@ def mount() -> None:
             return rows
 
         def body() -> None:
+            # ── 启动自检横幅（M6 07 号票）：有问题才出现，错误项给修复指引；后台跑不挡首屏
+            sc_col = ui.column().classes("w-full")
+
+            async def _load_selfcheck() -> None:
+                from ..core.selfcheck import run_selfcheck
+
+                result = await _io(run_selfcheck)
+                sc_col.clear()
+                errs = [i for i in result["items"] if i["severity"] == "error"]
+                warns = [i for i in result["items"] if i["severity"] == "warning"]
+                if not errs and not warns:
+                    return
+                # ui.banner 在 NiceGUI 3.x 已移除（2026-09-21 撞出：仅在有问题分支才执行，此前未被打开过）
+                with sc_col, ui.card().classes(
+                        "w-full q-py-sm gap-1 rounded-lg " +
+                        ("bg-red-100 text-red-900" if errs else "bg-amber-100 text-amber-900")):
+                    ui.icon("error" if errs else "info").classes("q-mr-sm")
+                    with ui.column().classes("flex-1 gap-0"):
+                        ui.label(f"启动自检发现 {len(errs)} 项错误"
+                                 + (f"、{len(warns)} 项提示" if warns else "")
+                                 + ("——训练链路可能不可用" if errs else "")).classes("text-sm font-semibold")
+                        for i in errs:
+                            ui.label(f"{i['label']}：{i['summary']}").classes("text-xs")
+                            ui.label(i["detail"]).classes("text-[11px] opacity-70")
+                        for i in warns:
+                            ui.label(f"{i['label']}：{i['summary']}").classes("text-xs opacity-80")
+                    ui.button("去设置页", icon="settings",
+                              on_click=lambda: ui.navigate.to("/settings")).props(
+                        "dense outline " + ("color=red-8" if errs else "color=amber-8"))
+
+            ui.timer(0.1, _load_selfcheck, once=True)
+
             columns = [
                 {"name": "name", "label": "任务", "field": "name", "align": "left",
                  "style": "white-space:normal"},
@@ -978,6 +1454,8 @@ def mount() -> None:
                         with ui.row().classes("items-center gap-2 flex-1 min-w-56 flex-wrap"):
                             ui.label(f"Run {uid}").classes("text-lg font-bold")
                             ui.badge(status_label).props(f"color={status_color} outline").style("font-size:10px")
+                            if run.get("pruned"):
+                                ui.badge("已剪枝").props("color=purple outline").style("font-size:10px")
                             ui.label(f"{task['name']} · 轮 {run['round_no']}").classes("text-xs opacity-60")
                         # 操作按钮独立分组：右对齐、窄视口允许换行；危险动作最右（gap 分隔）
                         with ui.row().classes("items-center gap-2 flex-wrap justify-end"):
@@ -986,6 +1464,12 @@ def mount() -> None:
                                           on_click=lambda: do_deploy(uid)).props("unelevated dense")
                             if run["status"] in ("done", "failed", "cancelled"):
                                 ui.button("续训", icon="replay", on_click=lambda: do_resume(uid)).props("outline dense")
+                            if run["status"] in ("failed", "cancelled"):
+                                rb = ui.button("重开任务", icon="restart_alt",
+                                               on_click=lambda: do_retry(uid)).props("outline dense")
+                                with rb:
+                                    ui.tooltip("以本 Run 冻结参数从头重开新 Task（快照还原）；"
+                                               "「续训」= 从 last.pt 继续同任务")
                             if run["status"] in ("queued", "running"):
                                 ui.button("停止", icon="stop", color="negative",
                                           on_click=lambda: do_stop(uid)).props("outline dense")
@@ -1050,6 +1534,275 @@ def mount() -> None:
                             log_box.push(line)
                     with ui.expansion("产物图（训练结束后由 ultralytics 生成）", icon="image").classes("w-full"):
                         _artifact_gallery(run.get("run_dir"))
+                    with ui.expansion("运行快照（启动时冻结的训练输入）", icon="ac_unit").classes("w-full"):
+                        snap = run.get("snapshot")
+                        if not snap:
+                            ui.label("（本 Run 早于快照功能，或尚未实际启动）").classes("text-xs opacity-40")
+                        else:
+                            sm = snap.get("split_manifest") or {}
+                            winfo = snap.get("weight") or {}
+                            cls = snap.get("classes") or {}
+
+                            def _snap_kv(label: str, value: str) -> None:
+                                with ui.row().classes("w-full gap-2 items-start"):
+                                    ui.label(label).classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
+                                    ui.label(value).classes("text-xs opacity-70 break-all flex-1 min-w-0")
+
+                            _snap_kv("切分清单", f"{sm.get('uid')} · train {sm.get('n_train')} / val {sm.get('n_val')}"
+                                     + (f" · 前序 {sm['prev_uid']}" if sm.get("prev_uid") else "")
+                                     + (f" · 含排除 {len(sm['excluded'])} 项" if sm.get("excluded") else ""))
+                            _snap_kv("切分参数", f"seed {sm.get('seed')} · train 比例 {sm.get('ratio')} · "
+                                     f"{'分层' if sm.get('stratify') else '不分层'}")
+                            _snap_kv("类别表", f"{len(cls.get('list') or [])} 类 · sha256 {str(cls.get('sha256', ''))[:12]}")
+                            _snap_kv("基础权重", f"{winfo.get('name') or winfo.get('path')}"
+                                     + (f" · sha256 {winfo['sha256'][:12]}" if winfo.get("sha256") else "（训练端解析）"))
+                            _snap_kv("冻结时间", snap.get("frozen_at", "—"))
+                            with ui.row().classes("w-full flex-wrap gap-1"):
+                                for k, v in list((snap.get("train_args") or {}).items())[:14]:
+                                    ui.chip(f"{k} = {v}").props("dense outline square").classes("text-[10px]")
+                            ui.label("数据集此后重切/排除/改名，本快照不受影响——历史 Run 可完整复现训练输入"
+                                     ).classes("text-[11px] opacity-45")
+
+                    # ── M8 01/02/04：错误分析区（val 逐框对错归因）
+                    if run["status"] == "done":
+                        with ui.expansion("错误分析（val 逐框对错归因）", icon="biotech").classes("w-full"):
+                            try:
+                                analysis = tsvc.get_error_analysis(get_manager(), uid)
+                            except Exception:  # noqa: BLE001
+                                analysis = None
+
+                            async def do_analysis(_uid: str) -> None:
+                                ui.notify("错误分析中：best.pt 对 val 逐图推理 + IoU 匹配（视 val 大小约数十秒）…")
+                                try:
+                                    r = await _io(tsvc.run_error_analysis, get_manager(), _uid)
+                                    c = (r.get("summary") or {}).get("counts") or {}
+                                    ui.notify(f"分析完成：TP {c.get('tp', 0)} / FP {c.get('fp', 0)} / "
+                                              f"FN {c.get('fn', 0)} / 混淆 {c.get('confusion', 0)}", type="positive")
+                                except Exception as exc:  # noqa: BLE001
+                                    ui.notify(f"分析失败：{exc}", type="negative")
+                                render_detail()
+
+                            async def do_export_list(_uid: str) -> None:
+                                try:
+                                    r = await _io(tsvc.export_relabel_list, get_manager(), _uid)
+                                    ui.notify(f"清单已导出：{r['path']}（{len(r['entries'])} 项）", type="positive")
+                                    ex_list.clear()
+                                    with ex_list:
+                                        ui.label("改标清单（前 30 项，逐项可直达 X-AnyLabeling）"
+                                                 ).classes("text-xs font-semibold mt-1")
+                                        for e in r["entries"][:30]:
+                                            with ui.row().classes("w-full items-center gap-2"):
+                                                kind_color = {"fn": "orange", "fp": "red",
+                                                              "confusion": "purple"}.get(e["kind"], "grey")
+                                                ui.badge(e["kind"].upper()).props(
+                                                    f"color={kind_color} square").style("font-size:9px")
+                                                ui.label(f"{Path(e['image']).name} · {e['cls']}"
+                                                         + (f" · conf {e['conf']:.2f}" if e.get("conf") is not None else "")
+                                                         ).classes("text-[11px] flex-1 min-w-0 truncate")
+                                                ob = ui.button(icon="open_in_new",
+                                                               on_click=lambda p=e["image"]: _open_in_xal(p)).props(
+                                                    "flat dense round size=xs color=blue")
+                                                with ob:
+                                                    ui.tooltip("在 X-AnyLabeling 中打开修复")
+                                except Exception as exc:  # noqa: BLE001
+                                    ui.notify(f"导出失败：{exc}", type="negative")
+
+                            def _show_overlay(e_img: str, e_overlay: str, e_score: dict) -> None:
+                                with ui.dialog() as dlg, ui.card().classes("w-3xl max-w-[92vw] gap-2"):
+                                    with ui.row().classes("w-full items-center"):
+                                        ui.label(f"{Path(e_img).name} · 错框 {e_score['score']}"
+                                                 f"（FP {e_score['fp']} / FN {e_score['fn']} / "
+                                                 f"混淆 {e_score['confusion']}）").classes("font-bold")
+                                        ui.space()
+                                        ui.button(icon="open_in_new", on_click=lambda: _open_in_xal(e_img)).props(
+                                            "flat dense round color=blue")
+                                        ui.button("关闭", icon="close", on_click=dlg.close).props("flat dense")
+                                    with ui.scroll_area().classes("w-full h-[70vh]"):
+                                        _local_image(e_overlay)
+                                    ui.label("绿 = GT（真值）｜红 = Pred（预测，含置信度）｜紫文案见清单"
+                                             ).classes("text-[11px] opacity-50")
+                                dlg.open()
+
+                            if not analysis:
+                                ui.label("尚未分析。以 best.pt 对切分清单 val 集逐图推理（低置信度全量采集），"
+                                         "IoU 贪心匹配逐框记 TP/FP/FN/类混淆——回答「模型到底错在哪」。"
+                                         ).classes("text-xs opacity-50")
+                                ui.button("运行错误分析", icon="biotech",
+                                          on_click=lambda: do_analysis(uid)).props("unelevated dense")
+                            else:
+                                sm = analysis.get("summary") or {}
+                                c = sm.get("counts") or {}
+                                sw = analysis.get("sweep") or {}
+                                with ui.row().classes("w-full flex-wrap gap-1"):
+                                    for txt, col in ((f"P {sm.get('precision', '—')}", "blue"),
+                                                     (f"R {sm.get('recall', '—')}", "blue"),
+                                                     (f"F1 {sm.get('f1', '—')}", "blue"),
+                                                     (f"TP {c.get('tp', 0)}", "green"),
+                                                     (f"FP {c.get('fp', 0)}", "red"),
+                                                     (f"FN {c.get('fn', 0)}", "orange"),
+                                                     (f"混淆 {c.get('confusion', 0)}", "purple")):
+                                        ui.chip(txt).props(f"dense square outline color={col}").classes("text-[11px]")
+                                    if sw.get("recommended_conf") is not None:
+                                        ui.chip(f"建议 conf {sw['recommended_conf']}"
+                                                f"（F1 {sw.get('recommended_f1')}）").props(
+                                            "dense square color=amber-8").classes("text-[11px]")
+                                    if (sm.get("small_objects") or {}).get("total"):
+                                        so = sm["small_objects"]
+                                        ui.chip(f"小目标 GT 占比 {so['share']:.0%}"
+                                                f"（{so['count']}/{so['total']}）").props(
+                                            "dense square outline color=grey").classes("text-[11px]")
+                                for tc in (sm.get("top_confusions") or [])[:4]:
+                                    ui.chip(f"混淆 {tc['gt']}→{tc['pred']} ×{tc['count']}"
+                                            ).props("dense square outline color=purple").classes("text-[11px]")
+                                with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                                    with ui.column().classes("flex-1 min-w-[18rem]"):
+                                        ui.label("阈值探索（P/R/F1 vs conf，后验扫描）").classes(
+                                            "text-xs font-semibold opacity-70")
+                                        ui.echart(_threshold_options(sw)).classes("w-full h-52")
+                                    with ui.column().classes("flex-1 min-w-[18rem]"):
+                                        ui.label("混淆矩阵（行 GT × 列 Pred，含背景；点格下钻）").classes(
+                                            "text-xs font-semibold opacity-70")
+                                        cm_axis = (analysis.get("matrix") or {}).get("axis") or []
+                                        cell_box = ui.column().classes("w-full")
+                                        cm_chart = ui.echart(_confusion_options(analysis.get("matrix") or {})
+                                                             ).classes("w-full h-56")
+
+                                        def _on_cm_cell(e, _axis=cm_axis, _uid=uid) -> None:
+                                            v = getattr(e, "value", None)
+                                            if not isinstance(v, (list, tuple)) or len(v) < 2:
+                                                return
+                                            try:
+                                                gt, pred = _axis[int(v[1])], _axis[int(v[0])]
+                                            except (IndexError, TypeError):
+                                                return
+                                            entries = tsvc.analysis_cell(get_manager(), _uid, gt, pred)
+                                            cell_box.clear()
+                                            with cell_box:
+                                                with ui.row().classes("w-full items-center gap-2 q-mt-xs"):
+                                                    ui.icon("filter_alt", size="14px").classes("opacity-50")
+                                                    ui.label(f"格 [{gt} → {pred}]：{len(entries)} 条"
+                                                             ).classes("text-xs font-semibold")
+                                                for en in entries[:15]:
+                                                    with ui.row().classes("w-full items-center gap-2"):
+                                                        ui.badge(en["kind"].upper()).props("square").style(
+                                                            "font-size:9px")
+                                                        ui.label(Path(en["image"]).name).classes(
+                                                            "text-[11px] flex-1 min-w-0 truncate")
+                                                        if en.get("conf") is not None:
+                                                            ui.label(f"conf {en['conf']:.2f}").classes(
+                                                                "text-[10px] opacity-50")
+                                                        ob = ui.button(icon="open_in_new",
+                                                                       on_click=lambda p=en["image"]: _open_in_xal(p)
+                                                                       ).props("flat dense round size=xs color=blue")
+                                                        with ob:
+                                                            ui.tooltip("在 X-AnyLabeling 中打开")
+                                                if len(entries) > 15:
+                                                    ui.label(f"… 其余 {len(entries) - 15} 条见导出清单"
+                                                             ).classes("text-[11px] opacity-40")
+
+                                        cm_chart.on_point_click(_on_cm_cell)
+                                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                    ui.label("最差样本榜（错框数降序，点「查看」看叠加图）").classes(
+                                        "text-xs font-semibold")
+                                    exb = ui.button("导出 FN/FP 改标清单", icon="fact_check",
+                                                    on_click=lambda: do_export_list(uid))
+                                    exb.props("outline dense")
+                                wrows = []
+                                for w in (analysis.get("worst") or []):
+                                    if not w.get("score"):
+                                        continue
+                                    wrows.append(w)
+                                if wrows:
+                                    wtbl = ui.table(columns=[
+                                        {"name": "name", "label": "图片", "field": "name", "align": "left",
+                                         "style": "white-space:normal"},
+                                        {"name": "score", "label": "错框", "field": "score"},
+                                        {"name": "fp", "label": "FP", "field": "fp"},
+                                        {"name": "fn", "label": "FN", "field": "fn"},
+                                        {"name": "cf", "label": "混淆", "field": "confusion"},
+                                        {"name": "ops", "label": "操作", "field": "ops"},
+                                    ], rows=[{**w, "name": Path(w["image"]).name} for w in wrows],
+                                        row_key="image").classes("text-xs")
+                                    _style_table(wtbl)
+                                    wtbl.add_slot("body-cell-ops", (
+                                        '<q-td :props="props">'
+                                        '<q-btn flat dense round size=xs color=blue icon="visibility" '
+                                        '@click="() => $parent.$emit(\'view\', props.row)" />'
+                                        "</q-td>"))
+                                    wtbl.on("view", lambda e: _show_overlay(
+                                        e.args["image"], e.args["overlay"],
+                                        {"score": e.args["score"], "fp": e.args["fp"],
+                                         "fn": e.args["fn"], "confusion": e.args["confusion"]}))
+                                else:
+                                    ui.label("（val 集零错框——没有需要复盘的样本）").classes("text-xs opacity-40")
+                                ex_list = ui.column().classes("w-full")
+
+                    # ── M8 05：试跑（ONNX 叠框）
+                    if run["status"] == "done":
+                        with ui.expansion("试跑（ONNX 叠框 · 部署前人工验收）", icon="science").classes("w-full"):
+                            ti_path = ui.input("本地图片/视频绝对路径",
+                                               value=state.get("ti_path", ""),
+                                               placeholder="/path/to/img.jpg（视频将抽帧）").classes("w-full")
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ti_conf = ui.number("conf", value=0.25, min=0.01, max=1.0,
+                                                    step=0.05).classes("w-28")
+                                tib = ui.button("试跑", icon="play_circle",
+                                                on_click=lambda: do_test_infer()).props("unelevated dense")
+                                ui.label("首次会先导出 ONNX 缓存于 Run 目录（不动模型库）"
+                                         ).classes("text-[11px] opacity-45 flex-1")
+                            ti_out = ui.column().classes("w-full")
+
+                            async def do_test_infer() -> None:
+                                p = (ti_path.value or "").strip()
+                                if not p:
+                                    ui.notify("请填写图片/视频路径", type="warning")
+                                    return
+                                state["ti_path"] = p
+                                with _busy(tib, "推理中…"):
+                                    try:
+                                        r = await _io(tsvc.test_infer, get_manager(), uid, p,
+                                                      float(ti_conf.value or 0.25))
+                                        ti_out.clear()
+                                        with ti_out:
+                                            for im in r.get("images") or []:
+                                                ui.label(Path(im["image"]).name +
+                                                         (f" · 视频帧（共 {len(r['images'])} 帧网格）"
+                                                          if im.get("source") == "frame" else "")
+                                                         ).classes("text-xs font-semibold mt-1")
+                                                _local_image(im["annotated"])
+                                                boxes = im.get("boxes") or []
+                                                if boxes:
+                                                    with ui.row().classes("flex-wrap gap-1"):
+                                                        for b in boxes[:10]:
+                                                            ui.chip(f"{b['cls']} {b['conf']}").props(
+                                                                "dense square outline").classes("text-[11px]")
+                                                else:
+                                                    ui.label("（无检出框）").classes("text-xs opacity-40")
+                                            ui.label(f"ONNX：{r.get('onnx')}").classes(
+                                                "text-[11px] opacity-45 break-all")
+                                    except Exception as exc:  # noqa: BLE001
+                                        ui.notify(f"试跑失败：{exc}", type="negative")
+
+                    with ui.expansion("System（GPU 利用率 / 显存 / 温度）", icon="monitor").classes("w-full"):
+                        gpu_box = ui.column().classes("w-full")
+
+                        def _render_gpu() -> None:
+                            gpu_box.clear()
+                            try:
+                                samples = tsvc.run_gpu_samples(get_manager(), uid)
+                            except Exception:  # noqa: BLE001
+                                samples = []
+                            with gpu_box:
+                                if samples:
+                                    ui.echart(_gpu_options(samples)).classes("w-full h-56")
+                                    ui.label(f"采样 {len(samples)} 点 · 间隔约 8s · 显存峰值 "
+                                             f"{max((s['mem_used'] or 0) for s in samples):.0f} MB"
+                                             ).classes("text-[11px] opacity-45")
+                                else:
+                                    ui.label("无 GPU 采样（无 N 卡 / 收养空窗 / 运行期未采样）"
+                                             ).classes("text-xs opacity-40")
+
+                        _render_gpu()
 
                     if run["status"] == "running":
 
@@ -1067,7 +1820,11 @@ def mount() -> None:
                                 prog_label.set_text(
                                     f"epoch {pg.get('epoch')}/{pg.get('epochs_total')} · "
                                     f"batch {pg.get('batch')}/{pg.get('batches_total')} · {_fmt_eta(r.get('eta_seconds'))}")
+                            poll.n += 1
+                            if poll.n % 4 == 0:
+                                _render_gpu()  # System 卡 ~4s 一刷（采样间隔 8s）
 
+                        poll.n = 0
                         ui.timer(1.0, poll)
 
             select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail),
@@ -1162,6 +1919,15 @@ def mount() -> None:
                 refresh()
                 render_detail()
 
+            def do_retry(uid: str) -> None:
+                try:
+                    brief = tsvc.retry_run(get_manager(), uid)
+                    ui.notify(f"已按快照参数重开为新任务 {brief['uid']}（首轮已排队）", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"重开失败：{exc}", type="negative")
+                refresh()
+                render_detail()
+
             def open_del(task: dict, task_id: int) -> None:
                 del_title.set_text(f"删除任务 {task['name']}")
                 state["del_target"] = task_id
@@ -1208,6 +1974,45 @@ def mount() -> None:
                     with c_model:
                         ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
                     c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
+                    # ── M8 08：预设实验模板（批量建 Task；与手填二选一）
+                    c_tpl = ui.select({
+                        "": "（不使用模板 · 手动填参）",
+                        "size": "尺寸扫描——imgsz 640/800/960 一键三任务",
+                        "lr": "lr 扫描——lr0 0.005/0.01/0.02 一键三任务",
+                        "few": "少样本快训——10 epoch · 30% 数据采样",
+                    }, value="", label="实验模板").classes("w-full")
+                    tpl_preview = ui.label("选择模板与数据集后预览将创建的任务").classes(
+                        "text-[11px] opacity-55")
+
+                    def _tpl_plan() -> list[dict] | None:
+                        if not c_tpl.value or not c_ds.value:
+                            return None
+                        if c_tpl.value == "size":
+                            return [{"suffix": "640", "imgsz": 640}, {"suffix": "800", "imgsz": 800},
+                                    {"suffix": "960", "imgsz": 960}]
+                        if c_tpl.value == "lr":
+                            return [{"suffix": "lr0.005", "extra": {"lr0": 0.005}},
+                                    {"suffix": "lr0.01", "extra": {"lr0": 0.01}},
+                                    {"suffix": "lr0.02", "extra": {"lr0": 0.02}}]
+                        if c_tpl.value == "few":
+                            return [{"suffix": "快训", "epochs": 10, "extra": {"fraction": 0.3}}]
+                        return None
+
+                    def _upd_tpl_preview() -> None:
+                        plan = _tpl_plan()
+                        if not plan:
+                            tpl_preview.set_text("选择模板与数据集后预览将创建的任务")
+                            return
+                        parts = []
+                        for v in plan:
+                            kvs = ([f"imgsz {v['imgsz']}"] if "imgsz" in v else []) + \
+                                  ([f"epochs {v['epochs']}"] if "epochs" in v else []) + \
+                                  [f"{k}={val}" for k, val in (v.get("extra") or {}).items()]
+                            parts.append(f"「·{v['suffix']}」{'，'.join(kvs)}")
+                        tpl_preview.set_text(f"将创建 {len(plan)} 个任务：" + "；".join(parts))
+
+                    c_tpl.on_value_change(lambda _e: _upd_tpl_preview())
+                    c_ds.on_value_change(lambda _e: _upd_tpl_preview())
                     # ── 分区 2：训练核心
                     _form_section("speed", "训练核心")
                     with ui.row().classes("w-full"):
@@ -1217,6 +2022,24 @@ def mount() -> None:
                                             label="imgsz", with_input=True).classes("flex-1")
                         c_batch = ui.select({-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
                                             value=16, label="batch", with_input=True).classes("flex-1")
+                    # 时长预估（M7 02 号票）：历史 Run 中位耗时 × epochs
+                    try:
+                        est_rate = tsvc.estimate_training_time(get_manager())
+                    except Exception:  # noqa: BLE001
+                        est_rate = None
+                    est_label = ui.label("").classes("text-[11px] opacity-50")
+
+                    def _upd_est() -> None:
+                        if est_rate and c_epochs.value:
+                            sec = est_rate["seconds_per_epoch"] * float(c_epochs.value)
+                            est_label.set_text(f"⏱ 预估总时长 ~{_fmt_duration(sec)}"
+                                               f"（历史 {est_rate['samples']} 个 Run 中位 "
+                                               f"{est_rate['seconds_per_epoch']}s/epoch）")
+                        else:
+                            est_label.set_text("⏱ 暂无已完成 Run，时长预估待历史积累")
+
+                    c_epochs.on_value_change(lambda _e: _upd_est())
+                    _upd_est()
                     with ui.row().classes("w-full"):
                         c_device = ui.input("device", value="0", placeholder="0 / 0,1 / cpu").classes("flex-1")
                         c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
@@ -1235,6 +2058,8 @@ def mount() -> None:
                                  f"GPU {c_device.value or '0'}"]
                         if n:
                             parts.append(f"高级参数 {n} 项")
+                        if est_rate and c_epochs.value:
+                            parts.append(f"⏱ ~{_fmt_duration(est_rate['seconds_per_epoch'] * float(c_epochs.value))}")
                         summary_label.set_text("🚀 将排队：" + " · ".join(str(x) for x in parts))
 
                     with ui.expansion("高级训练参数", icon="tune",
@@ -1263,18 +2088,45 @@ def mount() -> None:
                         return
                     if "," in (c_device.value or ""):
                         ui.notify("多卡 DDP 未测试，仅作透传", type="warning")
+                    plan = _tpl_plan()  # M8 08：模板批量创建分支
                     try:
-                        brief = tsvc.create_task(get_manager(), name=c_name.value.strip(),
-                                                 base_model=c_model.value, dataset=c_ds.value,
-                                                 epochs=int(c_epochs.value or 50),
-                                                 imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16),
-                                                 device=c_device.value or "0",
-                                                 workers=int(c_workers.value if c_workers.value is not None else 8),
-                                                 seed=int(c_seed.value if c_seed.value is not None else 42),
-                                                 patience=int(c_patience.value) if c_patience.value is not None else None,
-                                                 extra_args=_collect_params(param_fields) or None)
-                        create_dialog.close()
-                        ui.notify(f"任务已排队：{brief['uid']}")
+                        if plan:
+                            ok, fails = 0, []
+                            for v in plan:
+                                extra = dict(_collect_params(param_fields) or {})
+                                extra.update(v.get("extra") or {})
+                                try:
+                                    tsvc.create_task(get_manager(),
+                                                     name=f"{c_name.value.strip()}·{v['suffix']}",
+                                                     base_model=c_model.value, dataset=c_ds.value,
+                                                     epochs=int(v.get("epochs") or c_epochs.value or 50),
+                                                     imgsz=int(v.get("imgsz") or c_imgsz.value or 640),
+                                                     batch=int(c_batch.value if c_batch.value is not None else 16),
+                                                     device=c_device.value or "0",
+                                                     workers=int(c_workers.value if c_workers.value is not None else 8),
+                                                     seed=int(c_seed.value if c_seed.value is not None else 42),
+                                                     patience=int(c_patience.value) if c_patience.value is not None else None,
+                                                     extra_args=extra or None)
+                                    ok += 1
+                                except Exception as exc:  # noqa: BLE001
+                                    fails.append(f"·{v['suffix']}：{exc}")
+                            create_dialog.close()
+                            if ok:
+                                ui.notify(f"模板已创建 {ok} 个任务并排队", type="positive")
+                            for f in fails:
+                                ui.notify(f"创建失败 {f}", type="negative")
+                        else:
+                            brief = tsvc.create_task(get_manager(), name=c_name.value.strip(),
+                                                     base_model=c_model.value, dataset=c_ds.value,
+                                                     epochs=int(c_epochs.value or 50),
+                                                     imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16),
+                                                     device=c_device.value or "0",
+                                                     workers=int(c_workers.value if c_workers.value is not None else 8),
+                                                     seed=int(c_seed.value if c_seed.value is not None else 42),
+                                                     patience=int(c_patience.value) if c_patience.value is not None else None,
+                                                     extra_args=_collect_params(param_fields) or None)
+                            create_dialog.close()
+                            ui.notify(f"任务已排队：{brief['uid']}")
                         refresh()
                     except Exception as exc:  # noqa: BLE001
                         ui.notify(f"创建失败：{exc}", type="negative")
@@ -1373,6 +2225,8 @@ def mount() -> None:
                         ui.label("点击表格行查看详情").classes("text-xs opacity-40")
                     return
                 meta = ds.get_dataset(name)
+                state["drill"] = {"class": None, "bucket": None, "rect": None}
+                state["audit_sel"] = set()
                 task_zh = TASK_TYPE_ZH.get(meta["task_type"], meta["task_type"])
                 ok = (meta.get("last_validation") or {}).get("ok")
                 with detail, ui.card().classes("w-full gap-2"):
@@ -1415,24 +2269,20 @@ def mount() -> None:
                                          f"seed {brief['seed']} · {'分层' if brief['stratify'] else '不分层'} · "
                                          f"{_fmt_ts(brief.get('created_at'))}").classes(
                                     "text-xs opacity-70 break-all flex-1 min-w-0")
-                        lv = meta.get("last_validation") or {}
-                        if lv:
-                            counts = lv.get("counts") or {}
-                            probs = [f"{PROBLEM_ZH.get(k, k)} {v}" for k, v in counts.items() if v]
-                            with ui.row().classes("w-full gap-2 items-start"):
-                                ui.label("上次校验").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
-                                with ui.column().classes("flex-1 min-w-0 gap-0"):
-                                    ui.label(f"{_fmt_ts(lv['checked_at'])} · 共 {lv['total_images']} 图"
-                                             f"（标注 {lv['labeled']} / 负样本 {lv['background']}）"
-                                             f"{' · ' + '、'.join(probs) if probs else ' · 无问题'}"
-                                             ).classes("text-xs opacity-70")
-                                    if lv.get("problems"):
-                                        with ui.expansion(f"问题明细（{len(lv['problems'])} 条）",
-                                                          icon="warning").classes("text-xs"):
-                                            for p in lv["problems"][:10]:
-                                                ui.label(f"{Path(p['image']).name} — "
-                                                         f"{PROBLEM_ZH.get(p['code'], p['code'])}").classes(
-                                                    "text-[11px] opacity-60 break-all")
+                        # ── M6：详情页签化——概览与校验 / 健康报告 / 质量审计
+                        with ui.tabs().classes("w-full text-xs") as dtabs:
+                            ui.tab("overview", label="概览与校验", icon="fact_check")
+                            ui.tab("health", label="健康报告", icon="monitor_heart")
+                            ui.tab("audit", label="质量审计", icon="health_and_safety")
+                        with ui.tab_panels(dtabs, value=state.get("ds_tab") or "overview"
+                                           ).classes("w-full") as dpanels:
+                            dpanels.on_value_change(lambda e: state.__setitem__("ds_tab", e.value))
+                            with ui.tab_panel("overview"):
+                                _render_overview(meta)
+                            with ui.tab_panel("health"):
+                                _render_health(name, meta)
+                            with ui.tab_panel("audit"):
+                                _render_audit(name, meta)
                     else:
                         with ui.row().classes("w-full gap-2 items-start"):
                             ui.label("外部路径").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
@@ -1443,6 +2293,483 @@ def mount() -> None:
                                      f"{meta.get('platform_side_classes')}").classes("text-xs opacity-60")
                         else:
                             ui.label("data.yaml 存在：类别以其为准").classes("text-xs opacity-60")
+
+            # ── 概览页签：校验（含修复指引，05 号票）+ 切分历史 + 排除清单
+            def _copy_path(p: str) -> None:
+                ui.clipboard.write(p)
+                ui.notify("路径已复制", type="info")
+
+            def _render_problems(problems: list[dict]) -> None:
+                from ..datasets.validate import GUIDANCE
+
+                grouped: dict[str, list[dict]] = {}
+                for p in problems:
+                    grouped.setdefault(p["code"], []).append(p)
+                with ui.expansion(f"问题明细（{len(problems)} 条）——含修复指引",
+                                  icon="build").classes("w-full text-xs"):
+                    for code, items in grouped.items():
+                        g = GUIDANCE.get(code) or {}
+                        with ui.card().classes("w-full gap-1 q-pa-sm").style(
+                                "background:rgba(239,68,68,.07)"):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.badge(PROBLEM_ZH.get(code, code)).props(
+                                    "color=red outline").style("font-size:10px")
+                                ui.label(f"{len(items)} 张图").classes("text-[11px] opacity-60")
+                            for key, zh in (("error", "错误"), ("cause", "原因"), ("fix", "修法")):
+                                with ui.row().classes("w-full gap-2 items-start"):
+                                    ui.label(zh).classes("text-[11px] font-semibold opacity-60 w-8 shrink-0 pt-0.5")
+                                    ui.label(g.get(key, "")).classes("text-[11px] opacity-80 flex-1 min-w-0")
+                            for p in items[:20]:
+                                with ui.row().classes("w-full items-center gap-1"):
+                                    ui.label(Path(p["image"]).name + (
+                                        f"（未登记类别：{p['detail']}）" if p.get("detail") else "")
+                                    ).classes("text-[11px] opacity-70 break-all flex-1 min-w-0")
+                                    cp = ui.button(icon="content_copy",
+                                                   on_click=lambda img=p["image"]: _copy_path(img)).props(
+                                        "flat dense round size=xs color=grey")
+                                    with cp:
+                                        ui.tooltip(f"复制路径：{p['image']}")
+                            if len(items) > 20:
+                                ui.label(f"… 其余 {len(items) - 20} 张省略").classes("text-[11px] opacity-40")
+
+            def _render_overview(meta: dict) -> None:
+                lv = meta.get("last_validation") or {}
+                if lv:
+                    counts = lv.get("counts") or {}
+                    n_problems = sum(counts.values())
+                    with ui.row().classes("w-full gap-2 items-start"):
+                        ui.label("上次校验").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
+                        with ui.column().classes("flex-1 min-w-0 gap-1"):
+                            ui.label(f"{_fmt_ts(lv['checked_at'])} · 共 {lv['total_images']} 图"
+                                     f"（标注 {lv['labeled']} / 负样本 {lv['background']}）"
+                                     f"{' · 问题 ' + str(n_problems) + ' 个' if n_problems else ' · 无问题'}"
+                                     ).classes("text-xs opacity-70")
+                            if lv.get("problems"):
+                                _render_problems(lv["problems"])
+                            elif lv.get("background"):
+                                ui.label("负样本（无标注图）是设计内行为：只进 train 充当背景，不算错误。"
+                                         ).classes("text-[11px] opacity-45")
+                # 切分历史（排除/重切都会新增版本，旧版本保留可查）
+                if len(meta.get("manifests") or []) > 1:
+                    with ui.row().classes("w-full gap-2 items-start"):
+                        ui.label("切分历史").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
+                        with ui.row().classes("flex-wrap gap-1 flex-1 min-w-0"):
+                            for m in meta["manifests"]:
+                                chip = ui.chip(f"{m['uid']} · {m['ratio']} · seed {m['seed']}")
+                                chip.props("dense outline square" + (" color=blue" if m["uid"] == meta.get("active_manifest") else ""))
+                                chip.classes("text-[10px]")
+                                with chip:
+                                    ui.tooltip(("当前活跃清单 · " if m["uid"] == meta.get("active_manifest") else "历史清单（派生结构保留）· ")
+                                               + _fmt_ts(m.get("created_at")))
+                excluded = meta.get("excluded") or []
+                if excluded:
+                    with ui.row().classes("w-full gap-2 items-start"):
+                        ui.label("排除清单").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
+                        with ui.column().classes("flex-1 min-w-0 gap-0"):
+                            ui.label(f"已从切分清单排除 {len(excluded)} 个文件（标注真源未动；重切以排除后文件集为基线）"
+                                     ).classes("text-[11px] opacity-60")
+                            with ui.expansion("查看明细", icon="visibility_off").classes("text-xs"):
+                                for e in excluded:
+                                    ui.label(f"{Path(e['file']).name} · {_fmt_ts(e['at'])} · {e.get('reason', '')}"
+                                             ).classes("text-[11px] opacity-60 break-all")
+
+            # ── 健康报告页签：四图 + 下钻筛图 + 在 X-AnyLabeling 中打开（01/02 号票）
+            def _render_health(name: str, meta: dict) -> None:
+                try:
+                    payload = ds.dataset_stats(name)
+                except Exception:  # noqa: BLE001
+                    payload = None
+                if not payload:
+                    with ui.column().classes("w-full items-center gap-2 q-pa-md"):
+                        ui.icon("monitor_heart", size="28px").classes("opacity-30")
+                        ui.label("暂无健康报告画像").classes("text-sm opacity-60")
+                        ui.label("重新校验即可顺带生成（同一遍历，不额外扫盘）").classes("text-xs opacity-40")
+                        ui.button("重新校验并生成", icon="fact_check",
+                                  on_click=lambda: do_validate(name)).props("outline dense")
+                    return
+                s = payload.get("summary", {})
+                boxable = s.get("boxable")
+                with ui.row().classes("w-full flex-wrap gap-1"):
+                    for txt in (f"图片 {s.get('images', 0)}", f"标注 {s.get('labeled', 0)}",
+                                f"train {s.get('train', 0)}", f"val {s.get('val', 0)}",
+                                f"负样本 {s.get('background', 0)}", f"清单 {payload.get('manifest_uid', '—')}"):
+                        ui.chip(txt).props("dense outline square").classes("text-[11px]")
+                ui.label("类别分布/直方图点柱、热力图框选（右上角矩形工具）→ 筛出图片清单，可直达 X-AnyLabeling"
+                         ).classes("text-[11px] opacity-45")
+
+                drill_box = ui.column().classes("w-full")
+
+                def rerender_drill() -> None:
+                    _render_drill_list(payload, drill_box)
+
+                def _on_class(e) -> None:
+                    if not e.name:
+                        return
+                    d = state["drill"]
+                    cur = (e.name, e.series_name)
+                    d["class"] = None if d.get("class") == cur else cur
+                    rerender_drill()
+
+                def _on_bucket(e) -> None:
+                    try:
+                        b = int(e.name)
+                    except (TypeError, ValueError):
+                        return
+                    d = state["drill"]
+                    d["bucket"] = None if d.get("bucket") == b else b
+                    rerender_drill()
+
+                def _on_brush(e) -> None:
+                    areas = e.args.get("areas") if isinstance(e.args, dict) else None
+                    rect = _rect_from_areas(areas)
+                    # category 轴的 coordRange 是格索引 → 归一化 0-1
+                    if rect is not None:
+                        rect = [v / HEAT_GRID for v in rect]
+                    state["drill"]["rect"] = rect
+                    rerender_drill()
+
+                def _on_heat_cell(e) -> None:
+                    """点热力图格 = 选该格区域（框选的轻量替代，交互更易发现）。"""
+                    v = getattr(e, "value", None)
+                    if not isinstance(v, (list, tuple)) or len(v) < 2:
+                        return
+                    j, i = int(v[0]), int(v[1])
+                    rect = [j / HEAT_GRID, (j + 1) / HEAT_GRID, i / HEAT_GRID, (i + 1) / HEAT_GRID]
+                    d = state["drill"]
+                    d["rect"] = None if d.get("rect") == rect else rect
+                    rerender_drill()
+
+                with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                    with ui.column().classes("flex-1 min-w-[17rem]"):
+                        ui.label("类别分布（逐切分，点柱筛选）").classes("text-xs font-semibold opacity-70")
+                        ch_cls = ui.echart(_class_dist_options(payload)).classes("w-full h-56")
+                        ch_cls.on_point_click(_on_class)
+                    if boxable:
+                        with ui.column().classes("flex-1 min-w-[17rem]"):
+                            ui.label("每图目标数直方图（点柱筛选）").classes("text-xs font-semibold opacity-70")
+                            ch_hist = ui.echart(_obj_hist_options(payload)).classes("w-full h-56")
+                            ch_hist.on_point_click(_on_bucket)
+                if boxable:
+                    with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                        with ui.column().classes("flex-1 min-w-[17rem]"):
+                            ui.label("图像尺寸散点").classes("text-xs font-semibold opacity-70")
+                            ui.echart(_size_scatter_options(payload)).classes("w-full h-56")
+                        with ui.column().classes("flex-1 min-w-[17rem]"):
+                            ui.label("标注中心热力图（点格或右上角矩形工具框选）").classes(
+                                "text-xs font-semibold opacity-70")
+                            # SVG 渲染器：heatmap 在 canvas 渲染器下受渐进分层影响会出现
+                            # 空层置顶（图空白且点击不达 series）；SVG 无此分层怪癖
+                            ch_heat = ui.echart(_center_heat_options(payload), renderer="svg").classes("w-full h-56")
+                            ch_heat.on_point_click(_on_heat_cell)
+                            ch_heat.on("chart:brushEnd", _on_brush, ["areas"])
+                else:
+                    ui.label("分类任务无目标框：直方图 / 尺寸散点 / 中心热力图不适用").classes("text-xs opacity-40")
+                rerender_drill()
+
+            def _render_drill_list(payload: dict, box) -> None:
+                box.clear()
+                d = state["drill"]
+                if d.get("class") is None and d.get("bucket") is None and d.get("rect") is None:
+                    return
+                rows = _drill_rows(payload, d)
+                with box:
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap q-mt-sm"):
+                        ui.icon("filter_alt", size="16px").classes("opacity-50")
+                        ui.label(_drill_desc(d)).classes("text-xs font-semibold")
+                        ui.label(f"命中 {len(rows)} 张").classes("text-xs opacity-60")
+                        def _clear_drill(payload=payload, box=box, d=d) -> None:
+                            d["class"] = d["bucket"] = d["rect"] = None
+                            _render_drill_list(payload, box)
+
+                        ui.button("清除筛选", icon="filter_alt_off",
+                                  on_click=_clear_drill).props("outline dense size=sm")
+                    if not rows:
+                        ui.label("没有命中的图片").classes("text-xs opacity-40")
+                        return
+                    with ui.card().classes("w-full q-pa-sm gap-1"):
+                        for r, why in rows[:60]:
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.label(r["name"]).classes("text-xs flex-1 min-w-0 truncate")
+                                ui.badge(r["split"]).props("outline square").style("font-size:9px")
+                                if why:
+                                    ui.label("·".join(why)).classes("text-[10px] opacity-50 max-w-40 truncate")
+                                cp = ui.button(icon="content_copy",
+                                               on_click=lambda p=r["image"]: _copy_path(p)).props(
+                                    "flat dense round size=xs color=grey")
+                                with cp:
+                                    ui.tooltip(f"复制路径：{r['image']}")
+                                ob = ui.button(icon="open_in_new", on_click=lambda p=r["image"]: _open_in_xal(p)).props(
+                                    "flat dense round size=xs color=blue")
+                                with ob:
+                                    ui.tooltip(f"在 X-AnyLabeling 中打开：{r['image']}")
+                        if len(rows) > 60:
+                            ui.label(f"… 其余 {len(rows) - 60} 张省略（收紧筛选可见）").classes("text-[11px] opacity-40")
+
+            # ── 质量审计页签：跑体检 + 缓存 + 缩略图网格多选排除（03/04 号票 + 2026-09-21 网格改版）
+            def _sync_batch_btn() -> None:
+                btn = state.get("audit_batch_btn")
+                if btn is None:
+                    return
+                n = len(state.get("audit_sel") or set())
+                btn.set_text(f"排除所选（{n}）")
+                btn.set_enabled(n > 0)
+
+            def _toggle_sel(path: str, on: bool) -> None:
+                sel = state.setdefault("audit_sel", set())
+                (sel.add if on else sel.discard)(path)
+                _sync_batch_btn()
+
+            def _view_audit_img(name: str, item: dict) -> None:
+                """缩略图点击 → 原图大图查看（复制 / X-AnyLabeling / 单张排除）。"""
+                p = item["image"]
+                with ui.dialog() as dlg, ui.card().classes("w-3xl max-w-[92vw] gap-2"):
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.label(item["name"]).classes("font-bold break-all flex-1 min-w-0")
+                        ui.badge(item.get("split", "?")).props("outline square").style("font-size:9px")
+                        cp = ui.button(icon="content_copy", on_click=lambda: _copy_path(p)).props(
+                            "flat dense round size=sm color=grey")
+                        with cp:
+                            ui.tooltip("复制完整路径")
+                        ob = ui.button(icon="open_in_new", on_click=lambda: _open_in_xal(p)).props(
+                            "flat dense round size=sm color=blue")
+                        with ob:
+                            ui.tooltip("在 X-AnyLabeling 中打开")
+                        xb = ui.button("排除这张", icon="remove_circle_outline", color="negative",
+                                       on_click=lambda: (dlg.close(), open_excluding(name, p))).props(
+                            "outline dense size=sm")
+                        ui.button("关闭", icon="close", on_click=dlg.close).props("flat dense")
+                    with ui.scroll_area().classes("w-full h-[68vh]"):
+                        _local_image(p)
+                    ui.label("判断依据：与同组其他图对比内容（关闭后可在网格勾选批量排除）"
+                             ).classes("text-[11px] opacity-50")
+                dlg.open()
+
+            def _audit_grid(name: str, items: list[dict]) -> None:
+                """审计发现成员 → 缩略图网格：点图看原图、勾选进批量排除。"""
+                with ui.row().classes("w-full flex-wrap gap-2 q-mt-xs"):
+                    for item in items:
+                        p = item["image"]
+                        with ui.card().classes("p-1 gap-0 w-[10.5rem]").style("border-radius:10px"):
+                            src = _thumb_src(p)
+                            if src:
+                                img = ui.image(src).classes(
+                                    "w-full h-28 object-cover cursor-pointer"
+                                ).style("border-radius:6px")
+                                img.on("click", lambda it=item, n=name: _view_audit_img(n, it))
+                                with img:
+                                    ui.tooltip("点击查看原图")
+                            else:
+                                ph = ui.element("div").classes(
+                                    "w-full h-28 flex column items-center justify-center gap-1"
+                                ).style("border-radius:6px;background:rgba(148,163,184,.12)")
+                                with ph:
+                                    ui.icon("broken_image", size="22px").classes("opacity-40")
+                                    ui.label("无法解码").classes("text-[9px] opacity-40")
+                            with ui.row().classes("w-full items-center gap-1 no-wrap q-px-xs"):
+                                ui.checkbox(value=p in (state.get("audit_sel") or set()),
+                                            on_change=lambda e, f=p: _toggle_sel(f, e.value)
+                                            ).props("dense size=sm").classes("q-mt-none")
+                                nm = ui.label(item["name"]).classes(
+                                    "text-[10px] flex-1 min-w-0 truncate cursor-pointer")
+                                nm.on("click", lambda it=item, n=name: _view_audit_img(n, it))
+                                ui.badge(item.get("split", "?")).props("outline square").style(
+                                    "font-size:8px")
+
+            def _render_audit(name: str, meta: dict) -> None:
+                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                    ui.button("跑体检", icon="health_and_safety",
+                              on_click=lambda: do_audit(name)).props("unelevated dense")
+                    ui.label("sha256 精确重复 · 感知哈希近似 · 跨切分泄漏 · 类别失衡——只报告，不动标注真源"
+                             ).classes("text-[11px] opacity-45 flex-1 min-w-40")
+                    bb = ui.button("排除所选（0）", icon="remove_circle_outline", color="negative",
+                                   on_click=lambda: open_batch_exclude()).props("outline dense")
+                    bb.set_enabled(False)
+                    with bb:
+                        ui.tooltip("勾选缩略图后批量从切分清单排除（不删文件，剩余归属不变）")
+                    state["audit_batch_btn"] = bb
+                aprog = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
+                alabel = ui.label("").classes("text-xs opacity-70").set_visibility(False)
+                state["audit_prog_els"] = (aprog, alabel)
+                aout = ui.column().classes("w-full gap-2")
+                _render_audit_report(name, aout)
+
+            def _render_audit_report(name: str, box) -> None:
+                box.clear()
+                try:
+                    audit = ds.cached_audit(name)
+                    meta = ds.get_dataset(name)
+                except Exception as exc:  # noqa: BLE001
+                    with box:
+                        ui.label(f"读取体检报告失败：{exc}").classes("text-xs text-red-500")
+                    return
+                with box:
+                    if audit is None:
+                        ui.label("尚未体检——点「跑体检」生成报告；结果缓存，数据或切分变化自动失效"
+                                 ).classes("text-xs opacity-40")
+                        return
+                    sm = audit.get("summary", {})
+                    with ui.row().classes("w-full flex-wrap gap-1"):
+                        ui.chip(f"精确重复 {sm.get('exact', 0)} 组").props("dense square outline " + (
+                            "color=red" if sm.get("exact") else "color=grey")).classes("text-[11px]")
+                        ui.chip(f"近似重复 {sm.get('near', 0)} 组").props("dense square outline " + (
+                            "color=orange" if sm.get("near") else "color=grey")).classes("text-[11px]")
+                        ui.chip(f"跨切分泄漏 {sm.get('leaks', 0)} 对").props("dense square outline " + (
+                            "color=red" if sm.get("leaks") else "color=grey")).classes("text-[11px]")
+                        ui.chip("类别均衡" if sm.get("imbalance_ok", True) else "类别失衡"
+                                ).props("dense square outline " + (
+                                    "color=green" if sm.get("imbalance_ok", True) else "color=red")).classes("text-[11px]")
+                        if audit.get("from_cache"):
+                            ui.chip("缓存命中").props("dense square color=blue outline").classes("text-[11px]")
+                        ui.label(f"{_fmt_ts(audit.get('checked_at'))} · 体检范围 {audit.get('files', 0)} 张（活跃清单成员）"
+                                 ).classes("text-[11px] opacity-50")
+                    if audit.get("skipped_undecodable"):
+                        ui.label(f"{audit['skipped_undecodable']} 张图无法解码，已跳过近似重复检测（对应校验规则「图片不可读」）"
+                                 ).classes("text-[11px] text-orange-700")
+                    for leak in audit.get("leaks") or []:
+                        with ui.card().classes("w-full gap-1 q-pa-sm").style("background:rgba(245,158,11,.08)"):
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.icon("warning", size="16px").classes("text-amber-600")
+                                ui.label(f"{'完全相同' if leak['kind'] == 'exact' else '高度相似'}的图片同时出现在 train 与 val"
+                                         "——val 指标虚高，建议留一排一").classes("text-xs font-semibold")
+                            _audit_grid(name, leak["items"])
+                    for key, title, color in (("exact_groups", "精确重复组（内容完全相同）", "red"),
+                                              ("near_groups", "近似重复组（感知哈希判定同图）", "orange")):
+                        groups = audit.get(key) or []
+                        if not groups:
+                            continue
+                        ui.label(title).classes("text-xs font-semibold opacity-70")
+                        for g in groups:
+                            with ui.expansion(f"{len(g)} 张：{'、'.join(i['name'] for i in g[:3])}"
+                                              + ("…" if len(g) > 3 else ""), icon="content_copy"
+                                              ).classes("w-full text-xs"):
+                                ui.label("处置建议：保留一张，勾选其余批量「排除所选」").classes(
+                                    "text-[11px] opacity-50")
+                                _audit_grid(name, g)
+                    imb = audit.get("imbalance") or {}
+                    with ui.expansion("类别分布与失衡检查", icon="balance").classes("w-full text-xs"):
+                        ui.label(f"判定规则：{imb.get('rule', '—')}").classes("text-[11px] opacity-50")
+                        items = imb.get("items") or []
+                        mx = max((i["count"] for i in items), default=1) or 1
+                        for i in items:
+                            bad = not imb.get("ok", True) and i["ratio"] < 0.1
+                            with ui.row().classes("w-full items-center gap-2"):
+                                ui.label(f"{i['class']}").classes("text-xs w-28 shrink-0 truncate")
+                                with ui.element("div").classes("flex-1 h-2 rounded").style(
+                                        f"width:{max(i['count'] / mx * 100, 1):.0f}%; background:"
+                                        f"{'#dc2626' if bad else '#16a34a'}"):
+                                    pass
+                                ui.label(f"{i['count']}（{i['ratio']:.0%}）").classes(
+                                    "text-[11px] " + ("text-red-500 font-semibold" if bad else "opacity-60"))
+                    excluded = meta.get("excluded") or []
+                    if excluded:
+                        ui.label(f"已排除 {len(excluded)} 个文件（见概览页签的排除清单；重新切分以排除后文件集为基线）"
+                                 ).classes("text-[11px] opacity-50")
+
+            async def do_audit(name: str) -> None:
+                state["audit_prog"] = {"active": True, "cur": 0, "total": 1}
+                state["ds_tab"] = "audit"
+                try:
+                    audit = await _io(ds.run_quality_audit, name, progress=_audit_prog)
+                    sm = audit.get("summary", {})
+                    ui.notify(f"体检完成：精确 {sm.get('exact')} 组 · 近似 {sm.get('near')} 组 · "
+                              f"泄漏 {sm.get('leaks')} 对"
+                              + ("" if sm.get("imbalance_ok") else " · 存在类别失衡"), type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"体检失败：{exc}", type="negative")
+                finally:
+                    state["audit_prog"] = {"active": False, "cur": 0, "total": 0}
+                render_detail()
+
+            def _audit_prog(cur: int, total: int) -> None:
+                state["audit_prog"].update(cur=cur, total=total)
+
+            def open_excluding(name: str, file: str) -> None:
+                state["ex_target"] = (name, file)
+                ex_title.set_text(f"从切分清单排除 {Path(file).name}？")
+                exclude_dialog.open()
+
+            def open_batch_exclude() -> None:
+                files = sorted(state.get("audit_sel") or set())
+                if not files:
+                    ui.notify("先在缩略图网格勾选要排除的图片", type="warning")
+                    return
+                bx_title.set_text(f"从切分清单排除 {len(files)} 个文件？")
+                bx_names.set_text("；".join(Path(f).name for f in files))
+                state["bx_target"] = (state["selected"], files)
+                batch_dialog.open()
+
+            async def do_batch_exclude() -> None:
+                target = state.pop("bx_target", None)
+                batch_dialog.close()
+                if not target:
+                    return
+                name, files = target
+                state["ds_tab"] = "audit"
+                state["audit_sel"] = set()
+                try:
+                    m = await _io(ds.exclude_files, name, files, "质量审计处置")
+                    ui.notify(f"已排除 {len(files)} 个文件：新清单 {m['uid']}"
+                              f"（train {len(m['train'])} / val {len(m['val'])}）；重新体检可见新结果",
+                              type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"批量排除失败：{exc}", type="negative")
+                refresh()
+                render_detail()
+
+            async def do_exclude() -> None:
+                target = state.pop("ex_target", None)
+                exclude_dialog.close()
+                if not target:
+                    return
+                name, file = target
+                state["ds_tab"] = "audit"
+                try:
+                    m = await _io(ds.exclude_files, name, [file], "质量审计处置")
+                    ui.notify(f"已排除：新清单 {m['uid']}（train {len(m['train'])} / val {len(m['val'])}）；"
+                              "重新体检可见新结果", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"排除失败：{exc}", type="negative")
+                refresh()
+                render_detail()
+
+            with ui.dialog() as exclude_dialog, ui.card().classes("w-[26rem] gap-2"):
+                ex_title = ui.label("从切分清单排除").classes("font-bold")
+                ui.label("只从清单移除该文件，不改图片与标注；剩余文件的 train/val 归属保持不变；"
+                         "旧清单与派生结构保留可查。").classes("text-xs opacity-60")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=exclude_dialog.close).props("flat")
+                    ui.button("排除", color="negative", icon="remove_circle_outline",
+                              on_click=do_exclude).props("unelevated")
+
+            with ui.dialog() as batch_dialog, ui.card().classes("w-[28rem] gap-2"):
+                bx_title = ui.label("批量从切分清单排除").classes("font-bold")
+                ui.label("只从清单移除所选文件（不删图片与标注）；剩余文件的 train/val 归属保持不变；"
+                         "train 与 val 各须至少保留 1 张，否则拒绝。").classes("text-xs opacity-60")
+                bx_names = ui.label("").classes("text-[11px] font-mono break-all q-pa-sm rounded").style(
+                    "background:rgba(148,163,184,.12); max-height:8rem; overflow-y:auto")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=batch_dialog.close).props("flat")
+                    ui.button(f"批量排除", color="negative", icon="remove_circle_outline",
+                              on_click=do_batch_exclude).props("unelevated")
+
+            state["audit_prog"] = {"active": False, "cur": 0, "total": 0}
+
+            def _audit_tick() -> None:
+                p = state.get("audit_prog") or {}
+                els = state.get("audit_prog_els")
+                if not els:
+                    return
+                aprog, alabel = els
+                if p.get("active"):
+                    aprog.set_visibility(True)
+                    alabel.set_visibility(True)
+                    total = max(p.get("total", 1), 1)
+                    alabel.set_text(f"体检中 {p.get('cur', 0)}/{p.get('total', 0)}（sha256 + 感知哈希逐张）")
+                    aprog.set_value(min(p.get("cur", 0) / total, 1.0))
+                else:
+                    aprog.set_visibility(False)
+                    alabel.set_visibility(False)
+
 
             select = _select_with_sync(table, state, "name", render_detail, lambda: _scroll_to(detail),
                                        sync_selected=False)
@@ -1696,13 +3023,14 @@ def mount() -> None:
             # 校验按钮引用（do_validate 忙碌态用；render 后指向最新按钮实例不可行，改为全局禁用提示）
             state["open_import"] = import_dialog.open
             state["open_external"] = external_dialog.open
+            ui.timer(0.3, _audit_tick)  # 体检进度条（单实例 timer，render_detail 重建元素也不叠 timer）
             refresh()
 
         _page_frame("数据集", "数据集", actions, body)
 
     # ================================================================ 结果页
     @ui.page("/results")
-    def page_results() -> None:
+    def page_results(request: Request) -> None:
         from ..training import service as tsvc
         from ..training.manager import get_manager
 
@@ -1716,7 +3044,10 @@ def mount() -> None:
                 with ui.row().classes("items-center gap-2 flex-1 min-w-56 flex-wrap"):
                     ui.icon("insights", size="18px").classes("opacity-50")
                     ui.label("跨任务对比").classes("text-base font-semibold")
-                    ui.label("勾选 2 个以上任务叠加最优轮曲线与超参差异").classes("text-xs opacity-40")
+                    ui.label("勾选 2 个以上任务叠加最优轮曲线与超参差异；视图状态可回链"
+                             ).classes("text-xs opacity-40")
+                dep_btn = ui.button("与当前部署版对比", icon="rocket_launch",
+                                    on_click=lambda: do_with_deployed()).props("outline dense")
                 cmp_btn = ui.button("对比所选（0）", icon="compare_arrows",
                                     on_click=lambda: do_cross()).props("unelevated dense")
             ui.separator().classes("q-mt-xs q-mb-sm")
@@ -1741,6 +3072,9 @@ def mount() -> None:
                 "insights", "还没有已结束的任务——到训练页跑完一跑，这里就能做对比复盘"))
 
             cmp_holder: dict = {"btn": None}
+            # M8 06 号票：对比视图状态（指标模式 / 仅差异开关 / 基准 Task / 缓存数据）
+            cmp_state: dict = {"mode": "best", "only_diff_cols": False, "only_diff_rows": False,
+                               "baseline": None, "data": None}
 
             def _sync_cmp_btn() -> None:
                 if cmp_holder["btn"]:
@@ -1749,6 +3083,94 @@ def mount() -> None:
             cross.on_select(lambda _e: _sync_cmp_btn())
 
             cross_out = ui.column().classes("w-full")
+            PALETTE9 = CHART_PALETTE + ["#f472b6", "#a3e635", "#fb923c"]
+
+            def _dot(color: str) -> None:
+                ui.element("span").classes("inline-block rounded-full").style(
+                    f"width:9px;height:9px;background:{color};display:inline-block")
+
+            def _render_compare() -> None:
+                data = cmp_state["data"]
+                if not data:
+                    return
+                items = data["tasks"]
+                cross_out.clear()
+                with cross_out, ui.card().classes("w-full gap-2"):
+                    ui.label("各任务最优 Run 主指标曲线（颜色与下文各表固定一致）").classes("text-sm font-semibold")
+                    curves = [(t["name"], t["curve"]) for t in items if t["curve"]]
+                    if curves:
+                        ui.echart(_overlay_options(curves)).classes("w-full h-64")
+                    else:
+                        ui.label("（选中任务暂无指标数据）").classes("text-xs opacity-40")
+                    ui.label("按最优主指标排名").classes("text-xs font-semibold mt-2")
+                    for i, t in enumerate(items, 1):
+                        with ui.row().classes("w-full items-center gap-2"):
+                            _dot(PALETTE9[(i - 1) % 9])
+                            ui.label(t["name"]).classes("flex-1 min-w-0 break-all")
+                            ui.label(_fmt_metric(t["best_primary_metric"])).classes("font-bold")
+
+                    # ── 指标表（Best/Last/Min/Max 切换 + 极值高亮 + 仅差异列）
+                    summaries = [t.get("metrics_summary") or {} for t in items]
+                    keys: list[str] = []
+                    for ms in summaries:
+                        for k in ms:
+                            if k not in keys:
+                                keys.append(k)
+
+                    def _differs(k: str) -> bool:
+                        vals = {str(ms.get(k, {}).get(cmp_state["mode"])) for ms in summaries if ms.get(k)}
+                        return len(vals) > 1
+
+                    shown = [k for k in keys
+                             if (not cmp_state["only_diff_cols"] or _differs(k))]
+                    if shown and len(items) >= 1:
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap q-mt-sm"):
+                            ui.label("指标汇总（最优 Run）").classes("text-sm font-semibold")
+                            mode_sel = ui.toggle({"best": "Best", "last": "Last", "min": "Min",
+                                                  "max": "Max"}, value=cmp_state["mode"],
+                                                 on_change=lambda e: (cmp_state.update(mode=e.value),
+                                                                      _render_compare()))
+                            mode_sel.props("dense size=sm")
+                            od = ui.switch("仅差异列", value=cmp_state["only_diff_cols"],
+                                           on_change=lambda e: (cmp_state.update(only_diff_cols=e.value),
+                                                                _render_compare()))
+                            od.props("dense size=sm")
+                        rows = []
+                        for k in shown:
+                            row = {"metric": k}
+                            vals = [ms.get(k, {}).get(cmp_state["mode"]) for ms in summaries]
+                            nums = [v for v in vals if isinstance(v, (int, float))]
+                            hi = max(nums) if nums and cmp_state["mode"] in ("best", "max", "last") else (
+                                min(nums) if nums else None)
+                            for i, v in enumerate(vals):
+                                row[f"t{i}"] = "—" if v is None else f"{v:.4f}".rstrip("0").rstrip(".")
+                                row[f"t{i}_hi"] = (v is not None and hi is not None
+                                                   and abs(v - hi) < 1e-12 and len(nums) > 1)
+                            rows.append(row)
+                        cols = [{"name": "metric", "label": "指标", "field": "metric", "align": "left"}] + [
+                            {"name": f"t{i}", "label": t["name"][:12], "field": f"t{i}"} for i, t in enumerate(items)]
+                        mtbl = ui.table(columns=cols, rows=rows, row_key="metric")
+                        _style_table(mtbl)
+                        mtbl.classes("text-xs")
+                        hi_cell = ('<q-td :props="props"><span :class="props.row[props.col.name + \'_hi\'] ? '
+                                   '\'text-green-600 text-weight-bold\' : \'\'">'
+                                   "{{ props.value }}</span></q-td>")
+                        for i in range(len(items)):
+                            mtbl.add_slot(f"body-cell-t{i}", hi_cell)
+
+                    # ── 平行坐标（数值超参轴 + 主指标轴）
+                    if len(items) >= 2:
+                        try:
+                            popts = _parallel_options(items)
+                            if len(popts["parallelAxis"]) >= 2:
+                                with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
+                                    ui.label("平行坐标（变化的数值超参 × 主指标，末轴；线色同上）"
+                                             ).classes("text-sm font-semibold")
+                                ui.echart(popts).classes("w-full h-64")
+                        except Exception:  # noqa: BLE001 — 数据不含数值超参时静默
+                            pass
+
+                    _hyperparam_diff(items)
 
             def do_cross() -> None:
                 uids = [r["id"] for r in (cross.selected or [])]
@@ -1756,25 +3178,33 @@ def mount() -> None:
                     ui.notify("请先勾选任务（点行首复选框）", type="warning")
                     return
                 data = tsvc.compare_tasks(get_manager(), uids)
-                cross_out.clear()
-                with cross_out, ui.card().classes("w-full gap-2"):
-                    ui.label("各任务最优 Run 主指标曲线").classes("text-sm font-semibold")
-                    curves = [(t["name"], t["curve"]) for t in data["tasks"] if t["curve"]]
-                    if curves:
-                        ui.echart(_overlay_options(curves)).classes("w-full h-64")
-                    else:
-                        ui.label("（选中任务暂无指标数据）").classes("text-xs opacity-40")
-                    ui.label("按最优主指标排名").classes("text-xs font-semibold mt-2")
-                    for i, t in enumerate(data["tasks"], 1):
-                        best = t["best_primary_metric"]
-                        with ui.row().classes("w-full items-center gap-2"):
-                            ui.badge(f"#{i}").props("color=blue").style("font-size:10px")
-                            ui.label(t["name"]).classes("flex-1 min-w-0 break-all")
-                            ui.label(_fmt_metric(best)).classes("font-bold")
-                    _hyperparam_diff(data["tasks"])
+                cmp_state.update(data=data, baseline=None, mode=cmp_state["mode"],
+                                 only_diff_cols=cmp_state["only_diff_cols"],
+                                 only_diff_rows=cmp_state["only_diff_rows"])
+                ui.run_javascript(
+                    f"history.replaceState(null, '', '/results?cmp={','.join(str(u) for u in uids)}')")
+                _render_compare()
+
+            def do_with_deployed() -> None:
+                """一键把「当前部署版」对应任务纳入对比（M8 06 六件套之六）。"""
+                try:
+                    deps = tsvc.list_deployments(get_manager())["deployments"]
+                    cur = next((d for d in deps if d["verified"]), None) or (deps[0] if deps else None)
+                except Exception:  # noqa: BLE001
+                    cur = None
+                if not cur:
+                    ui.notify("还没有部署记录——先在训练详情页部署一个模型", type="warning")
+                    return
+                ids = {r["id"] for r in (cross.selected or [])}
+                ids.add(cur["task_id"])
+                sel = [r for r in cross_rows if r["id"] in ids]
+                cross.selected = sel
+                _sync_cmp_btn()
+                do_cross()
+                ui.notify(f"已纳入当前部署版：{cur['task_name']} · Run {cur['run_uid']}")
 
             def _hyperparam_diff(items: list[dict]) -> None:
-                """超参 diff：值不同的单元格标红（视觉审计修复：此前声明标红未实现）。"""
+                """超参 diff 三件套（M8 06）：基准列 + 只看差异 + 高亮；Run 固定色点。"""
                 if len(items) < 2:
                     return
                 keys: list[str] = []
@@ -1784,25 +3214,51 @@ def mount() -> None:
                             keys.append(k)
                 if not keys:
                     return
-                with ui.row().classes("w-full items-center gap-2"):
-                    ui.label("超参对比").classes("text-sm font-semibold mt-2")
-                    ui.label("红色 = 各任务取值不同").classes("text-[11px] text-red-500 opacity-80")
+                with ui.row().classes("w-full items-center gap-2 flex-wrap q-mt-sm"):
+                    ui.label("超参对比").classes("text-sm font-semibold")
+                    base_sel = ui.select({t["id"]: t["name"][:16] for t in items},
+                                         value=cmp_state["baseline"] or items[0]["id"],
+                                         label="基准", on_change=lambda e: (cmp_state.update(baseline=e.value),
+                                                                            _render_compare()))
+                    base_sel.props("dense outlined size=sm").classes("w-52")
+                    odsw = ui.switch("只看差异", value=cmp_state["only_diff_rows"],
+                                     on_change=lambda e: (cmp_state.update(only_diff_rows=e.value),
+                                                          _render_compare()))
+                    odsw.props("dense size=sm")
+                    ui.label("红 = 与基准不同").classes("text-[11px] text-red-500 opacity-80")
+                baseline_id = cmp_state["baseline"] or items[0]["id"]
+                ordered = sorted(items, key=lambda t: (t["id"] != baseline_id,))
+
+                def _diff_vs_base(k: str) -> bool:
+                    base = next((t for t in items if t["id"] == baseline_id), items[0])
+                    bv = str((base.get("train_args") or {}).get(k))
+                    return any(str((t.get("train_args") or {}).get(k)) != bv for t in items if t["id"] != base["id"])
+
+                shown_keys = [k for k in keys if (not cmp_state["only_diff_rows"] or _diff_vs_base(k))]
+                if not shown_keys:
+                    ui.label("（全部超参与基准一致）").classes("text-xs opacity-40")
+                    return
                 rows = []
-                for k in keys:
-                    vals = [t["train_args"].get(k) for t in items]
-                    row = {"param": k, "diff": len({str(v) for v in vals}) > 1}
-                    for i, v in enumerate(vals):
+                for k in shown_keys:
+                    row = {"param": k}
+                    base_val = str((next(t for t in items if t["id"] == baseline_id)
+                                    .get("train_args") or {}).get(k)) if any(
+                        t["id"] == baseline_id for t in items) else None
+                    for i, t in enumerate(ordered):
+                        v = (t.get("train_args") or {}).get(k)
                         row[f"t{i}"] = "—" if v is None else str(v)
+                        row[f"t{i}_diff"] = t["id"] != baseline_id and str(v) != base_val
                     rows.append(row)
                 cols = [{"name": "param", "label": "参数", "field": "param", "align": "left"}] + [
-                    {"name": f"t{i}", "label": t["name"][:12], "field": f"t{i}"} for i, t in enumerate(items)]
+                    {"name": f"t{i}", "label": ("⭐ " if t["id"] == baseline_id else "") + t["name"][:12],
+                     "field": f"t{i}"} for i, t in enumerate(ordered)]
                 tbl = ui.table(columns=cols, rows=rows, row_key="param")
                 _style_table(tbl)
                 tbl.classes("text-xs")
-                diff_cell = ('<q-td :props="props"><span :class="props.row.diff ? '
+                diff_cell = ('<q-td :props="props"><span :class="props.row[props.col.name + \'_diff\'] ? '
                              '\'text-red text-weight-medium\' : \'\'">'
                              "{{ props.value }}</span></q-td>")
-                for i in range(len(items)):
+                for i in range(len(ordered)):
                     tbl.add_slot(f"body-cell-t{i}", diff_cell)
 
             cmp_holder["btn"] = cmp_btn
@@ -1831,6 +3287,16 @@ def mount() -> None:
                         ui.echart(_overlay_options(curves)).classes("w-full h-64")
                     else:
                         ui.label("（只有 1 个有数据的轮次，叠加对比需要 ≥2 轮）").classes("text-xs opacity-40")
+                    if data.get("gpu_curves"):
+                        ui.label("各轮显存占用对比（GPU 采样）").classes("text-sm font-semibold mt-1")
+                        ui.echart(_mem_overlay_options(data["gpu_curves"])).classes("w-full h-56")
+                    imp = data.get("param_importance")
+                    if imp and imp.get("keys"):
+                        with ui.expansion(f"参数重要性（{imp['note']}）", icon="insights").classes("w-full"):
+                            ui.echart(_importance_options(imp)).classes("w-full h-56")
+                            ui.label("同数据集 + 基模型历史 Run 的 Spearman 统计；相关非因果，样本少时弱参考。"
+                                     "该证据同时注入 Agent 调参 LLM 上下文并随决策归档。"
+                                     ).classes("text-[11px] opacity-45")
                     with ui.row().classes("w-full flex-wrap gap-1"):
                         ui.label("任务级超参：").classes("text-xs opacity-50")
                         for k, v in (data["train_args"] or {}).items():
@@ -1846,21 +3312,35 @@ def mount() -> None:
                         if r["primary_metric"] is not None:
                             prev_metric = r["primary_metric"]
                         label, color = RUN_STATUS.get(r["status"], (r["status"], "grey"))
-                        rows.append({"round": f"轮 {r['round_no']}", "uid": r["uid"],
+                        changes = r.get("args_changes") or {}
+                        if not changes:
+                            chg = "基线" if r["round_no"] == 1 else "同基线"
+                        else:
+                            chg = "；".join(f"{k}→{v}" for k, v in list(changes.items())[:3])
+                            if len(changes) > 3:
+                                chg += f" 等{len(changes)}项"
+                        rows.append({"round": f"轮 {r['round_no']}" + ("（已剪枝）" if r.get("pruned") else ""),
+                                     "uid": r["uid"],
                                      "status_label": label, "status_color": color,
                                      "best": (f"{r['best_val']:.3f} @ epoch {r['best_epoch']}"
                                               if r["best_val"] else "—"),
-                                     "delta": delta_str, "delta_up": up, "delta_down": down})
+                                     "delta": delta_str, "delta_up": up, "delta_down": down,
+                                     "changes": chg, "has_changes": bool(changes)})
                     rtable = ui.table(columns=[
                         {"name": "round", "label": "轮次", "field": "round"},
                         {"name": "uid", "label": "Run", "field": "uid", "align": "left"},
                         {"name": "status", "label": "状态", "field": "status_label"},
                         {"name": "best", "label": "主指标最佳", "field": "best", "align": "left"},
                         {"name": "delta", "label": "较上轮", "field": "delta"},
+                        {"name": "changes", "label": "较首轮改动（运行快照）", "field": "changes", "align": "left"},
                     ], rows=rows, row_key="uid", selection="single",
                         on_select=lambda e: state.update(run=((e.selection or [None])[0] or {}).get("uid")))
                     _style_table(rtable)
                     rtable.add_slot("body-cell-status", _badge_cell("status"))
+                    rtable.add_slot("body-cell-changes",
+                                    '<q-td :props="props"><span :class="props.row.has_changes ? '
+                                    '\'text-amber-700 text-weight-medium\' : \'opacity-50\'">'
+                                    "{{ props.value }}</span></q-td>")
                     rtable.add_slot("body-cell-delta",
                                     '<q-td :props="props"><span :class="props.row.delta_up ? '
                                     '\'text-green-600\' : (props.row.delta_down ? \'text-red-500\' : '
@@ -1953,6 +3433,93 @@ def mount() -> None:
             state["dep_first_render"] = True
             render_deployments()
 
+            # ── M8 07：模型库管理（目录视图 + 旧版清理）
+            with ui.row().classes("w-full items-center q-mt-lg"):
+                ui.icon("folder_special", size="18px").classes("opacity-50")
+                ui.label("模型库管理").classes("text-base font-semibold")
+                ui.label("删目录同步部署记录；不影响运行中的训练与桌面端已加载模型").classes(
+                    "text-xs opacity-40")
+            ui.separator().classes("q-mt-xs q-mb-sm")
+            lib_col = ui.column().classes("w-full")
+
+            def render_library() -> None:
+                try:
+                    lib_data = tsvc.model_library(get_manager())
+                except Exception as exc:  # noqa: BLE001
+                    lib_col.clear()
+                    with lib_col:
+                        ui.label(f"模型库读取失败：{exc}").classes("text-xs text-red-500")
+                    return
+                lib_col.clear()
+                with lib_col:
+                    lrows = []
+                    for it in lib_data["items"]:
+                        lrows.append({"name": it["name"], "size": f"{it['size_mb']} MB",
+                                      "mtime": _fmt_ts(it["mtime"]),
+                                      "run": it.get("run_uid") or "—",
+                                      "verif": ("当前部署" if it.get("is_latest") else
+                                                ("已验证" if it.get("verified") else "—")),
+                                      "verif_color": ("blue" if it.get("is_latest") else
+                                                      ("green" if it.get("verified") else "grey"))})
+                    ltbl = ui.table(columns=[
+                        {"name": "name", "label": "模型目录", "field": "name", "align": "left",
+                         "style": "white-space:normal"},
+                        {"name": "size", "label": "体积", "field": "size"},
+                        {"name": "mtime", "label": "时间", "field": "mtime"},
+                        {"name": "run", "label": "来源 Run", "field": "run"},
+                        {"name": "verif", "label": "状态", "field": "verif"},
+                        {"name": "ops", "label": "操作", "field": "ops"},
+                    ], rows=lrows, row_key="name").classes("text-xs")
+                    _style_table(ltbl)
+                    ltbl.add_slot("body-cell-verif", _badge_cell("verif"))
+                    ltbl.add_slot("no-data", _no_data_cell(
+                        "folder_special", "模型库还是空的——训练详情页「部署到标注端」会在这里出现"))
+                    ltbl.add_slot("body-cell-ops", (
+                        '<q-td :props="props">'
+                        '<q-btn flat dense round size=xs color=negative icon="delete" '
+                        '@click="() => $parent.$emit(\'purge\', props.row)" />'
+                        "</q-td>"))
+                    ltbl.on("purge", lambda e: open_purge(e.args["name"]))
+                    ui.label(f"库根目录：{lib_data['root']}").classes("text-[11px] opacity-45 break-all")
+
+            def open_purge(name: str) -> None:
+                purge_name.set_text(name)
+                purge_dialog.open()
+
+            async def do_purge() -> None:
+                name = purge_name.text
+                purge_dialog.close()
+                try:
+                    r = await _io(tsvc.delete_model_dir, get_manager(), name)
+                    ui.notify(f"已删除 {r['deleted']}（同步移除 {r['removed_deployments']} 条部署记录）",
+                              type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"删除失败：{exc}", type="negative")
+                render_library()
+                render_deployments()
+
+            with ui.dialog() as purge_dialog, ui.card().classes("w-96 gap-2"):
+                ui.label("删除模型目录？").classes("font-bold")
+                ui.label("将删除磁盘目录与对应部署记录；桌面端已加载的模型不受影响（下次不再出现在下拉）。"
+                         ).classes("text-xs opacity-60")
+                purge_name = ui.label("").classes("text-xs font-mono break-all")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=purge_dialog.close).props("flat")
+                    ui.button("删除", color="negative", icon="delete",
+                              on_click=do_purge).props("unelevated")
+
+            render_library()
+
+            # URL 状态回链（M8 06）：?cmp=1,2 预选并直接出对比
+            pre = request.query_params.get("cmp")
+            if pre:
+                ids = {int(x) for x in pre.split(",") if x.isdigit()}
+                sel_rows = [r for r in cross_rows if r["id"] in ids]
+                if sel_rows:
+                    cross.selected = sel_rows
+                    _sync_cmp_btn()
+                    do_cross()
+
         _page_frame("结果", "结果复盘", None, body)
 
     # ================================================================ Agent 页
@@ -2025,13 +3592,13 @@ def mount() -> None:
                 with banner_col:
                     for r in rows:
                         if r.get("agent_state") == "waiting_approval":
-                            with ui.banner().props("rounded").classes("bg-amber-100 text-amber-900 q-py-sm"):
+                            with ui.card().classes("w-full q-py-sm gap-1 rounded-lg bg-amber-100 text-amber-900"):
                                 ui.icon("hourglass_top").classes("q-mr-sm")
                                 ui.label(f"「{r['name']}」等待审批：LLM 已给出下一轮超参方案").classes("text-sm")
                                 ui.button("去处理", icon="arrow_forward", on_click=lambda rr=r: select(rr)
                                           ).props("unelevated dense color=amber-8")
                         elif r.get("agent_state") == "paused":
-                            with ui.banner().props("rounded").classes("bg-orange-100 text-orange-900 q-py-sm"):
+                            with ui.card().classes("w-full q-py-sm gap-1 rounded-lg bg-orange-100 text-orange-900"):
                                 ui.icon("pause_circle").classes("q-mr-sm")
                                 ui.label(f"「{r['name']}」已暂停（LLM 决策失败等，等待人工处理）").classes("text-sm")
                                 ui.button("去处理", icon="arrow_forward", on_click=lambda rr=r: select(rr)
@@ -2045,89 +3612,232 @@ def mount() -> None:
                         ui.label("点击行查看循环详情与审批门").classes("text-xs opacity-40")
                     return
                 task = tsvc.get_task(get_manager(), tid)
+                cmp = tsvc.compare_runs(get_manager(), tid)  # rounds：含快照 diff/pruned/曲线
                 cfg = task.get("agent_config") or {}
                 a_label, a_color = AGENT_STATE.get(cfg.get("state") or "idle",
                                                    (cfg.get("state") or "—", "grey"))
-                with detail, ui.card().classes("w-full gap-2"):
-                    with ui.row().classes("w-full items-center gap-2"):
-                        ui.label(task["name"]).classes("text-lg font-bold")
-                        ui.badge(a_label).props(f"color={a_color} outline").style("font-size:10px")
-                        ui.space()
-                    # 目标与参数：键值对排版
-                    for k, v in (("优化目标", cfg.get("objective") or "—"),
-                                 ("最大轮数", cfg.get("max_rounds", "—")),
-                                 ("审批模式", "每轮人工审批" if cfg.get("approval") == "manual" else "自动直通"),
-                                 ("停止原因", cfg.get("stop_reason"))):
-                        if v:
-                            with ui.row().classes("w-full gap-2 items-start"):
-                                ui.label(k).classes("text-xs opacity-50 w-16 shrink-0 pt-0.5")
-                                ui.label(str(v)).classes("text-xs opacity-80 break-all flex-1 min-w-0")
-                    if cfg.get("pause_reason"):
-                        ui.label(f"暂停原因：{cfg['pause_reason']}").classes("text-xs text-orange-700")
+                rounds = cmp.get("rounds") or []
+                decisions = {d["round_no"]: d for d in task.get("decisions") or []}
+                pruned_ev = {p.get("round"): p for p in cfg.get("pruned_rounds") or []}
+                max_rounds = int(cfg.get("max_rounds", 5) or 5)
+                primaries = [r["primary_metric"] for r in rounds if r["primary_metric"] is not None]
+                baseline = primaries[0] if primaries else None
+                best = max(primaries) if primaries else None
 
-                    # 审批门：醒目区块，不与标题挤在一行
+                with detail:
+                    # ── 卡 1：循环总览（M7 06 号票，原型结构 A）
+                    with ui.card().classes("w-full gap-2"):
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                            ui.label(task["name"]).classes("text-lg font-bold")
+                            ui.badge(a_label).props(f"color={a_color} outline").style("font-size:10px")
+                            if task.get("runs"):
+                                cur = task["runs"][-1]
+                                s_label, s_color = RUN_STATUS.get(cur["status"], (cur["status"], "grey"))
+                                if cur["status"] in ("running", "stopping", "queued"):
+                                    ui.badge(f"Run {len(task['runs'])} {s_label}").props(
+                                        f"color={s_color} outline").style("font-size:10px")
+                            if any(r.get("pruned") for r in rounds):
+                                n_p = sum(1 for r in rounds if r.get("pruned"))
+                                ui.badge(f"{n_p} 轮已剪枝").props("color=purple outline").style("font-size:10px")
+                            ui.space()
+                            ui.label(cfg.get("objective") or "").classes("text-xs opacity-50 max-w-60 truncate")
+                        with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                            with ui.column().classes("flex-1 min-w-[16rem] gap-1"):
+                                done = sum(1 for r in rounds
+                                           if r["status"] not in ("queued", "running", "stopping"))
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.label(f"轮次进度 {done} / {max_rounds}"
+                                             + (f"（剩余 {max_rounds - done} 轮）" if done < max_rounds else "")
+                                             ).classes("text-xs opacity-70")
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    with ui.element("div").classes(
+                                            "flex-1 h-2 rounded").style("background:rgba(148,163,184,.18)"):
+                                        with ui.element("div").classes("h-full rounded").style(
+                                                f"width:{min(done / max(max_rounds, 1) * 100, 100):.0f}%;"
+                                                "background:linear-gradient(90deg,#2563eb,#22d3ee)"):
+                                            pass
+                                with ui.row().classes("flex-wrap gap-1"):
+                                    for r in rounds:
+                                        if r.get("pruned"):
+                                            b = ui.badge(f"轮{r['round_no']} ✂").props(
+                                                "color=purple outline").style("font-size:9px")
+                                        elif r["primary_metric"] is not None:
+                                            b = ui.badge(f"轮{r['round_no']} {r['primary_metric']:.3f}").props(
+                                                "color=green outline").style("font-size:9px")
+                                        else:
+                                            s_l, _ = RUN_STATUS.get(r["status"], (r["status"], "grey"))
+                                            b = ui.badge(f"轮{r['round_no']} {s_l}").props(
+                                                "color=grey outline").style("font-size:9px")
+                                        with b:
+                                            ui.tooltip(f"轮 {r['round_no']} · {r['status']}"
+                                                       + (f" · 已剪枝" if r.get("pruned") else ""))
+                            with ui.column().classes("w-[13.5rem] shrink-0 gap-1"):
+                                ui.label("主指标趋势").classes("text-xs opacity-70")
+                                ui.echart(_spark_options(
+                                    [r["primary_metric"] for r in rounds])).classes("w-full h-11")
+                                with ui.row().classes("gap-3"):
+                                    ui.label(f"最优 {_fmt_metric(best)}").classes("text-xs font-semibold")
+                                    if baseline is not None and best is not None:
+                                        d = best - baseline
+                                        ui.label(f"较基线 {'+' if d >= 0 else ''}{d:.3f}").classes(
+                                            "text-xs font-semibold " + ("text-green-600" if d > 0 else
+                                                                       ("text-red-500" if d < 0 else "opacity-60")))
+                        if cfg.get("stop_reason"):
+                            ui.label(f"停止原因：{cfg['stop_reason']}").classes("text-xs opacity-60")
+                        if cfg.get("pause_reason"):
+                            ui.label(f"暂停原因：{cfg['pause_reason']}").classes("text-xs text-orange-700")
+
+                    # ── 卡 2：决策卡三段式时间线（最新在上）
+                    timeline_card = ui.card().classes("w-full gap-2")
+                    with timeline_card:
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.label("LLM 决策时间线").classes("text-sm font-semibold")
+                            ui.label("每轮一张决策卡：改了什么 / 为什么 / 效果").classes(
+                                "text-[11px] opacity-40")
+                        if not rounds:
+                            ui.label("（尚无轮次记录）").classes("text-xs opacity-40")
+                        prev_primary = None
+                        prev_by_round: dict[int, float | None] = {}
+                        for r in rounds:
+                            prev_by_round[r["round_no"]] = prev_primary
+                            if r["primary_metric"] is not None:
+                                prev_primary = r["primary_metric"]
+                        for r in reversed(rounds):
+                            rn = r["round_no"]
+                            dec = decisions.get(rn)
+                            with ui.row().classes("w-full gap-2 items-stretch").style(
+                                    "border-bottom:1px dashed rgba(148,163,184,.25);padding:6px 0"):
+                                with ui.column().classes("w-14 shrink-0 gap-1 items-center"):
+                                    ui.badge(f"轮 {rn}").props("outline square").style("font-size:10px")
+                                    if r.get("pruned"):
+                                        ui.badge("已剪枝").props("color=purple square").style("font-size:9px")
+                                    elif r["status"] in ("running", "stopping"):
+                                        ui.icon("sync", size="14px").classes("opacity-60")
+                                    elif r["status"] == "queued":
+                                        ui.icon("schedule", size="14px").classes("opacity-50")
+                                with ui.column().classes("flex-1 min-w-40 gap-1"):
+                                    ui.label("改了什么（较首轮）").classes(
+                                        "text-[11px] font-semibold opacity-50")
+                                    changes = r.get("args_changes") or {}
+                                    if changes:
+                                        with ui.row().classes("flex-wrap gap-1"):
+                                            for k, v in changes.items():
+                                                ui.chip(f"{k} → {v}").props(
+                                                    "dense square color=blue-8 outline").classes("text-[11px]")
+                                    else:
+                                        ui.label("—（基线轮，官方默认超参）" if rn == 1 else "同基线"
+                                                 ).classes("text-[11px] opacity-40")
+                                    for c in (dec or {}).get("clamps") or []:
+                                        reason = ("非白名单" if c.get("reason") == "not_in_allowlist"
+                                                  else c.get("reason", "越界"))
+                                        ui.chip(f"已拦截 {c.get('key')}={c.get('requested')}（{reason}）"
+                                                ).props("dense outline square color=grey").classes("text-[11px]")
+                                with ui.column().classes("flex-1 min-w-40 gap-1"):
+                                    ui.label("为什么（LLM 理由）").classes(
+                                        "text-[11px] font-semibold opacity-50")
+                                    if (dec or {}).get("analysis"):
+                                        ui.label(dec["analysis"]).classes("text-[11px] opacity-80 break-all")
+                                    elif rn == 1:
+                                        ui.label("建立基线：官方默认超参。").classes("text-[11px] opacity-40")
+                                    else:
+                                        ui.label("—").classes("text-[11px] opacity-40")
+                                with ui.column().classes("flex-1 min-w-40 gap-1"):
+                                    ui.label("效果（主指标）").classes(
+                                        "text-[11px] font-semibold opacity-50")
+                                    ev = pruned_ev.get(rn)
+                                    if ev:
+                                        ui.label(f"epoch {ev['at_epoch']} 检查点 {ev['value']:.3f} ＜ "
+                                                 f"历史同期中位 {ev.get('baseline_median', 0):.3f} − "
+                                                 f"δ{ev.get('delta', 0)} → 自动剪枝，证据已进下一轮决策"
+                                                 ).classes("text-[11px]").style("color:#a855f7")
+                                    elif r["primary_metric"] is None and r["status"] in ("running", "stopping",
+                                                                                        "queued"):
+                                        s_l, _ = RUN_STATUS.get(r["status"], (r["status"], ""))
+                                        ui.label(f"{s_l}中…").classes("text-[11px] opacity-40")
+                                    elif r["primary_metric"] is None:
+                                        ui.label("—").classes("text-[11px] opacity-40")
+                                    else:
+                                        pv = prev_by_round.get(rn)
+                                        if pv is None:
+                                            ui.label(f"基线 {r['primary_metric']:.3f}").classes(
+                                                "text-[11px] font-semibold")
+                                        else:
+                                            d = r["primary_metric"] - pv
+                                            ui.label(f"{r['primary_metric']:.3f} "
+                                                     f"（{'↑' if d >= 0 else '↓'}{abs(d):.3f}）").classes(
+                                                "text-[11px] font-semibold " +
+                                                ("text-green-600" if d > 0 else
+                                                 ("text-red-500" if d < 0 else "opacity-60")))
+                            # 重要性条（最新决策依据；归档快照见决策记录）
+                        imp = cmp.get("param_importance")
+                        if imp and imp.get("keys"):
+                            with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
+                                ui.label(f"本轮决策依据的参数重要性（{imp['note']}）").classes(
+                                    "text-[11px] opacity-50")
+                            for k in imp["keys"]:
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    ui.label(k["key"]).classes("text-[11px] opacity-70 w-16 shrink-0")
+                                    with ui.element("div").classes("h-1.5 rounded").style(
+                                            f"width:{max(abs(k['rho']) * 160, 2):.0f}px;"
+                                            f"background:{'#16a34a' if k['rho'] >= 0 else '#dc2626'}"):
+                                        pass
+                                    ui.label(f"ρ={k['rho']:+.2f}").classes("text-[11px] opacity-50")
+
+                    # ── 卡 3：审批门（主次分明；等待审批/暂停时出现）
                     if cfg.get("state") in ("waiting_approval", "paused"):
                         waiting = cfg.get("state") == "waiting_approval"
-                        next_round = len(task["runs"]) + 1
-                        with ui.card().classes("w-full bg-amber-100 text-amber-900 gap-2"):
-                            with ui.row().classes("w-full items-center gap-2"):
-                                ui.icon("hourglass_top" if waiting else "pause_circle")
-                                ui.label("等待审批放行" if waiting else "已暂停，处理后可继续").classes(
-                                    "font-semibold text-sm")
-                            if waiting:
-                                ui.label("LLM 已给出下一轮超参方案（见下方最新决策），放行后立即排队训练。"
-                                         ).classes("text-xs")
-                            approve_btn = ui.button("放行下一轮", icon="play_arrow",
-                                                    on_click=lambda: do_approve("continue"))
-                            approve_btn.props("unelevated color=green dense")
-                            stop_btn = ui.button("终止循环", icon="stop",
-                                                 on_click=lambda: stop_confirm_dialog.open())
-                            stop_btn.props("outline color=negative dense")
-
-                    # 决策历史：chip 化 + 轮次标注 + 最新标识
-                    history = cfg.get("history") or []
-                    if history:
-                        ui.label("LLM 决策历史").classes("text-sm font-semibold mt-2")
-                        for idx in range(len(history) - 1, -1, -1):
-                            h = history[idx]
-                            with ui.row().classes("w-full gap-2 items-start border-l-2 pl-3 py-1"
-                                                  ).style("border-color:#e5e7eb"):
-                                with ui.column().classes("gap-1 w-full"):
-                                    with ui.row().classes("gap-2 items-center"):
-                                        ui.badge(f"轮 {idx + 2} 决策").props("outline square").style("font-size:10px")
-                                        if idx == len(history) - 1:
-                                            ui.badge("最新").props("color=blue square").style("font-size:10px")
-                                        ui.label(_fmt_ts(h.get("at"))).classes("text-[11px] opacity-50")
-                                    ui.label(h.get("analysis", "")).classes("text-xs break-all")
-                                    with ui.row().classes("w-full flex-wrap gap-1"):
-                                        for k, v in (h.get("changes") or {}).items():
+                        next_round = len([r for r in rounds]) + 1
+                        latest = (cfg.get("history") or [{}])[-1]
+                        with ui.card().classes("w-full gap-2").style(
+                                "border:1px solid rgba(245,158,11,.45);"
+                                "background:rgba(245,158,11,.07)"):
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                ui.icon("hourglass_top" if waiting else "pause_circle").classes(
+                                    "text-amber-500")
+                                ui.label(f"{'⏳ 等待审批 — 轮 ' + str(next_round) + ' 方案已就绪' if waiting else '已暂停，处理后可继续'}"
+                                         ).classes("font-semibold text-sm")
+                                if waiting:
+                                    ui.label("桌面通知已发送 · 放行即排队").classes(
+                                        "text-[11px] opacity-50")
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                if waiting and latest.get("changes"):
+                                    with ui.row().classes("flex-wrap gap-1 flex-1"):
+                                        for k, v in (latest.get("changes") or {}).items():
                                             ui.chip(f"{k} → {v}").props("dense square").classes("text-[11px]")
-                                        for c in h.get("clamps") or []:
-                                            reason = ("非白名单" if c.get("reason") == "not_in_allowlist"
-                                                      else c.get("reason", "越界"))
-                                            ui.chip(f"已拦截 {c.get('key')}={c.get('requested')}（{reason}）"
-                                                    ).props("dense outline square color=grey").classes("text-[11px]")
-
-                        # 轮次执行记录：状态 + 主指标 + 较上轮变化
-                        if task["runs"]:
-                            ui.label("轮次执行记录").classes("text-sm font-semibold mt-2")
-                            prev = None
-                            for r in task["runs"]:
-                                label, color = RUN_STATUS.get(r["status"], (r["status"], "grey"))
-                                with ui.row().classes("w-full gap-2 items-center"):
-                                    ui.badge(f"轮 {r['round_no']}").props("outline square").style("font-size:10px")
-                                    ui.badge(label).props(f"color={color} square").style("font-size:10px")
-                                    ui.label(f"主指标 {_fmt_metric(r['primary_metric'])}").classes("text-xs")
-                                    if r["primary_metric"] is not None and prev is not None:
-                                        d = r["primary_metric"] - prev
-                                        ui.label(f"{'↑' if d >= 0 else '↓'}{abs(d):.3f}").classes(
-                                            "text-xs " + ("text-green-600" if d > 0 else
-                                                          ("text-red-500" if d < 0 else "opacity-50")))
-                                    if r["primary_metric"] is not None:
-                                        prev = r["primary_metric"]
-                                    ui.label(r["uid"]).classes("text-[11px] opacity-40")
-                                    if r.get("error"):
-                                        ui.label(r["error"]).classes("text-[11px] text-red-500 break-all flex-1")
+                                elif waiting:
+                                    ui.label("（无超参变更）").classes("text-[11px] opacity-40")
+                                if waiting:
+                                    try:
+                                        est = tsvc.estimate_training_time(get_manager())
+                                    except Exception:  # noqa: BLE001
+                                        est = None
+                                    eps = (task.get("train_args") or {}).get("epochs")
+                                    if est and eps:
+                                        ui.label(f"预计本轮 ~{_fmt_duration(est['seconds_per_epoch'] * float(eps))}"
+                                                 ).classes("text-[11px] opacity-50")
+                                    ui.label(f"已用 {len([r for r in rounds])} / {max_rounds} 轮"
+                                             ).classes("text-[11px] opacity-50")
+                            with ui.row().classes("w-full justify-end gap-2"):
+                                if waiting:
+                                    go = ui.button("放行下一轮", icon="play_arrow",
+                                                   on_click=lambda: do_approve("continue"))
+                                    go.props("unelevated dense")
+                                    with go:
+                                        ui.tooltip("按最新方案排队下一轮训练")
+                                    see = ui.button("先看详情", icon="visibility",
+                                                    on_click=lambda: _scroll_to(timeline_card))
+                                    see.props("outline dense")
+                                    with see:
+                                        ui.tooltip("滚动到决策时间线")
+                                else:
+                                    go = ui.button("恢复循环", icon="play_arrow",
+                                                   on_click=lambda: do_approve("continue"))
+                                    go.props("unelevated dense")
+                                stop_btn = ui.button("终止循环", icon="stop",
+                                                     on_click=stop_confirm_dialog.open)
+                                stop_btn.props("outline dense color=negative")
+                                with stop_btn:
+                                    ui.tooltip("排队中的 Run 将取消；已完成轮次与决策记录保留")
 
             select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail),
                                        sync_selected=False)
@@ -2217,6 +3927,24 @@ def mount() -> None:
                                             label="imgsz", with_input=True).classes("flex-1")
                         c_batch = ui.select({-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
                                             value=16, label="batch", with_input=True).classes("flex-1")
+                    # 每轮时长预估（M7 02 号票）
+                    try:
+                        a_est = tsvc.estimate_training_time(get_manager())
+                    except Exception:  # noqa: BLE001
+                        a_est = None
+                    a_est_label = ui.label("").classes("text-[11px] opacity-50")
+
+                    def _a_upd_est() -> None:
+                        if a_est and c_epochs.value:
+                            sec = a_est["seconds_per_epoch"] * float(c_epochs.value)
+                            a_est_label.set_text(f"⏱ 每轮预估 ~{_fmt_duration(sec)}"
+                                                 f"（历史 {a_est['samples']} Run 中位 "
+                                                 f"{a_est['seconds_per_epoch']}s/epoch）")
+                        else:
+                            a_est_label.set_text("⏱ 暂无已完成 Run，时长预估待历史积累")
+
+                    c_epochs.on_value_change(lambda _e: _a_upd_est())
+                    _a_upd_est()
                     with ui.row().classes("w-full"):
                         c_device = ui.input("device", value="0", placeholder="0 / 0,1 / cpu").classes("flex-1")
                         c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
@@ -2231,6 +3959,10 @@ def mount() -> None:
                         c_rounds = ui.number("最大轮数", value=5, precision=0, min=1).classes("flex-1")
                         c_approval = ui.select({"manual": "每轮人工审批", "auto": "自动直通"},
                                                value="manual", label="审批模式").classes("flex-1")
+                    c_prune = ui.switch("烂轮早停（显著劣化轮 1/2 epoch 剪枝，全局阈值见设置页）",
+                                        value=bool(load_config().get("agent", {}).get("prune_enabled", True)))
+                    with c_prune:
+                        ui.tooltip("新轮主指标低于历史同期中位数 − δ 时优雅终止并记 pruned；证据进入下一轮 LLM 决策")
                     with ui.expansion("高级训练参数", icon="tune",
                                       caption="ultralytics 8.4.100 官方全量 · 留空走官方默认").classes("w-full"):
                         ui.label("首轮基线；后续轮次的调整由 Agent 在其白名单内决策"
@@ -2262,7 +3994,9 @@ def mount() -> None:
                                                  seed=int(c_seed.value if c_seed.value is not None else 42),
                                                  extra_args=extra or None,
                                                  agent={"max_rounds": int(c_rounds.value or 5),
-                                                        "approval": c_approval.value, "objective": c_obj.value or ""})
+                                                        "approval": c_approval.value,
+                                                        "objective": c_obj.value or "",
+                                                        "prune": bool(c_prune.value)})
                         tuner.launch_or_resume(get_manager(), brief["id"])
                         create_dialog.close()
                         ui.notify(f"Agent 任务已创建：{brief['uid']}（首轮已排队）")
@@ -2274,6 +4008,15 @@ def mount() -> None:
                 rows = rows_data()
                 _update_rows(table, rows)
                 render_banners(rows)
+                # 详情自动跟进（M7 06 号票）：选中任务的状态/轮数签名变化才重建，
+                # 稳定态不重渲染（避免 2s 一刷打断滚动与展开状态）
+                sel = state["selected"]
+                if sel is not None:
+                    row = next((r for r in rows if r["id"] == sel), None)
+                    sig = f"{row['id']}:{row['status']}:{row.get('agent_state')}:{row.get('runs')}" if row else None
+                    if sig is not None and state.get("detail_sig") != sig:
+                        state["detail_sig"] = sig
+                        render_detail()
                 # 自动聚焦：优先等待审批的任务，其次运行中的
                 if not state["auto"] and state["selected"] is None:
                     state["auto"] = True
@@ -2298,6 +4041,41 @@ def mount() -> None:
             cfg = load_config()
             llm = cfg.get("llm", {})
             training = cfg.get("training", {})
+
+            # ── 启动自检状态卡（M6 07 号票）：逐项结果 + 修复指引 + 手动重跑
+            with ui.card().classes("w-full gap-2"):
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label("启动自检").classes("font-semibold")
+                    sc_state = ui.badge("检测中…").props("outline").style("font-size:10px")
+                    ui.space()
+                    sc_btn = ui.button("重新自检", icon="refresh", on_click=lambda: _run_sc()).props("outline dense")
+                sc_box = ui.column().classes("w-full gap-1")
+
+                def _render_sc(result: dict) -> None:
+                    errs = result["error_count"]
+                    sc_state.set_text("全部通过" if result["ok"] and not result["problems"] else (
+                        f"{errs} 项错误" if errs else f"{result['problems']} 项提示"))
+                    sc_state.props(f"color={'red' if errs else ('amber' if result['problems'] else 'green')} outline")
+                    sc_box.clear()
+                    with sc_box:
+                        for i in result["items"]:
+                            mark, color = {"ok": ("✓", "green"), "error": ("✗", "red"),
+                                           "warning": ("!", "amber")}.get(i["severity"], ("?", "grey"))
+                            with ui.row().classes("w-full items-start gap-2"):
+                                ui.badge(mark).props(f"color={color} square").style("font-size:9px")
+                                with ui.column().classes("flex-1 min-w-0 gap-0"):
+                                    ui.label(f"{i['label']}：{i['summary']}").classes("text-xs")
+                                    if i["detail"]:
+                                        ui.label(i["detail"]).classes("text-[11px] opacity-60")
+
+                async def _run_sc() -> None:
+                    from ..core.selfcheck import run_selfcheck
+
+                    with _busy(sc_btn, "自检中…"):
+                        result = await _io(run_selfcheck)
+                        _render_sc(result)
+
+                ui.timer(0.1, _run_sc, once=True)
 
             def _kv(label: str, value: str, wrap: bool = False) -> None:
                 with ui.row().classes("w-full gap-2 items-start"):
@@ -2398,6 +4176,30 @@ def mount() -> None:
 
                 _kv("trainer_entry", str(training.get("trainer_entry", "未配置（用包内默认）")), wrap=True)
                 _kv("export_entry", str(training.get("export_entry", "未配置（用包内默认）")), wrap=True)
+
+            with ui.card().classes("w-full gap-2"):
+                ui.label("通知与 Agent 安全网").classes("font-semibold")
+                ui.label("桌面通知即时生效；烂轮早停阈值对新建 Agent 任务生效（任务内可在新建对话框单独关闭）。"
+                         ).classes("text-xs opacity-50")
+                n_desktop = ui.switch("桌面通知（完成 / 失败 / 审批请求 / 剪枝 → notify-send）",
+                                      value=bool(cfg.get("notifications", {}).get("desktop", True)))
+                a_prune = ui.switch("烂轮早停全局开关（新轮显著劣化 → 优雅终止记 pruned）",
+                                    value=bool(cfg.get("agent", {}).get("prune_enabled", True)))
+                a_delta = ui.number("剪枝阈值 δ（主指标低于历史同期中位数的差值）",
+                                    value=float(cfg.get("agent", {}).get("prune_delta", 0.05)),
+                                    min=0.001, max=1.0, step=0.005).classes("w-64")
+                misc_btn = ui.button("保存", icon="save", on_click=lambda: do_save_misc())
+
+                async def do_save_misc() -> None:
+                    updates = {"notifications": {"desktop": bool(n_desktop.value)},
+                               "agent": {"prune_enabled": bool(a_prune.value),
+                                         "prune_delta": float(a_delta.value or 0.05)}}
+                    with _busy(misc_btn):
+                        try:
+                            _, restart = await _io(update_config, updates)
+                            _notify_saved(restart)
+                        except Exception as exc:  # noqa: BLE001
+                            _save_fail(exc)
 
             with ui.card().classes("w-full gap-2"):
                 ui.label("服务（server）").classes("font-semibold")

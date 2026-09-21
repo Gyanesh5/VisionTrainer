@@ -30,6 +30,7 @@ for e in range(1, epochs + 1):
             "metrics/recall(B)": round(0.4 + 0.01 * e, 4),
             "metrics/mAP50(B)": round(0.1 * e, 4),
             "metrics/mAP50-95(B)": round(0.05 * e, 4),
+            "val/box_loss": round(2.5 / e, 4),  # M7：loss 双线（val 虚线）的 stub 数据源
         },
         "loss": {"box_loss": round(2.0 / e, 4)},
         "lr": [0.001],

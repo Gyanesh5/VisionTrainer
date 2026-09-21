@@ -37,7 +37,10 @@ def publish(event: dict) -> None:
 
 
 def publish_threadsafe(event: dict) -> None:
-    """watchdog 线程调用：把事件安全地投递回主循环。"""
+    """watchdog 线程调用：把事件安全地投递回主循环。
+
+    平台关闭窗口期（loop 已关、watchdog 仍在 flush 尾部指标）丢弃事件而不是炸线程。
+    """
     try:
         running = asyncio.get_running_loop()
     except RuntimeError:
@@ -45,7 +48,10 @@ def publish_threadsafe(event: dict) -> None:
     if _main_loop is None or running is _main_loop:
         publish(event)
         return
-    _main_loop.call_soon_threadsafe(publish, event)
+    try:
+        _main_loop.call_soon_threadsafe(publish, event)
+    except RuntimeError:
+        pass  # Event loop is closed（进程退出竞态）：无订阅者可送达
 
 
 async def stream(q: asyncio.Queue, send_text):

@@ -13,8 +13,10 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
+from .audit import compute_audit, fingerprint_of, load_cached, save_cached
 from .convert import TASK_SHAPES, json_to_yolo_lines, write_label
-from .split import build_manifest, save_manifest
+from .split import build_manifest, excluded_manifest, save_manifest
+from .stats import build_stats, get_stats, recompose, save_stats
 from .validate import scan_entries, validate_dataset
 
 VALID_TASK_TYPES = set(TASK_SHAPES)
@@ -102,13 +104,17 @@ def import_dataset(
 
     ds_dir.mkdir(parents=True)
     (ds_dir / "classes.txt").write_text("\n".join(classes) + ("\n" if classes else ""), encoding="utf-8")
-    report = validate_dataset(src, task_type, classes, progress=_cb("校验标注"))
+    # 带类别的正式扫描：校验报告 + 健康报告原料共用这一次遍历（M6 不二次扫盘）
+    scan = scan_entries(src, task_type, classes, progress=_cb("校验标注"))
+    report = validate_dataset(src, task_type, classes, progress=None, scan=scan)
     (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    entries = _entries_with_labels(scan["entries"], classes)
+    entries = [{"image": e["image"], "label": e["label"], "primary_label": e.get("primary_label")}
+               for e in scan["entries"]]
     manifest = build_manifest(entries, ratio, seed, stratify)
     save_manifest(ds_dir, manifest)
     _derive(ds_dir, manifest, task_type, classes, progress=_cb("派生训练结构"))
+    save_stats(name, build_stats(scan["entries"], manifest, task_type, classes, name))
 
     meta = {
         "name": name,
@@ -216,10 +222,15 @@ def validate_dataset_by_name(name: str, root: Path | None = None) -> dict:
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不做平台校验")
     ds_dir = _ds_dir(name, root)
-    report = validate_dataset(Path(meta["source_dir"]), meta["task_type"], meta["classes"])
+    src = Path(meta["source_dir"])
+    scan = scan_entries(src, meta["task_type"], meta["classes"])
+    report = validate_dataset(src, meta["task_type"], meta["classes"], scan=scan)
     (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     meta["last_validation"] = report
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 健康报告聚合随校验刷新（当前活跃清单画像；M6 01 号票）
+    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+    save_stats(name, build_stats(scan["entries"], manifest, meta["task_type"], meta["classes"], name))
     return report
 
 
@@ -241,6 +252,7 @@ def resplit_dataset(name: str, ratio: float, seed: int, stratify: bool, root: Pa
         meta["manifests"].append(_manifest_brief(manifest))
         meta["active_manifest"] = manifest["uid"]
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    _refresh_stats_recompose(name, meta, prev, manifest)
     return manifest
 
 
@@ -258,7 +270,77 @@ def rename_classes(name: str, classes: list[str], root: Path | None = None) -> d
         manifest = _read_meta(ds_dir / "derived" / brief["uid"] / "split_manifest.json")
         _derive(ds_dir, manifest, meta["task_type"], classes)
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 健康报告画像按新类别表重算 meta（逐图行的标注名来自 JSON 真源，保持原样）
+    payload = get_stats(name, meta["active_manifest"])
+    if payload:
+        payload["classes"] = classes
+        save_stats(name, payload)
     return meta
+
+
+def exclude_files(name: str, files: list[str], reason: str = "", root: Path | None = None) -> dict:
+    """质量审计处置（M6 04 号票）：从切分清单排除文件——只动清单，不动标注真源。
+
+    生成新 manifest（剩余文件 train/val 归属保持不变）、重建派生结构并切换 active；
+    旧清单与旧派生保留可查；健康报告聚合同步重组。重新切分以排除后文件集为基线。
+    """
+    if not files:
+        raise DatasetError("invalid_args", "排除清单为空")
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不在平台处置范围")
+    ds_dir = _ds_dir(name, root)
+    prev = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+    known = {f["image"] for f in prev["files"]}
+    unknown = [f for f in files if f not in known]
+    if unknown:
+        raise DatasetError("invalid_args", f"不在当前切分清单内：{Path(unknown[0]).name} 等共 {len(unknown)} 个")
+    manifest = excluded_manifest(prev, files)
+    if not manifest["val"] or not manifest["train"]:
+        raise DatasetError("state_conflict", "排除后 train 或 val 将为空，拒绝执行（各须至少保留 1 张）")
+    _derive(ds_dir, manifest, meta["task_type"], meta["classes"])
+    save_manifest(ds_dir, manifest)
+    if manifest["uid"] != meta["active_manifest"]:
+        meta["manifests"].append(_manifest_brief(manifest))
+        meta["active_manifest"] = manifest["uid"]
+    excluded_log = list(meta.get("excluded") or [])
+    excluded_log.extend({"file": f, "at": datetime.now().isoformat(timespec="seconds"),
+                         "reason": reason or "质量审计处置"} for f in sorted(files))
+    meta["excluded"] = excluded_log
+    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    _refresh_stats_recompose(name, meta, prev, manifest)
+    return manifest
+
+
+def dataset_stats(name: str, root: Path | None = None) -> dict:
+    """健康报告查询（M6）：外部数据集无健康报告。"""
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不提供健康报告")
+    return get_stats(name, meta.get("active_manifest"))
+
+
+def run_quality_audit(name: str, progress=None, root: Path | None = None) -> dict:
+    """跑体检（M6 03 号票，长操作）：指纹命中缓存直接回，否则全量计算并缓存。"""
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不做质量审计")
+    manifest = _read_meta(_ds_dir(name, root) / "derived" / meta["active_manifest"] / "split_manifest.json")
+    fp = fingerprint_of(manifest)
+    cached = load_cached(name, manifest["uid"])
+    if cached and cached.get("fingerprint") == fp:
+        return {**cached, "from_cache": True}
+    report = compute_audit(manifest, progress=progress)
+    save_cached(name, manifest["uid"], report)
+    return {**report, "from_cache": False}
+
+
+def cached_audit(name: str, root: Path | None = None) -> dict | None:
+    """读缓存体检报告（无则 None，UI 据此显示「尚未体检」）。"""
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        return None
+    return load_cached(name, meta.get("active_manifest"))
 
 
 # ---------------------------------------------------------------- 派生结构
@@ -324,17 +406,11 @@ def _link(src: Path, dst: Path) -> None:
 
 # ---------------------------------------------------------------- 内部工具
 
-def _entries_with_labels(entries: list[dict], classes: list[str]) -> list[dict]:
-    out = []
-    for e in entries:
-        primary = None
-        if e["label"]:  # 不看 problems：此处已按 classes 白名单取主标签（扫描时 classes 尚未确定）
-            for s in _read_json(e["label"]).get("shapes", []):
-                if s.get("label") in classes:
-                    primary = s["label"]
-                    break
-        out.append({"image": e["image"], "label": e["label"], "primary_label": primary})
-    return out
+def _refresh_stats_recompose(name: str, meta: dict, prev: dict, manifest: dict) -> None:
+    """重切/排除后：从上一份画像重组新清单画像（零重扫盘）；旧库无画像则跳过。"""
+    prev_payload = get_stats(name, prev["uid"])
+    if prev_payload:
+        save_stats(name, recompose(prev_payload, manifest))
 
 
 def _manifest_brief(manifest: dict) -> dict:

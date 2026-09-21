@@ -179,6 +179,17 @@ def _coerce(entry: dict, value) -> tuple[object, str | None]:
     return v, None
 
 
+def strip_defaults(values: dict | None) -> dict:
+    """剔除等于官方默认值的键（M7 表单工程学）：提交只带差异，超参 diff 天然只剩非默认项。"""
+    out: dict = {}
+    for k, v in (values or {}).items():
+        e = PARAMS.get(k)
+        if e is not None and e.get("default") is not None and v == e["default"]:
+            continue
+        out[k] = v
+    return out
+
+
 def validate_extra_args(extra: dict | None) -> tuple[dict, list[str]]:
     """校验用户训练参数：键合法、类型可转、数值在 guard 内。
 

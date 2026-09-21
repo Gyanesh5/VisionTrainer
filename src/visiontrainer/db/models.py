@@ -8,8 +8,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, create_engine, func
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, create_engine, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+
+from .runtime import set_session_factory
 
 
 class Base(DeclarativeBase):
@@ -53,6 +55,7 @@ class Run(Base):
     task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"), index=True)
     round_no: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
+    pruned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="0")
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     run_dir: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     best_pt: Mapped[str | None] = mapped_column(String(1024), nullable=True)
@@ -97,7 +100,69 @@ class Deployment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-SCHEMA_VERSION = 1
+class DatasetStat(Base):
+    """健康报告聚合（M6）：按（数据集，切分清单）版本一行，payload 含逐图行与四图聚合。"""
+
+    __tablename__ = "dataset_stats"
+    __table_args__ = (UniqueConstraint("dataset", "manifest_uid"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    manifest_uid: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    task_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    computed_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class DatasetAudit(Base):
+    """质量审计缓存（M6）：按（数据集，切分清单）一行，fingerprint 命中即缓存有效。"""
+
+    __tablename__ = "dataset_audits"
+    __table_args__ = (UniqueConstraint("dataset", "manifest_uid"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    dataset: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    manifest_uid: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+
+
+class GPUSample(Base):
+    """GPU 采样（M7 01 号票）：Run 运行期间 pynvml 周期采样，Run 详情 System 卡数据源。"""
+
+    __tablename__ = "gpu_samples"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), index=True)
+    ts: Mapped[float] = mapped_column(Float, nullable=False)          # Unix 秒（绝对时刻）
+    util: Mapped[float | None] = mapped_column(Float, nullable=True)  # 利用率 %
+    mem_used: Mapped[float | None] = mapped_column(Float, nullable=True)   # MB
+    mem_total: Mapped[float | None] = mapped_column(Float, nullable=True)  # MB
+    temp: Mapped[float | None] = mapped_column(Float, nullable=True)  # °C
+
+
+class RunSampleError(Base):
+    """逐框错误记录（M8 01 号票）：错误分析的最细粒度数据，矩阵下钻/清单导出/阈值扫描共用。
+
+    kind ∈ tp|fp|fn|confusion；box = {gt: xyxy|None, pred: xyxy|None}；conf 为 Pred 置信度（FN 为空）。
+    TP 也入库：混淆矩阵对角与全阈值扫描都依赖逐框 conf。
+    """
+
+    __tablename__ = "run_sample_errors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), index=True)
+    image: Mapped[str] = mapped_column(String(1024), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    cls_gt: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    cls_pred: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    conf: Mapped[float | None] = mapped_column(Float, nullable=True)
+    iou: Mapped[float | None] = mapped_column(Float, nullable=True)
+    box: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+
+
+SCHEMA_VERSION = 4
 
 
 def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
@@ -112,5 +177,14 @@ def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
         conn.exec_driver_sql(
             "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY, version INTEGER)"
         )
-        conn.exec_driver_sql("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, ?)", (SCHEMA_VERSION,))
-    return sessionmaker(bind=engine, expire_on_commit=False)
+        # 幂等迁移（10 号票约定）：v2 = stats/audits 两表；v3 = gpu_samples 表 + runs.pruned 列；
+        # v4 = run_sample_errors 表（create_all 已建）
+        conn.exec_driver_sql("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
+        if engine.dialect.name == "sqlite":
+            cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(runs)")]
+            if "pruned" not in cols:
+                conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN pruned BOOLEAN NOT NULL DEFAULT 0")
+        conn.exec_driver_sql("UPDATE schema_version SET version = ? WHERE id = 1", (SCHEMA_VERSION,))
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    set_session_factory(factory)
+    return factory

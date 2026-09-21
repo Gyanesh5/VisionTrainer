@@ -79,3 +79,29 @@ def save_manifest(dataset_dir: Path, manifest: dict) -> Path:
     path = derived / "split_manifest.json"
     path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     return path
+
+
+def excluded_manifest(prev: dict, excluded: list[str]) -> dict:
+    """质量审计处置（M6 04 号票）：从既有清单排除文件生成新清单。
+
+    关键语义——归属稳定：剩余文件的 train/val 归属与 prev 完全一致（只做删除，不重洗牌），
+    保住「全 Run 共用同一份 val」的可比性。uid 仍按（seed, ratio, 文件集哈希）重算，
+    天然生成新版本；prev_uid 链与 excluded 记录保证可追溯。
+    """
+    ex = set(excluded)
+    files = [f for f in prev["files"] if f["image"] not in ex]
+    train = [p for p in prev["train"] if p not in ex]
+    val = [p for p in prev["val"] if p not in ex]
+    files_hash = _file_label({f["image"]: f.get("primary_label") for f in files})
+    return {
+        "uid": _manifest_uid(prev["seed"], prev["ratio"], files_hash),
+        "seed": prev["seed"],
+        "ratio": prev["ratio"],
+        "stratify": prev["stratify"],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "files": files,
+        "train": sorted(train),
+        "val": sorted(val),
+        "prev_uid": prev["uid"],
+        "excluded": sorted(ex),
+    }

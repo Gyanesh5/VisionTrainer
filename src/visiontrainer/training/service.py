@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .manager import SubprocessHandle
+from .snapshot import load_snapshot
 from ..datasets import service as ds
 from ..datasets.service import DatasetError
 
@@ -112,18 +113,25 @@ def list_tasks(manager) -> list[dict]:
 
 
 def get_task(manager, task_id: int) -> dict:
-    from visiontrainer.db.models import Run, Task
+    from visiontrainer.db.models import AgentDecision, Run, Task
 
     with manager.Session() as s:
         t = s.get(Task, task_id)
         if t is None:
             raise _http_err("not_found", f"任务不存在：{task_id}", 404)
-        runs = [{"uid": r.uid, "round_no": r.round_no, "status": r.status,
+        runs = [{"uid": r.uid, "round_no": r.round_no, "status": r.status, "pruned": bool(r.pruned),
                  "primary_metric": r.primary_metric, "error": r.error} for r in
                 s.query(Run).filter(Run.task_id == task_id).order_by(Run.round_no).all()]
+        # 决策归档（M7 06 号票决策卡数据源）：含当轮依据的重要性快照，证据可回溯
+        decisions = [{"round_no": d.round_no, "changes": d.changes, "clamps": d.clamps,
+                      "analysis": (d.input_summary or {}).get("analysis", ""),
+                      "param_importance": (d.input_summary or {}).get("param_importance"),
+                      "at": d.created_at.isoformat(timespec="seconds") if d.created_at else None}
+                     for d in (s.query(AgentDecision).join(Run, Run.id == AgentDecision.run_id)
+                               .filter(Run.task_id == task_id).order_by(AgentDecision.round_no).all())]
         return {"id": t.id, "uid": t.uid, "name": t.name, "source": t.source, "status": t.status,
                 "base_model": t.base_model, "train_args": t.train_args, "agent_config": t.agent_config,
-                "agent_state": (t.agent_config or {}).get("state"), "runs": runs}
+                "agent_state": (t.agent_config or {}).get("state"), "runs": runs, "decisions": decisions}
 
 
 def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
@@ -168,11 +176,13 @@ def get_run(manager, uid: str) -> dict:
             eta_seconds = max(int(avg * max(total - done_epochs, 0)), 0)
         return {"uid": r.uid, "task_id": r.task_id, "task_name": task.name if task else "",
                 "task_type": _dataset_meta_of_task(task).get("task_type") if task else None,
-                "round_no": r.round_no, "status": r.status, "primary_metric": r.primary_metric,
+                "round_no": r.round_no, "status": r.status, "pruned": bool(r.pruned),
+                "primary_metric": r.primary_metric,
                 "metrics": metrics, "run_dir": r.run_dir,
                 "started_at": r.started_at.isoformat(timespec="seconds") if r.started_at else None,
                 "eta_seconds": eta_seconds,
                 "progress": manager.current_progress.get(r.id),
+                "snapshot": load_snapshot(r.run_dir) if r.run_dir else None,
                 "artifacts": {"best_pt": r.best_pt, "last_pt": r.last_pt,
                               "training_log": str(run_dir / "training.log") if run_dir else None,
                               "results_csv": str(run_dir / "results.csv") if run_dir else None}}
@@ -213,6 +223,86 @@ def resume_run(manager, uid: str) -> str:
         raise _http_err("not_found", f"Run 不存在：{uid}", 404)
     except ValueError as exc:
         raise _http_err("state_conflict", str(exc), 409)
+
+
+def retry_run(manager, uid: str) -> dict:
+    """失败 Retry（M7 03 号票）：以该 Run 快照冻结的参数从头重开新 Task。
+
+    语义区分：Retry = 相同参数从头重跑（新 Task，原样保留）；续训 = last.pt 继续（同 Task）。
+    参数源优先运行快照（Agent 轮即该轮真实生效值），无快照回退 task.train_args。
+    """
+    from .params import FIRST_CLASS, validate_extra_args
+    from visiontrainer.db.models import Run, Task
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if run.status not in ("failed", "cancelled"):
+            raise _http_err("state_conflict", f"仅失败/已取消的 Run 可重开（当前 {run.status}）", 409)
+        task = s.get(Task, run.task_id)
+        base_model = task.base_model
+        task_name = task.name
+        args = ((load_snapshot(run.run_dir) or {}).get("train_args") if run.run_dir else None) \
+            or dict(task.train_args or {})
+
+    snap = load_snapshot(run.run_dir) if run.run_dir else None
+    dataset = Path(snap["dataset_dir"]).name if snap and snap.get("dataset_dir") else _dataset_meta_of_task(task).get("name")
+    manifest_id = (snap or {}).get("split_manifest", {}).get("uid") if snap else None
+    if not dataset:
+        raise _http_err("state_conflict", "无法还原数据集（快照缺失且任务元数据不可用）", 409)
+
+    first = {k: args.get(k) for k in ("epochs", "imgsz", "batch", "device", "workers", "seed", "patience")
+             if args.get(k) is not None}
+    extra = {k: v for k, v in args.items() if k not in FIRST_CLASS}
+    applied, errors = validate_extra_args(extra)
+    if errors:
+        raise _http_err("invalid_args", "快照参数校验失败: " + "; ".join(errors), 400)
+
+    return create_task(manager, name=f"{task_name}·重开", base_model=base_model, dataset=dataset,
+                       manifest_id=manifest_id, agent=None, extra_args=applied or None, **first)
+
+
+def estimate_training_time(manager) -> dict | None:
+    """时长预估（M7 02 号票）：历史已完成 Run 的每 epoch 秒数中位数。无样本返回 None。"""
+    import statistics
+
+    from sqlalchemy import func as sa_func
+    from visiontrainer.db.models import EpochMetric, Run
+
+    with manager.Session() as s:
+        rows = (s.query(Run, sa_func.count(EpochMetric.epoch))
+                .join(EpochMetric, EpochMetric.run_id == Run.id)
+                .filter(Run.status == "done", Run.started_at.isnot(None), Run.finished_at.isnot(None))
+                .group_by(Run.id).all())
+        rates = []
+        for run, n_epochs in rows:
+            n = int(n_epochs)
+            if n <= 0 or not run.started_at or not run.finished_at:
+                continue
+            dur = (run.finished_at - run.started_at).total_seconds()
+            if dur > 0 and dur < 7 * 24 * 3600:  # 剔除停机误计（收养 Run 时长可能虚大）
+                rates.append(dur / n)
+    if not rates:
+        return None
+    med = statistics.median(rates)
+    return {"seconds_per_epoch": round(med, 1), "samples": len(rates)}
+
+
+def run_gpu_samples(manager, uid: str) -> list[dict]:
+    """Run 的 GPU 采样序列（M7 01 号票）；首样本时刻归零，便于多 Run 对齐。"""
+    from visiontrainer.db.models import GPUSample, Run
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        rows = (s.query(GPUSample).filter(GPUSample.run_id == run.id).order_by(GPUSample.ts).all())
+    if not rows:
+        return []
+    t0 = rows[0].ts
+    return [{"t": round(r.ts - t0, 1), "util": r.util, "mem_used": r.mem_used,
+             "mem_total": r.mem_total, "temp": r.temp} for r in rows]
 
 
 _ANSI_RE = None  # 惰性编译（import 期省启动）
@@ -283,6 +373,7 @@ def compare_runs(manager, task_id: int) -> dict:
         primary_key = PRIMARY_BY_TASK.get(task_type or "", "")
         metric_keys = ("metrics/mAP50(B)", "metrics/mAP50-95(B)", "metrics/mAP50-95(P)", "metrics/accuracy_top1")
         rounds = []
+        base_args: dict | None = None  # 首轮快照参数 = 任务基线；后续轮 diff 于此（M6 06 号票）
         for r in s.query(Run).filter(Run.task_id == task_id).order_by(Run.round_no).all():
             best_val, best_epoch, curve = None, None, []
             for m in s.query(EpochMetric).filter(EpochMetric.run_id == r.id).order_by(EpochMetric.epoch).all():
@@ -293,12 +384,37 @@ def compare_runs(manager, task_id: int) -> dict:
                 if v is not None and (best_val is None or v > best_val):
                     best_val, best_epoch = float(v), m.epoch
                 curve.append({"epoch": m.epoch, "primary": v})
+            snap = load_snapshot(r.run_dir) if r.run_dir else None
+            args = (snap or {}).get("train_args")
+            if args is not None and base_args is None:
+                base_args = args
+            changes = {}
+            if args is not None and base_args is not None:
+                changes = {k: v for k, v in args.items() if base_args.get(k) != v}
+                changes.update({k: None for k in base_args if k not in args})
             rounds.append({"uid": r.uid, "round_no": r.round_no, "status": r.status,
+                           "pruned": bool(r.pruned),
                            "primary_metric": r.primary_metric, "best_epoch": best_epoch,
-                           "best_val": best_val, "curve": curve})
-        # train_args 每轮同源；真正分轮的超参变更记录在 agent_config.history，这里展示任务级参数
+                           "best_val": best_val, "curve": curve,
+                           "split_uid": (snap or {}).get("split_manifest", {}).get("uid"),
+                           "args_changes": changes})
+        # M7：任务内跨轮显存对比（有采样才带）+ 参数重要性（同数据集/基模型全量 Run 统计）
+        gpu_curves = []
+        for r in rounds:
+            samples = run_gpu_samples(manager, r["uid"])
+            if samples:
+                stride = max(len(samples) // 120, 1)
+                gpu_curves.append((f"轮 {r['round_no']}",
+                                   [[p["t"], p["mem_used"]] for p in samples[::stride]]))
+        meta = _dataset_meta_of_task(task)
+        from ..agent.importance import compute_importance
+
+        importance = compute_importance(manager.Session, dataset=meta.get("name"),
+                                        base_model=task.base_model)
+        # 任务级参数取展示口径（任务当前值）；各轮真实生效参数以快照 args_changes 为准
         return {"task": {"id": task.id, "uid": task.uid, "name": task.name, "task_type": task_type},
-                "rounds": rounds, "train_args": task.train_args}
+                "rounds": rounds, "train_args": task.train_args,
+                "gpu_curves": gpu_curves or None, "param_importance": importance}
 
 
 def compare_tasks(manager, task_ids: list[int]) -> dict:
@@ -318,15 +434,34 @@ def compare_tasks(manager, task_ids: list[int]) -> dict:
                 if best_run.primary_metric is not None:
                     best = best_run
             curve = []
+            metrics_summary: dict[str, dict] = {}
             if best is not None:
-                curve = [{"epoch": m.epoch, "primary": ((m.metrics or {}).get("metrics") or {}).get(
-                    _primary_key_of_task(t))} for m in
-                    s.query(EpochMetric).filter(EpochMetric.run_id == best.id)
-                    .order_by(EpochMetric.epoch).all()]
+                series = [{"epoch": m.epoch, **(m.metrics or {})}
+                          for m in s.query(EpochMetric).filter(EpochMetric.run_id == best.id)
+                          .order_by(EpochMetric.epoch).all()]
+                flat = []
+                for m in series:
+                    mm = m.get("metrics") or {}
+                    flat.append({"epoch": m["epoch"], **mm})
+                curve = [{"epoch": m["epoch"], "primary": m.get(_primary_key_of_task(t))}
+                         for m in flat]
+                # M8 06 号票：指标表 Best/Last/Min/Max——最优 Run 的逐指标四值
+                keys: list[str] = []
+                for m in flat:
+                    for k in m:
+                        if k != "epoch" and k not in keys:
+                            keys.append(k)
+                for k in keys:
+                    vals = [m[k] for m in flat if isinstance(m.get(k), (int, float))]
+                    if not vals:
+                        continue
+                    metrics_summary[k] = {"best": max(vals), "last": vals[-1],
+                                          "min": min(vals), "max": max(vals)}
             items.append({"id": t.id, "uid": t.uid, "name": t.name, "status": t.status,
                           "base_model": t.base_model, "runs": len(runs), "train_args": t.train_args or {},
                           "best_run_uid": best.uid if best is not None else None,
                           "best_primary_metric": best.primary_metric if best else None,
+                          "metrics_summary": metrics_summary,
                           "curve": curve})
         items.sort(key=lambda x: -(x["best_primary_metric"] or 0))
         return {"tasks": items}
@@ -342,6 +477,294 @@ def _first_present(metrics: dict) -> float | None:
         if k in metrics:
             return float(metrics[k])
     return None
+
+
+# ---------------------------------------------------------------- M8：错误分析
+
+def _analysis_payload(manager, run, task) -> dict:
+    snap = load_snapshot(run.run_dir) if run.run_dir else None
+    sm = (snap or {}).get("split_manifest") or {}
+    val_images = sm.get("val") or []
+    if not val_images:
+        raise _http_err("state_conflict", "运行快照缺少 val 清单（旧 Run 请重跑后再分析）", 409)
+    best = run.best_pt or (str(Path(run.run_dir) / "weights" / "best.pt") if run.run_dir else None)
+    if not best or not Path(best).exists():
+        raise _http_err("state_conflict", "best.pt 不在（训练未产出权重），无法分析", 409)
+    derived = Path(task.dataset_manifest_path).parent
+    labels_dir = derived / "labels" / "val"
+    if not labels_dir.is_dir():
+        raise _http_err("state_conflict", f"派生 val 标签目录缺失：{labels_dir}", 409)
+    classes = ((snap or {}).get("classes") or {}).get("list") or []
+    if not classes:
+        raise _http_err("state_conflict", "快照缺类别表，无法分析", 409)
+    return {"run_dir": run.run_dir, "best_pt": str(best), "val_images": val_images,
+            "labels_dir": str(labels_dir), "classes": classes,
+            "imgsz": int(((snap or {}).get("train_args") or {}).get("imgsz") or 640),
+            "conf_min": 0.01}  # 低置信度采集：阈值后验扫描（04 号票）依赖全量框
+
+
+def run_error_analysis(manager, uid: str, progress=None) -> dict:
+    """跑错误分析（M8 01 号票，长操作）：训练 venv 推理 → 平台贪心匹配入库 → 渲染叠加图 → 汇总。"""
+    from .error_analysis import greedy_match, render_overlay, run_analysis_subprocess, summarize, sweep_thresholds
+    from visiontrainer.db.models import RunSampleError
+
+    with manager.Session() as s:
+        from visiontrainer.db.models import Run, Task
+
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if run.status != "done":
+            raise _http_err("state_conflict", f"仅已完成的 Run 可分析（当前 {run.status}）", 409)
+        task = s.get(Task, run.task_id)
+        payload = _analysis_payload(manager, run, task)
+        rid = run.id
+
+    run_analysis_subprocess(manager.s.training_python, manager.s.analysis_entry, payload,
+                            Path(payload["run_dir"]) / "analysis" / "entry.log")
+
+    # ingest：predictions.jsonl → 匹配 → 入库 + 叠加渲染 + 汇总
+    preds_path = Path(payload["run_dir"]) / "analysis" / "predictions.jsonl"
+    rows, overlays, all_records = [], [], []
+    gt_areas: list[float] = []
+    images = [ln for ln in preds_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    for i, line in enumerate(images):
+        if progress is not None:
+            progress(i + 1, len(images))
+        rec = json.loads(line)
+        if "progress" in rec or rec.get("error"):
+            continue
+        records = greedy_match(rec["gt"], rec["pred"])
+        all_records.extend({"image": rec["image"], **r} for r in records)
+        for g in rec["gt"]:
+            x0, y0, x1, y1 = g["xyxy"]
+            gt_areas.append(max((x1 - x0) * (y1 - y0), 0.0))
+        try:
+            overlays.append((rec["image"], str(render_overlay(
+                rec["image"], records,
+                Path(payload["run_dir"]) / "analysis" / "overlays" / f"{Path(rec['image']).stem}.jpg"))))
+        except OSError:
+            pass
+    with manager.Session() as s:
+        s.query(RunSampleError).filter(RunSampleError.run_id == rid).delete()
+        for r in all_records:
+            s.add(RunSampleError(run_id=rid, image=r["image"], kind=r["kind"], cls_gt=r["cls_gt"],
+                                 cls_pred=r["cls_pred"], conf=r["conf"], iou=r["iou"],
+                                 box={"gt": r["gt"], "pred": r["pred"]}))
+        s.commit()
+    summary = summarize(all_records, payload["classes"], gt_areas)
+    sweep = sweep_thresholds(all_records)
+    (Path(payload["run_dir"]) / "analysis" / "summary.json").write_text(
+        json.dumps({"summary": summary, "sweep": sweep}, ensure_ascii=False, indent=2), encoding="utf-8")
+    return get_error_analysis(manager, uid)
+
+
+def get_error_analysis(manager, uid: str) -> dict | None:
+    """读错误分析（M8）：summary.json + DB 逐框记录聚合（最差榜 / 混淆矩阵）。"""
+    from visiontrainer.db.models import Run, RunSampleError
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        spath = Path(run.run_dir) / "analysis" / "summary.json" if run.run_dir else None
+        if not spath or not spath.is_file():
+            return None
+        data = json.loads(spath.read_text(encoding="utf-8"))
+        rows = (s.query(RunSampleError).filter(RunSampleError.run_id == run.id).all())
+        run_dir = run.run_dir
+
+    classes = (data.get("summary") or {}).get("classes") or []
+    overlays_dir = Path(run_dir) / "analysis" / "overlays"
+    # 最差样本榜（错框数降序，附叠加图路径）
+    per_img: dict[str, dict] = {}
+    for r in rows:
+        e = per_img.setdefault(r.image, {"image": r.image, "fp": 0, "fn": 0, "confusion": 0, "tp": 0})
+        if r.kind in ("fp", "fn", "confusion", "tp"):
+            e[r.kind] += 1
+    worst = sorted(per_img.values(), key=lambda e: -(e["fp"] + e["fn"] + e["confusion"]))[:10]
+    for e in worst:
+        e["score"] = e["fp"] + e["fn"] + e["confusion"]
+        cand = overlays_dir / f"{Path(e['image']).stem}.jpg"
+        e["overlay"] = str(cand) if cand.exists() else None
+    # 混淆矩阵（含背景行/列：行 = GT，列 = Pred）
+    axis = classes + ["背景"]
+    idx = {c: i for i, c in enumerate(axis)}
+    matrix = [[0] * len(axis) for _ in axis]
+    for r in rows:
+        g = r.cls_gt if r.kind in ("tp", "confusion", "fn") else "背景"
+        p = r.cls_pred if r.kind in ("tp", "confusion", "fp") else "背景"
+        if g in idx and p in idx:
+            matrix[idx[g]][idx[p]] += 1
+    return {"run_uid": uid, "summary": data.get("summary"), "sweep": data.get("sweep"),
+            "worst": worst, "matrix": {"axis": axis, "cells": matrix},
+            "n_records": len(rows)}
+
+
+def analysis_cell(manager, uid: str, gt_cls: str, pred_cls: str) -> list[dict]:
+    """混淆矩阵点格下钻（M8 02 号票）：该 (GT, Pred) 格贡献的逐框记录。"""
+    from visiontrainer.db.models import Run, RunSampleError
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        rows = s.query(RunSampleError).filter(RunSampleError.run_id == run.id).all()
+
+    def in_cell(r) -> bool:
+        g = r.cls_gt if r.kind in ("tp", "confusion", "fn") else "背景"
+        p = r.cls_pred if r.kind in ("tp", "confusion", "fp") else "背景"
+        return g == gt_cls and p == pred_cls
+
+    out = []
+    for r in rows:
+        if not in_cell(r):
+            continue
+        out.append({"image": r.image, "kind": r.kind, "cls_gt": r.cls_gt, "cls_pred": r.cls_pred,
+                    "conf": r.conf, "iou": r.iou, "box": r.box})
+    out.sort(key=lambda e: (e["image"], -(e.get("conf") or 0)))
+    return out
+
+
+def export_relabel_list(manager, uid: str) -> dict:
+    """导出 FN/FP 改标清单（M8 02 号票）：markdown 落 Run 目录，返回清单供 UI 逐项打开。"""
+    from visiontrainer.db.models import Run, RunSampleError
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        rows = (s.query(RunSampleError)
+                .filter(RunSampleError.run_id == run.id, RunSampleError.kind.in_(("fn", "fp", "confusion")))
+                .order_by(RunSampleError.image).all())
+        run_dir = run.run_dir
+    if not run_dir:
+        raise _http_err("state_conflict", "Run 无运行目录", 409)
+    entries = []
+    for r in rows:
+        entries.append({"image": r.image, "kind": r.kind,
+                        "cls": r.cls_gt if r.kind == "fn" else r.cls_pred,
+                        "conf": r.conf})
+    lines = ["# FN/FP 改标清单", "",
+             f"- Run：{uid} · 共 {len(entries)} 项（FN=漏标/该标未标，FP=多检/误检，混淆=类别标错）",
+             "- 修法：在 X-AnyLabeling 中打开对应图片，按类型补框/删框/改类别", ""]
+    cur = None
+    for e in entries:
+        if e["image"] != cur:
+            cur = e["image"]
+            lines.append(f"## {Path(cur).name}")
+            lines.append(f"路径：{cur}")
+            lines.append("")
+        conf = f"（conf {e['conf']:.2f}）" if e.get("conf") is not None else ""
+        lines.append(f"- [{e['kind'].upper()}] {e['cls']}{conf}")
+    out = Path(run_dir) / "analysis" / "relabel_list.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return {"path": str(out), "entries": entries}
+
+
+def test_infer(manager, uid: str, image: str, conf: float = 0.25, iou: float = 0.45) -> dict:
+    """训后试跑（M8 05 号票）：按需导出 ONNX 缓存于 Run 目录 + 训练 venv 推理叠框。"""
+    import subprocess
+
+    if not image or not Path(image).exists():
+        raise _http_err("invalid_args", f"图片不存在：{image}", 400)
+    with manager.Session() as s:
+        from visiontrainer.db.models import Run, Task
+
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if run.status != "done":
+            raise _http_err("state_conflict", f"仅已完成的 Run 可试跑（当前 {run.status}）", 409)
+        best_pt = run.best_pt or (str(Path(run.run_dir) / "weights" / "best.pt") if run.run_dir else None)
+        if not best_pt or not Path(best_pt).exists():
+            raise _http_err("state_conflict", "best.pt 不在，无法试跑", 409)
+        task = s.get(Task, run.task_id)
+        imgsz = int((task.train_args or {}).get("imgsz") or 640)
+        out_dir = Path(run.run_dir) / "test_infer"
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result_path = out_dir / "result.json"
+    onnx_cache = out_dir / "model.onnx"
+    payload = {"pt": str(best_pt),
+               "onnx": str(onnx_cache) if onnx_cache.exists() else None,
+               "out_dir": str(out_dir), "images": [image],
+               "imgsz": imgsz, "conf": conf, "iou": iou}
+    # 入口内部：onnx 已存在则直接复用（缓存语义）；否则按需导出
+    if not onnx_cache.exists():
+        payload["onnx"] = None
+    pf = out_dir / "payload.json"
+    pf.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    with (out_dir / "entry.log").open("wb") as log:
+        proc = subprocess.run([manager.s.training_python, manager.s.test_infer_entry, str(pf)],
+                              stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                              timeout=600)
+    if proc.returncode != 0:
+        raise _http_err("state_conflict", f"试跑入口退出码 {proc.returncode}（见 test_infer/entry.log）", 500)
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------- M8 07：模型库管理
+
+def model_library(manager, model_lib_dir: str | None = None) -> dict:
+    """模型库目录视图：子目录 + 体积 + 时间 + 关联 Run/部署验证状态。
+
+    lib 目录优先取注入配置（API 层传 app.state.cfg），回退盘上 config。
+    """
+    from ..config import load_config
+    from visiontrainer.db.models import Deployment, Run, Task
+
+    lib = Path(model_lib_dir or load_config().get("training", {}).get(
+        "model_lib_dir", "~/Documents/x-anylabeling-models")).expanduser()
+    with manager.Session() as s:
+        deps = s.query(Deployment).order_by(Deployment.id.desc()).all()
+        run_ids = {d.run_id for d in deps}
+        runs = {r.id: r for r in s.query(Run).filter(Run.id.in_(run_ids)).all()} if run_ids else {}
+        tasks = {t.id: t for t in s.query(Task).filter(
+            Task.id.in_({r.task_id for r in runs.values()})).all()} if runs else {}
+    latest_id = deps[0].id if deps else None
+    by_dir = {d.model_lib_dir: d for d in deps}
+    items = []
+    if lib.is_dir():
+        for d in sorted(lib.iterdir()):
+            if not d.is_dir() or d.name.startswith(".") or d.name == "_template":
+                continue
+            size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            dep = by_dir.get(str(d))
+            run = runs.get(dep.run_id) if dep else None
+            task = tasks.get(run.task_id) if run else None
+            items.append({"name": d.name, "path": str(d), "size_mb": round(size / (1 << 20), 1),
+                          "mtime": datetime.fromtimestamp(d.stat().st_mtime).isoformat(timespec="seconds"),
+                          "run_uid": run.uid if run else None, "task_name": task.name if task else None,
+                          "verified": dep.verified if dep else None,
+                          "is_latest": bool(dep and dep.id == latest_id)})
+    return {"root": str(lib), "items": items}
+
+
+def delete_model_dir(manager, name: str, model_lib_dir: str | None = None) -> dict:
+    """清理模型目录（M8 07）：删目录 + 同步删除 deployments 记录（登记式删除）。"""
+    import shutil
+
+    from ..config import load_config
+    from visiontrainer.db.models import Deployment
+
+    if not name or "/" in name or ".." in name or name.startswith("."):
+        raise _http_err("invalid_args", f"非法目录名：{name!r}", 400)
+    lib = Path(model_lib_dir or load_config().get("training", {}).get(
+        "model_lib_dir", "~/Documents/x-anylabeling-models")).expanduser()
+    target = lib / name
+    if not target.is_dir():
+        raise _http_err("not_found", f"模型目录不存在：{target}", 404)
+    # 防越界：确认解析后仍在库内
+    if target.resolve().parent != lib.resolve():
+        raise _http_err("invalid_args", "目录不在模型库内，拒绝删除", 400)
+    n_dep = 0
+    with manager.Session() as s:
+        n_dep = s.query(Deployment).filter(Deployment.model_lib_dir == str(target)).delete()
+        s.commit()
+    shutil.rmtree(target, ignore_errors=True)
+    return {"deleted": name, "removed_deployments": n_dep}
 
 
 def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> dict:
@@ -361,16 +784,47 @@ def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> 
     if cm:
         charts.insert(0, cm)
 
+    # M8 03 号票：结构化错误统计进 LLM；报告固定加「下一步实验推荐」章节
+    analysis = None
+    try:
+        analysis = get_error_analysis(manager, uid)
+    except Exception:  # noqa: BLE001 — 无分析按现行为降级
+        analysis = None
+    error_stats = None
+    if analysis and analysis.get("summary"):
+        sm = analysis["summary"]
+        per_class = sm.get("per_class") or {}
+        error_stats = {
+            "counts": sm.get("counts"),
+            "precision_recall": {"P": sm.get("precision"), "R": sm.get("recall"), "F1": sm.get("f1")},
+            "top_confusions": sm.get("top_confusions"),
+            "high_fn_classes": sorted(
+                ({"class": c, "fn": v.get("fn", 0), "tp": v.get("tp", 0)} for c, v in per_class.items()
+                 if v.get("fn", 0) > v.get("tp", 0)), key=lambda x: -x["fn"])[:5],
+            "fp_fn_imbalance": {c: {"fp": v.get("fp", 0), "fn": v.get("fn", 0)}
+                                for c, v in per_class.items()
+                                if abs(v.get("fp", 0) - v.get("fn", 0)) >= 3},
+            "small_objects": sm.get("small_objects"),
+            "recommended_conf": (analysis.get("sweep") or {}).get("recommended_conf"),
+        }
+    instruction = ("基于指标与曲线图输出 markdown 复盘报告，包含：总体结论、指标解读、loss 分析、改进建议。中文输出。")
+    if error_stats:
+        instruction += (
+            "输入中的 error_stats 是逐框错误分析的结构化证据（Top 混淆/高 FN 类/失衡/小目标占比），"
+            "复盘必须引用这些数据说话。")
+    instruction += (" 报告固定以「## 下一步实验推荐」章节收尾：给出 1–3 条具体实验，"
+                    "每条含 超参改动（白名单内）/ 理由（引用指标或错误统计）/ 预期收益。")
+
     content: list[dict] = [{"type": "text", "text": json.dumps({
         "task_name": detail["task_name"], "round": detail["round_no"], "status": detail["status"],
         "primary_metric": detail["primary_metric"], "epochs": detail["metrics"],
+        **({"error_stats": error_stats} if error_stats else {}),
     }, ensure_ascii=False)}]
     for png in charts:
         content.append(_content_image(png))  # API 只认 base64 data URL，file:// 会 400
 
     messages = [
-        {"role": "system", "content": "你是 YOLO 训练复盘分析师。基于指标与曲线图输出 markdown 复盘报告，"
-                                      "包含：总体结论、指标解读、loss 分析、改进建议。中文输出。"},
+        {"role": "system", "content": "你是 YOLO 训练复盘分析师。" + instruction},
         {"role": "user", "content": content},
     ]
     own = client is None
@@ -430,7 +884,15 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
         if target.exists():
             raise _http_err("state_conflict", f"部署目录已存在：{target}", 409)
         display_name = f"{task.name} · {datetime.now():%m-%d}"
+        # M8 04 号票：阈值探索器建议优先（F1 最大点），无分析回退 train_args.conf
         conf = (task.train_args or {}).get("conf", 0.25)
+        try:
+            _ana = get_error_analysis(manager, uid)
+            rec = ((_ana or {}).get("sweep") or {}).get("recommended_conf")
+            if rec:
+                conf = rec
+        except Exception:  # noqa: BLE001 — 部署不被分析读取失败拖死
+            pass
         imgsz = (task.train_args or {}).get("imgsz", 640)
         deployment = Deployment(run_id=run.id, model_lib_dir=str(target),
                                 onnx_path=str(target / "model.onnx"), verified=False,
@@ -516,7 +978,7 @@ def list_deployments(manager) -> dict:
                 .join(Run, Deployment.run_id == Run.id)
                 .join(Task, Run.task_id == Task.id)
                 .order_by(Deployment.id.desc()).all())
-        items = [{"deployment_id": d.id, "run_uid": r.uid, "task_name": t.name,
+        items = [{"deployment_id": d.id, "run_uid": r.uid, "task_id": t.id, "task_name": t.name,
                   "model_lib_dir": d.model_lib_dir, "verified": d.verified,
                   "verification": d.verification or {},
                   "created_at": d.created_at.isoformat(timespec="seconds")} for d, r, t in rows]

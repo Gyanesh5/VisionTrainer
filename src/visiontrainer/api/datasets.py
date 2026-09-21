@@ -43,6 +43,11 @@ class ClassesBody(BaseModel):
     classes: list[str]
 
 
+class ExcludeBody(BaseModel):
+    files: list[str]
+    reason: str = ""
+
+
 @router.get("")
 def list_datasets():
     return svc.list_datasets()
@@ -92,6 +97,44 @@ def resplit_dataset(name: str, body: ResplitBody):
 def rename_classes(name: str, body: ClassesBody):
     try:
         return svc.rename_classes(name, body.classes)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.get("/{name}/stats")
+def dataset_stats(name: str):
+    """健康报告（M6）：无画像返回 null（UI 提示先重新校验）。"""
+    try:
+        return svc.dataset_stats(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.get("/{name}/audit")
+def cached_audit(name: str):
+    """体检报告缓存读（M6）：未体检过返回 null。"""
+    try:
+        return svc.cached_audit(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/audit")
+def run_audit(name: str):
+    """跑体检（M6，长操作）：指纹命中缓存秒回。"""
+    try:
+        return svc.run_quality_audit(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/exclude")
+def exclude_files(name: str, body: ExcludeBody):
+    """质量审计处置（M6）：从切分清单排除，生成新清单并切换活跃。"""
+    try:
+        m = svc.exclude_files(name, body.files, body.reason)
+        return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"]),
+                "excluded": len(m.get("excluded") or [])}
     except DatasetError as exc:
         return _error_response(exc)
 

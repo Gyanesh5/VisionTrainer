@@ -32,6 +32,14 @@ def _default_export_entry() -> str:
     return str(__import__("pathlib").Path(__file__).parent / "training" / "export_entry.py")
 
 
+def _default_analysis_entry() -> str:
+    return str(__import__("pathlib").Path(__file__).parent / "training" / "analysis_entry.py")
+
+
+def _default_test_infer_entry() -> str:
+    return str(__import__("pathlib").Path(__file__).parent / "training" / "test_infer_entry.py")
+
+
 def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     """构建应用（可注入配置；测试用 with_ui=False 并传入 stub 训练环境）。"""
     cfg = cfg or load_config()
@@ -40,6 +48,8 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         training_python=training.get("python", __import__("sys").executable),
         trainer_entry=training.get("trainer_entry", _default_trainer_entry()),
         export_entry=training.get("export_entry", _default_export_entry()),
+        analysis_entry=training.get("analysis_entry") or _default_analysis_entry(),
+        test_infer_entry=training.get("test_infer_entry") or _default_test_infer_entry(),
         runs_dir=__import__("pathlib").Path(training.get("runs_dir", "~/visiontrainer/runs")).expanduser(),
         check_occupancy=training.get("check_occupancy", True),
     )
@@ -53,11 +63,18 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         from .agent import tuner
 
         tuner.recover(manager)
+        # 启动自检（M6 07 号票）：不阻塞启动，问题落控制台并由 UI 呈现引导
+        from .core.selfcheck import log_summary, run_selfcheck
+
+        selfcheck_result = run_selfcheck(cfg)
+        app.state.selfcheck = selfcheck_result
+        log_summary(selfcheck_result)
         yield
 
     app = FastAPI(title="VisionTrainer", version="0.1.0", lifespan=lifespan)
     app.include_router(api_router, prefix="/api")
     app.state.manager = manager
+    app.state.cfg = cfg  # 自检等系统域按注入配置而非盘上 config.toml（测试可注入）
     set_manager(manager)
 
     @app.websocket("/ws/events")

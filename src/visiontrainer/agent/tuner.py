@@ -53,6 +53,11 @@ def _set_state(s, task, state: str) -> None:
     s.commit()
     publish_threadsafe({"type": "task.updated", "task_id": task.id, "status": task.status,
                         "agent_state": state})
+    if state == "waiting_approval":  # M7：审批请求桌面通知
+        from ..core.notify import desktop_notify
+
+        nxt = len(cfg.get("history") or []) + 2
+        desktop_notify("等待审批", f"「{task.name}」第 {nxt} 轮超参方案已就绪，去平台放行")
 
 
 def _get_state(Session, task_id: int) -> str:
@@ -160,6 +165,7 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
     history: list[dict] = list(cfg.get("history") or [])
     best: float | None = None
     no_improve = 0
+    prune = _prune_cfg_of(cfg)  # M7 烂轮早停：任务级覆盖 > 全局；manual 任务不进本循环天然不剪
 
     while not stop.is_set():
         cfg, done_rounds = load()
@@ -188,7 +194,7 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
                     s.commit()
                     queued = run.uid
             if queued:
-                _wait_run(manager, queued, stop)
+                _wait_run(manager, queued, stop, task_id=task_id, prune=prune)
                 continue
 
         # 3) 轮间决策
@@ -212,8 +218,8 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             set_state("done", {"stop_reason": "达到最大轮数"})
             return
 
-        # 4) LLM 决策（多模态；失败 → paused 等人）
-        decision, error = _decide(Session, task_id, objective, history, best)
+        # 4) LLM 决策（多模态；失败 → paused 等人）；参数重要性上下文随决策归档（M7 05 号票）
+        decision, error, importance = _decide(Session, task_id, objective, history, best)
         if error is not None:
             set_state("paused", {"pause_reason": error})
             continue
@@ -242,14 +248,15 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             s.flush()
             s.add(AgentDecision(run_id=run.id, round_no=run.round_no,
                                 input_summary={"objective": objective, "best_so_far": best,
-                                               "analysis": decision.get("analysis", "")},
+                                               "analysis": decision.get("analysis", ""),
+                                               "param_importance": importance},
                                 response=decision, changes=changes, clamps=clamps))
             s.commit()
             queued = run.uid
 
         set_state("running")
         if queued:
-            _wait_run(manager, queued, stop)
+            _wait_run(manager, queued, stop, task_id=task_id, prune=prune)
 
 
 def _await_verdict(Session, task_id: int, stop: threading.Event) -> str:
@@ -284,8 +291,82 @@ def _last_run(Session, task_id: int) -> dict | None:
                 "primary_metric": r.primary_metric}
 
 
-def _wait_run(manager, run_uid: str, stop: threading.Event, timeout: float = 3600.0) -> None:
+# ---------------------------------------------------------------- 烂轮早停（M7 07 号票）
+
+def _prune_check(manager, run_uid: str, task_id: int, delta: float) -> str:
+    """检查点评估：返回 wait（未到点）/ skip（已评无需剪）/ pruned（已剪枝并落证据）。"""
+    import statistics
+
+    from ..training.manager import extract_primary
+    from visiontrainer.db.models import EpochMetric, Run, Task
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == run_uid).one_or_none()
+        task = s.get(Task, task_id)
+        if run is None or task is None:
+            return "skip"
+        epochs = int((task.train_args or {}).get("epochs") or 0)
+        if epochs < 2:
+            return "skip"
+        ckpt = (epochs + 1) // 2
+        rec = (s.query(EpochMetric).filter(EpochMetric.run_id == run.id, EpochMetric.epoch >= ckpt)
+               .order_by(EpochMetric.epoch).first())
+        if rec is None:
+            return "wait"  # 还没跑到检查点，继续等
+        cur = extract_primary(rec.metrics.get("metrics") or {}) if isinstance(rec.metrics, dict) else None
+        if cur is None:
+            return "wait"
+
+        prior = [r.id for r in s.query(Run).filter(Run.task_id == task_id, Run.id != run.id,
+                                                   Run.status.in_(("done", "cancelled"))).all()]
+        values = []
+        for rid in prior:
+            m = (s.query(EpochMetric).filter(EpochMetric.run_id == rid, EpochMetric.epoch == rec.epoch)
+                 .order_by(EpochMetric.epoch).first())
+            if m is not None and isinstance(m.metrics, dict):
+                v = extract_primary(m.metrics.get("metrics") or {})
+                if v is not None:
+                    values.append(v)
+        if len(values) < 2:
+            return "skip"  # 历史不足 2 轮同期证据，保守不剪
+        med = statistics.median(values)
+        if cur >= med - delta:
+            return "skip"  # 未显著劣化
+
+        # 触发：标记 pruned + 优雅停止 + 证据入 agent_config（下一轮 LLM 可见）
+        run.pruned = True
+        s.commit()
+        evidence = {"round": run.round_no, "at_epoch": rec.epoch, "value": round(cur, 4),
+                    "baseline_median": round(med, 4), "delta": delta, "at": _now()}
+        cfg2 = dict(task.agent_config or {})
+        cfg2.setdefault("pruned_rounds", []).append(evidence)
+        task.agent_config = cfg2
+        s.commit()
+    manager.request_stop(run_uid)
+    from ..core.notify import desktop_notify
+
+    desktop_notify("烂轮已剪枝",
+                   f"「{task.name}」轮 {evidence['round']} 在 epoch {evidence['at_epoch']} 显著低于历史水位，已提前终止")
+    return "pruned"
+
+
+def _prune_cfg_of(task_cfg: dict) -> tuple[bool, float]:
+    """剪枝配置：任务级覆盖 > 全局 [agent]。默认保守开（δ=0.05）。"""
+    from ..config import load_config
+
+    g = load_config().get("agent", {})
+    enabled = bool(task_cfg.get("prune", g.get("prune_enabled", True)))
+    try:
+        delta = float(task_cfg.get("prune_delta", g.get("prune_delta", 0.05)))
+    except (TypeError, ValueError):
+        delta = 0.05
+    return enabled, max(delta, 0.0)
+
+
+def _wait_run(manager, run_uid: str, stop: threading.Event, timeout: float = 3600.0,
+              task_id: int | None = None, prune: tuple[bool, float] | None = None) -> None:
     deadline = time.time() + timeout
+    prune_state = "off" if not (prune and prune[0]) else "wait"
     while not stop.is_set() and time.time() < deadline:
         with manager.Session() as s:
             from visiontrainer.db.models import Run
@@ -293,6 +374,8 @@ def _wait_run(manager, run_uid: str, stop: threading.Event, timeout: float = 360
             r = s.query(Run).filter(Run.uid == run_uid).one_or_none()
             if r and r.status not in ("queued", "running", "stopping"):
                 return
+        if prune_state == "wait" and task_id is not None:
+            prune_state = _prune_check(manager, run_uid, task_id, prune[1])
         time.sleep(POLL)
 
 
@@ -314,8 +397,9 @@ def _append_history(Session, task_id: int, decision: dict, changes: dict, clamps
 # ---------------------------------------------------------------- LLM 决策
 
 def _decide(Session, task_id: int, objective: str, history: list[dict], best: float | None):
-    """多模态决策：指标 JSON + 渲染图 → LLM。返回 (decision, error)。"""
+    """多模态决策：指标 JSON + 渲染图 + 参数重要性/剪枝证据 → LLM。返回 (decision, error, importance)。"""
     from ..charts.render import confusion_matrix_png, render_run_charts
+    from ..agent.importance import compute_importance, render_context
     from visiontrainer.db.models import EpochMetric, Run, Task
 
     with Session() as s:
@@ -325,6 +409,13 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
                    s.query(EpochMetric).filter(EpochMetric.run_id == run.id)
                    .order_by(EpochMetric.epoch).all()]
         run_dir = run.run_dir
+        dataset = (Path(t.dataset_manifest_path).parent.parent.parent.name
+                   if t.dataset_manifest_path else None)
+        pruned_rounds = (t.agent_config or {}).get("pruned_rounds") or []
+
+    # 参数重要性（M7 05 号票）：同数据集+基模型的历史 Run 统计，注入决策上下文
+    importance = compute_importance(Session, dataset=dataset, base_model=t.base_model)
+    imp_text = render_context(importance)
 
     charts: list = []
     if run_dir:
@@ -338,8 +429,12 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
         "primary_metric_best": best,
         "history": history,
         "latest_metrics": metrics[-8:],
+        "param_importance": imp_text or "（历史 Run 不足，暂无参数重要性证据）",
+        "pruned_rounds": pruned_rounds,
         "instruction": "输出 JSON：{analysis, action: 'tune'|'stop', hyperparameters: {...}}；"
-                       "hyperparameters 只能包含白名单键；若无改进空间 action=stop。",
+                       "hyperparameters 只能包含白名单键；若无改进空间 action=stop。"
+                       "param_importance 是历史统计证据（相关非因果，样本少时弱参考），"
+                       "pruned_rounds 是被早停剪掉的烂轮事实。",
     }, ensure_ascii=False)}]
     for png in charts:
         content.append(_content_image(png))  # API 只认 base64 data URL，file:// 会 400
@@ -355,11 +450,11 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
             text = chat(messages, cfg=llm_config())
             decision = parse_json_loose(text)
             decision.setdefault("action", "tune")
-            return decision, None
+            return decision, None, importance
         except LLMError as exc:
             if attempt == 0:
                 messages.append({"role": "assistant", "content": text})
                 messages.append({"role": "user", "content": f"上次输出不合法：{exc}。请重新只输出 JSON。"})
                 continue
-            return None, str(exc)
-    return None, "决策失败"
+            return None, str(exc), importance
+    return None, "决策失败", importance

@@ -38,6 +38,8 @@ class AgentConfig(BaseModel):
     max_rounds: int = 5
     approval: str = "manual"
     objective: str = ""
+    prune: bool | None = None       # M7 烂轮早停：任务级覆盖（None=跟随全局 [agent].prune_enabled）
+    prune_delta: float | None = None
 
 
 class TaskCreateBody(BaseModel):
@@ -126,6 +128,74 @@ def stop_run(uid: str, request: Request):
 @_maps_errors
 def resume_run(uid: str, request: Request):
     return {"new_run_uid": tsvc.resume_run(_manager(request), uid)}
+
+
+@router.post("/runs/{uid}/retry")
+@_maps_errors
+def retry_run(uid: str, request: Request):
+    """失败 Retry（M7）：以该 Run 快照参数从头重开新 Task（区别于 resume=last.pt 续训）。"""
+    return tsvc.retry_run(_manager(request), uid)
+
+
+@router.get("/runs/{uid}/gpu")
+@_maps_errors
+def run_gpu(uid: str, request: Request):
+    """GPU 采样序列（M7）：[{t, util, mem_used, mem_total, temp}]，首样本归零。"""
+    return {"samples": tsvc.run_gpu_samples(_manager(request), uid)}
+
+
+@router.get("/runs/{uid}/analysis")
+@_maps_errors
+def get_analysis(uid: str, request: Request):
+    """错误分析读（M8 01）：summary/最差榜/混淆矩阵；未分析返回 null。"""
+    return tsvc.get_error_analysis(_manager(request), uid)
+
+
+@router.post("/runs/{uid}/analysis")
+@_maps_errors
+def run_analysis(uid: str, request: Request):
+    """跑错误分析（M8 01，长操作）：best.pt 对 val 逐图推理 + IoU 贪心匹配入库。"""
+    return tsvc.run_error_analysis(_manager(request), uid)
+
+
+@router.post("/runs/{uid}/analysis/export")
+@_maps_errors
+def export_relabel(uid: str, request: Request):
+    """导出 FN/FP 改标清单（M8 02）：markdown 落 Run 目录。"""
+    return tsvc.export_relabel_list(_manager(request), uid)
+
+
+@router.get("/runs/{uid}/analysis/cell")
+@_maps_errors
+def analysis_cell(uid: str, request: Request, gt: str = "", pred: str = ""):
+    """混淆矩阵点格下钻（M8 02）：该 (GT, Pred) 格的逐框记录。"""
+    return {"entries": tsvc.analysis_cell(_manager(request), uid, gt or "背景", pred or "背景")}
+
+
+@router.post("/runs/{uid}/test-infer")
+@_maps_errors
+def test_infer(uid: str, request: Request, body: dict | None = None):
+    """训后试跑（M8 05）：按需导出 ONNX + 叠框可视化（训练 venv 执行）。"""
+    body = body or {}
+    return tsvc.test_infer(_manager(request), uid, body.get("image", ""),
+                           conf=float(body.get("conf") or 0.25), iou=float(body.get("iou") or 0.45))
+
+
+@router.get("/model-library")
+def model_library(request: Request):
+    """模型库目录视图（M8 07）。"""
+    cfg = getattr(request.app.state, "cfg", {}) or {}
+    return tsvc.model_library(_manager(request),
+                              cfg.get("training", {}).get("model_lib_dir"))
+
+
+@router.delete("/model-library/{name}")
+@_maps_errors
+def delete_model_dir(name: str, request: Request):
+    """模型库清理（M8 07）：删目录同步 deployments 记录。"""
+    cfg = getattr(request.app.state, "cfg", {}) or {}
+    return tsvc.delete_model_dir(_manager(request), name,
+                                 cfg.get("training", {}).get("model_lib_dir"))
 
 
 @router.post("/runs/{uid}/deploy")

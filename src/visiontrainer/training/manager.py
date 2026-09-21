@@ -25,6 +25,51 @@ from ..ws import publish_threadsafe
 
 RUNNING_STATES = {"running", "stopping"}
 
+GPU_SAMPLE_INTERVAL = 8.0  # 秒（spec 5–10s 一档）
+
+_nvml_state: dict = {"inited": False, "ok": False, "count": 0}
+
+
+def gpu_sample_once(device_index: int = 0) -> dict | None:
+    """单次 pynvml 采样 {util, mem_used, mem_total, temp}；不可用/无该卡 → None（首次失败永久降级）。"""
+    if not _nvml_state["inited"]:
+        _nvml_state["inited"] = True
+        try:
+            import pynvml
+
+            pynvml.nvmlInit()
+            _nvml_state["ok"] = True
+            _nvml_state["count"] = pynvml.nvmlDeviceGetCount()
+        except Exception:
+            _nvml_state["ok"] = False
+    if not _nvml_state["ok"] or device_index >= _nvml_state["count"]:
+        return None
+    try:
+        import pynvml
+
+        h = pynvml.nvmlDeviceGetHandleByIndex(device_index)
+        util = pynvml.nvmlDeviceGetUtilizationRates(h)
+        mem = pynvml.nvmlDeviceGetMemoryInfo(h)
+        return {"util": float(util.gpu),
+                "mem_used": mem.used / (1 << 20), "mem_total": mem.total / (1 << 20),
+                "temp": float(pynvml.nvmlDeviceGetTemperature(h, pynvml.NVML_TEMPERATURE_GPU))}
+    except Exception:
+        return None
+
+
+def device_index_of(device: object) -> int | None:
+    """train_args.device → 采样卡号；cpu/多卡/无解析 → None（不采样）。"""
+    if device is None:
+        return 0
+    s = str(device).strip()
+    if not s or s.lower() == "cpu":
+        return None
+    head = s.split(",")[0].strip()
+    try:
+        return int(head)
+    except ValueError:
+        return 0
+
 
 def new_uid() -> str:
     return uuid.uuid4().hex[:8]
@@ -80,6 +125,8 @@ class ManagerSettings:
     trainer_entry: str
     runs_dir: Path
     export_entry: str = ""
+    analysis_entry: str = ""   # M8 错误分析入口（空 = 包内默认）
+    test_infer_entry: str = ""  # M8 训后试跑入口（空 = 包内默认）
     poll_interval: float = 1.0
     stop_timeout: float = 10.0
     tail_interval: float = 0.5
@@ -95,6 +142,8 @@ class CurrentRun:
     proc: object
     stop_requested: bool = False
     metrics_offset: int = 0
+    gpu_device: int | None = None   # None = 不采样（cpu/解析失败）
+    last_gpu: float = 0.0
     watchdog: threading.Thread | None = field(default=None, repr=False)
 
 
@@ -257,6 +306,13 @@ class TrainingManager:
         payload_path = run_dir / "payload.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
+        # 运行快照（M6 06 号票）：启动即冻结训练输入，随产物归档；数据集此后变动不影响本 Run 查证
+        from .snapshot import build_snapshot, save_snapshot
+
+        save_snapshot(run_dir, build_snapshot(
+            run_uid=run.uid, round_no=run.round_no, base_model=task.base_model,
+            train_args=task.train_args or {}, data_yaml=task.dataset_manifest_path or ""))
+
         log_f = (run_dir / "training.log").open("wb")
         proc = SubprocessHandle([self.s.training_python, self.s.trainer_entry, str(payload_path)], log_f)
 
@@ -264,7 +320,9 @@ class TrainingManager:
             run = s.get(Run, run_id)
             run.pid = proc.pid
             s.commit()
-            self.current = CurrentRun(run_id=run_id, uid=run.uid, task_id=run.task_id, pid=proc.pid, proc=proc)
+            self.current = CurrentRun(run_id=run_id, uid=run.uid, task_id=run.task_id, pid=proc.pid,
+                                      proc=proc, gpu_device=device_index_of((task.train_args or {}).get("device")),
+                                      last_gpu=time.time())
             self._aggregate(s, run.task_id)
 
         w = threading.Thread(target=self._watchdog, args=(self.current,), daemon=True, name=f"watch-{run.uid}")
@@ -279,17 +337,40 @@ class TrainingManager:
         """孤儿收养：进程还活着，重建监控（不重启进程）。"""
         with self.Session() as s:
             run = s.get(Run, run_id)
+            task = s.get(Task, run.task_id)
             proc = ExternalProc(run.pid)
             run.status = "running"
             s.commit()
             self.current = CurrentRun(run_id=run_id, uid=run.uid, task_id=run.task_id,
                                       pid=run.pid, proc=proc,
+                                      gpu_device=device_index_of((task.train_args or {}).get("device")),
+                                      last_gpu=time.time(),
                                       metrics_offset=(Path(run.run_dir) / "metrics.jsonl").stat().st_size
                                       if run.run_dir and (Path(run.run_dir) / "metrics.jsonl").exists() else 0)
         w = threading.Thread(target=self._watchdog, args=(self.current,), daemon=True, name=f"adopt-{run.uid}")
         self.current.watchdog = w
         w.start()
         publish_threadsafe({"type": "run.status", "run_uid": run.uid, "status": "running", "error": None})
+
+    def _tail_metrics(self, cur: CurrentRun, metrics_path) -> None:
+        """增量 tail 指标文件（offset 记忆）；进程退出后的收尾排水也复用本方法。"""
+        if not metrics_path or not metrics_path.exists():
+            return
+        with metrics_path.open("r", encoding="utf-8") as f:
+            f.seek(cur.metrics_offset)
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if "progress" in rec:
+                    self._record_progress(cur, rec)
+                elif "metrics" in rec:
+                    self._record_metric(cur, rec)
+            cur.metrics_offset = f.tell()
 
     def _watchdog(self, cur: CurrentRun) -> None:
         metrics_path = None
@@ -300,22 +381,16 @@ class TrainingManager:
 
         while True:
             # 1) tail 指标文件（回调逐行追加）
-            if metrics_path and metrics_path.exists():
-                with metrics_path.open("r", encoding="utf-8") as f:
-                    f.seek(cur.metrics_offset)
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if "progress" in rec:
-                            self._record_progress(cur, rec)
-                        elif "metrics" in rec:
-                            self._record_metric(cur, rec)
-                    cur.metrics_offset = f.tell()
+            self._tail_metrics(cur, metrics_path)
+
+            # 1.5) GPU 周期采样（M7 01 号票）：与 tail 同循环，不另起线程
+            if cur.gpu_device is not None and time.time() - cur.last_gpu >= GPU_SAMPLE_INTERVAL:
+                cur.last_gpu = time.time()
+                sample = gpu_sample_once(cur.gpu_device)
+                if sample is not None:
+                    with self.Session() as s:
+                        s.add(GPUSample(run_id=cur.run_id, ts=cur.last_gpu, **sample))
+                        s.commit()
 
             # 2) 停止请求：以 DB 状态为准（单一数据源，消除 attach/stop 竞态）
             with self.Session() as s:
@@ -336,7 +411,9 @@ class TrainingManager:
                 time.sleep(self.s.tail_interval)
                 continue
 
-            # 4) 进程退出 → 终态
+            # 4) 进程退出 → 终态。退出前最后一次排水：两次 poll 之间写入的行不丢
+            #    （GPU 采样/首帧慢初始化等占掉一个循环时，尾部指标靠这里兜住）
+            self._tail_metrics(cur, metrics_path)
             self._finalize(cur, ret)
             return
 
@@ -400,11 +477,24 @@ class TrainingManager:
             status = run.status
             error = run.error
             task_id = run.task_id
+            primary = run.primary_metric
+            task = s.get(Task, task_id)
+            task_name = task.name if task else cur.uid
             self._aggregate(s, task_id)
         self.current = None
         publish_threadsafe({"type": "run.status", "run_uid": cur.uid, "status": status, "error": error})
         publish_threadsafe({"type": "task.updated", "task_id": task_id, "status": _task_status_of(s, task_id)})
         self._publish_queue(s)
+        # 桌面通知（M7 02 号票）：完成/失败；通知失败静默（不影响链路）
+        if status in ("done", "failed"):
+            from ..core.notify import desktop_notify
+
+            if status == "done":
+                desktop_notify("训练完成",
+                               f"「{task_name}」Run {cur.uid} 完成"
+                               + (f"，主指标 {primary:.3f}" if primary is not None else ""))
+            else:
+                desktop_notify("训练失败", f"「{task_name}」Run {cur.uid} 失败，详见运行详情")
 
     # ------------------------------------------------------------ 对外操作
 
@@ -585,4 +675,4 @@ def _now():
 
 
 # Run/Task 延迟导入避免循环（db.models 不依赖本模块）
-from visiontrainer.db.models import EpochMetric, Run, Task  # noqa: E402
+from visiontrainer.db.models import EpochMetric, GPUSample, Run, Task  # noqa: E402

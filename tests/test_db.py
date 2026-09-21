@@ -24,7 +24,8 @@ def test_init_db_creates_six_tables(tmp_path):
         assert s.query(AgentDecision).count() == 1
         assert s.query(Deployment).count() == 1
         row = s.execute(__import__("sqlalchemy").text("SELECT version FROM schema_version")).first()
-        assert row.version == 1
+        from visiontrainer.db.models import SCHEMA_VERSION
+        assert row.version == SCHEMA_VERSION
 
 
 def test_init_db_idempotent(tmp_path):
