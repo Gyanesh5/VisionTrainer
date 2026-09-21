@@ -1495,9 +1495,12 @@ def mount() -> None:
                     prog_bar = ui.linear_progress(0, show_value=False).props("size=6px color=blue")
                     if prog:
                         prog_bar.set_value(prog.get("epoch", 0) / max(prog.get("epochs_total") or 1, 1))
+                        _bt = prog.get("batches_total") or 0  # 总数未知不显示 /0
                         prog_label.set_text(
                             f"epoch {prog.get('epoch')}/{prog.get('epochs_total')} · "
-                            f"batch {prog.get('batch')}/{prog.get('batches_total')} · {_fmt_eta(run.get('eta_seconds'))}")
+                            f"batch {prog.get('batch', 0)}"
+                            + (f"/{_bt}" if _bt else "")
+                            + f" · {_fmt_eta(run.get('eta_seconds'))}")
                     else:
                         prog_bar.set_visibility(False)
                     with ui.row().classes("w-full gap-4 items-start flex-wrap"):
@@ -1846,9 +1849,12 @@ def mount() -> None:
                             if pg:
                                 prog_bar.set_visibility(True)
                                 prog_bar.set_value(pg.get("epoch", 0) / max(pg.get("epochs_total") or 1, 1))
+                                _bt = pg.get("batches_total") or 0  # 总数未知不显示 /0
                                 prog_label.set_text(
                                     f"epoch {pg.get('epoch')}/{pg.get('epochs_total')} · "
-                                    f"batch {pg.get('batch')}/{pg.get('batches_total')} · {_fmt_eta(r.get('eta_seconds'))}")
+                                    f"batch {pg.get('batch', 0)}"
+                                    + (f"/{_bt}" if _bt else "")
+                                    + f" · {_fmt_eta(r.get('eta_seconds'))}")
                             poll.n += 1
                             if poll.n % 4 == 0:
                                 _render_gpu()  # System 卡 ~4s 一刷（采样间隔 8s）

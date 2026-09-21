@@ -74,29 +74,45 @@ def main() -> None:
         append(rec)
 
     last_progress = 0.0
+    # 8.4.100 的 batch 循环下标是局部变量（回调拿不到 trainer.batch_idx）：按回调触发
+    # 次数自计、on_train_epoch_start 清零——比依赖内部属性跨版本稳
+    batch_counter: dict = {"n": 0, "total": 0}
+
+    def on_train_epoch_start(trainer) -> None:
+        batch_counter["n"] = 0
+        if not batch_counter["total"]:  # loader 建好后取一次即可（每 epoch 不变）
+            total = 0
+            try:
+                total = int(getattr(trainer, "num_batches", 0) or 0)
+            except Exception:
+                total = 0
+            if not total:
+                try:
+                    loader = getattr(trainer, "train_loader", None)
+                    if loader is not None:
+                        total = len(loader)  # 官方 _do_train 同款算法（nb）
+                except Exception:
+                    total = 0
+            batch_counter["total"] = total
 
     def on_train_batch_end(trainer) -> None:
         nonlocal last_progress
+        batch_counter["n"] += 1  # 节流只限写行，计数不受影响
         now = time.time()
         if now - last_progress < 1.0:  # 1Hz 节流（07 号票）
             return
         last_progress = now
-        try:
-            batches_total = int(trainer.num_batches or 0)
-            if not batches_total and getattr(trainer, "train_loader", None) is not None:
-                batches_total = len(trainer.train_loader)  # 8.4.x 兜底
-        except Exception:
-            batches_total = 0
         append({
             "progress": {
                 "epoch": int(trainer.epoch) + 1,
                 "epochs_total": int(trainer.epochs),
-                "batch": int(getattr(trainer, "batch_idx", 0) or 0) + 1,
-                "batches_total": batches_total,
+                "batch": batch_counter["n"],
+                "batches_total": batch_counter["total"],
             }
         })
 
     model.add_callback("on_fit_epoch_end", on_fit_epoch_end)
+    model.add_callback("on_train_epoch_start", on_train_epoch_start)
     model.add_callback("on_train_batch_end", on_train_batch_end)
     model.add_callback("on_train_start", on_train_start)
 

@@ -466,6 +466,54 @@ def test_force_stop_orphaned_stopping(training_client):
             proc.kill()
 
 
+def test_trainer_entry_progress_batch_counter(tmp_path):
+    """回归⑥（2026-09-21 batch 1/0）：8.4.100 无 num_batches/batch_idx 属性——
+    当前 batch 按回调触发次数自计，总数走 len(train_loader)（兜底不再是死代码）。"""
+    import subprocess
+
+    from visiontrainer.training import trainer_entry as te
+
+    fake = tmp_path / "fakelib2"
+    fake.mkdir()
+    (fake / "ultralytics.py").write_text(
+        "import time\n"
+        "class YOLO:\n"
+        "    def __init__(self, name):\n"
+        "        self.cbs = {}\n"
+        "    def add_callback(self, event, fn):\n"
+        "        self.cbs.setdefault(event, []).append(fn)\n"
+        "    def train(self, **kw):\n"
+        "        t = type('T', (), {})()\n"
+        "        t.epochs = 1\n"
+        "        t.epoch = 0\n"
+        "        t.train_loader = ['b'] * 5  # 官方 _do_train 同款：nb = len(train_loader) = 5\n"
+        "        # 刻意不设 num_batches / batch_idx（8.4.100 真实形态）\n"
+        "        for fn in self.cbs.get('on_train_start', []):\n"
+        "            fn(t)\n"
+        "        for fn in self.cbs.get('on_train_epoch_start', []):\n"
+        "            fn(t)\n"
+        "        for _i in range(3):\n"
+        "            time.sleep(1.05)  # 跨过 1Hz 节流，每个 batch 都应写出进度行\n"
+        "            for fn in self.cbs.get('on_train_batch_end', []):\n"
+        "                fn(t)\n",
+        encoding="utf-8")
+    run_dir = tmp_path / "run"
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps({"run_dir": str(run_dir), "base_model": "m",
+                                   "data_yaml": "d.yaml", "args": {"epochs": 1}}), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(fake)}
+    proc = subprocess.run([sys.executable, te.__file__, str(payload)], env=env,
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+    assert proc.returncode == 0, "fake 训练应正常退出"
+    lines = [json.loads(x) for x in
+             (run_dir / "metrics.jsonl").read_text(encoding="utf-8").splitlines() if x.strip()]
+    progs = [x["progress"] for x in lines if "progress" in x]
+    assert progs, "应有进度行写出"
+    assert [p["batch"] for p in progs] == [1, 2, 3], f"batch 应按回调次数自计：{progs}"
+    assert all(p["batches_total"] == 5 for p in progs), f"总数应取 len(train_loader)：{progs}"
+    assert all(p["epoch"] == 1 and p["epochs_total"] == 1 for p in progs)
+
+
 def test_trainer_entry_sigterm_during_warmup_stops_training(tmp_path):
     """回归⑤：热身期（on_train_start 前）收到的 SIGTERM 记账、训练开始即停——
     修复前信号被静默吞掉，进程失控长跑（只能靠 SIGKILL 兜底）。"""
