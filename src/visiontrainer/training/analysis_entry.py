@@ -20,7 +20,10 @@ from pathlib import Path
 
 
 def _read_gt(label_txt: Path, w: int, h: int, classes: list[str]) -> list[dict]:
-    """YOLO 归一化标签 → 像素 xyxy。文件缺失 = 负样本（gt 空）。"""
+    """YOLO 归一化标签 → 像素 xyxy。文件缺失 = 负样本（gt 空）。
+
+    行格式分流：5 token = detect（cx cy w h）；坐标偶数个且 ≥6 = obb 角点 / segment 多边形，
+    取 min/max 外接矩形（错误分析按外接近似匹配，与预测侧 OBB xyxy 口径一致）。"""
     if not label_txt.is_file():
         return []
     out = []
@@ -30,15 +33,33 @@ def _read_gt(label_txt: Path, w: int, h: int, classes: list[str]) -> list[dict]:
             continue
         try:
             cid = int(float(parts[0]))
-            cx, cy, bw, bh = (float(x) for x in parts[1:5])
+            coords = [float(x) for x in parts[1:]]
         except ValueError:
             continue
         if not (0 <= cid < len(classes)):
             continue
-        x0, y0 = (cx - bw / 2) * w, (cy - bh / 2) * h
-        x1, y1 = (cx + bw / 2) * w, (cy + bh / 2) * h
-        out.append({"cls": classes[cid], "xyxy": [round(x0, 1), round(y0, 1), round(x1, 1), round(y1, 1)]})
+        if len(parts) == 5:
+            cx, cy, bw, bh = coords
+            xs, ys = (cx - bw / 2, cx + bw / 2), (cy - bh / 2, cy + bh / 2)
+        elif len(coords) >= 6 and len(coords) % 2 == 0:
+            xs, ys = coords[0::2], coords[1::2]
+        else:
+            continue
+        out.append({"cls": classes[cid],
+                    "xyxy": [round(min(xs) * w, 1), round(min(ys) * h, 1),
+                             round(max(xs) * w, 1), round(max(ys) * h, 1)]})
     return out
+
+
+def _extract_pred(res, classes: list[str]) -> list[dict]:
+    """推理结果 → [{cls, conf, xyxy}]。OBB 任务的框在 res.obb（res.boxes 为 None），
+    OBB 的 xyxy 即外接矩形；detect 零检出时 res.boxes 是空对象而非 None，故用显式判空。"""
+    boxes = res.boxes if res.boxes is not None else getattr(res, "obb", None)
+    return [{"cls": classes[int(c)] if 0 <= int(c) < len(classes) else str(int(c)),
+             "conf": round(float(cf), 4),
+             "xyxy": [round(float(v), 1) for v in box]}
+            for box, cf, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist(),
+                                  boxes.cls.tolist())]
 
 
 def main() -> None:
@@ -66,11 +87,7 @@ def main() -> None:
                 f.flush()
             try:
                 res = model.predict(image, imgsz=imgsz, conf=conf_min, verbose=False)[0]
-                pred = [{"cls": classes[int(c)] if 0 <= int(c) < len(classes) else str(int(c)),
-                         "conf": round(float(cf), 4),
-                         "xyxy": [round(float(v), 1) for v in box]}
-                        for box, cf, c in zip(res.boxes.xyxy.tolist(), res.boxes.conf.tolist(),
-                                              res.boxes.cls.tolist())]
+                pred = _extract_pred(res, classes)
                 w, h = int(res.orig_shape[1]), int(res.orig_shape[0])
                 gt = _read_gt(labels_dir / (Path(image).stem + ".txt"), w, h, classes)
                 f.write(json.dumps({"image": image, "w": w, "h": h, "gt": gt, "pred": pred},

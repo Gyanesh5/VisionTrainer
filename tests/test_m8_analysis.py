@@ -254,3 +254,57 @@ def test_test_infer_directory(m8_client, m8_src):
     empty.mkdir()
     r2 = c.post(f"/api/v1/runs/{uid}/test-infer", json={"image": str(empty)})
     assert r2.status_code == 400, "空目录应 invalid_args 拒绝"
+
+
+# ---------------------------------------------------------------- 2026-09-21 OBB/segment 修复回归
+
+
+class _Tensor(list):
+    def tolist(self):  # 模拟 torch tensor 接口（entry 内统一 .tolist() 取值）
+        return list(self)
+
+
+class _StubBoxes:
+    def __init__(self, xyxy, conf, cls):
+        self.xyxy, self.conf, self.cls = _Tensor(xyxy), _Tensor(conf), _Tensor(cls)
+
+
+class _StubRes:
+    def __init__(self, boxes=None, obb=None):
+        self.boxes, self.obb = boxes, obb
+
+
+def test_read_gt_detect_obb_segment_formats(tmp_path):
+    """回归（2026-09-21）：GT 解析此前只认 detect 5 token——obb 8 角点/segment 多边形
+    被当 cx,cy,w,h 误算成错框。现按 token 数分流，多边形取 min/max 外接矩形。"""
+    from visiontrainer.training.analysis_entry import _read_gt
+
+    lbl = tmp_path / "a.txt"
+    lbl.write_text(
+        "0 0.5 0.5 0.2 0.25\n"                              # detect：cx cy w h
+        "1 0.732518 0.257264 0.736241 0.105080 0.547004 0.094666 0.543281 0.246850\n"  # obb 8 角点（线上实录）
+        "0 0.1 0.1 0.3 0.1 0.3 0.3 0.1 0.3\n"               # segment 四边形
+        "2 0.5 0.5\n",                                      # token 不足，跳过
+        encoding="utf-8")
+    gt = _read_gt(lbl, 640, 480, ["car", "plate"])
+    assert len(gt) == 3
+    assert gt[0]["xyxy"] == [256.0, 180.0, 384.0, 300.0]
+    assert gt[1]["xyxy"] == [round(0.543281 * 640, 1), round(0.094666 * 480, 1),
+                             round(0.736241 * 640, 1), round(0.257264 * 480, 1)]
+    assert gt[1]["cls"] == "plate"
+    assert gt[2]["xyxy"] == [64.0, 48.0, 192.0, 144.0]
+    assert _read_gt(tmp_path / "missing.txt", 640, 480, ["car"]) == []
+
+
+def test_extract_pred_obb_and_detect():
+    """回归（2026-09-21）：OBB 推理结果 res.boxes 为 None、框在 res.obb——此前每图崩
+    'NoneType' object has no attribute 'xyxy'，predictions 全 error、错误分析汇总全 0。"""
+    from visiontrainer.training.analysis_entry import _extract_pred
+
+    det = _StubBoxes([[10.0, 20.0, 30.0, 40.0]], [0.9], [0])
+    assert _extract_pred(_StubRes(boxes=det), ["car", "plate"]) == [
+        {"cls": "car", "conf": 0.9, "xyxy": [10.0, 20.0, 30.0, 40.0]}]
+
+    obb = _StubBoxes([[100.0, 50.0, 300.0, 200.0]], [0.8], [1])
+    assert _extract_pred(_StubRes(obb=obb), ["car", "plate"]) == [
+        {"cls": "plate", "conf": 0.8, "xyxy": [100.0, 50.0, 300.0, 200.0]}]
