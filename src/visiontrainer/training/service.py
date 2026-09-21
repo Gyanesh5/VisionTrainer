@@ -671,12 +671,25 @@ def export_relabel_list(manager, uid: str) -> dict:
     return {"path": str(out), "entries": entries}
 
 
+MAX_DIR_IMAGES = 30  # 目录试跑上限：结果按 base64 内联渲染，全量会拖死浏览器
+
+
 def test_infer(manager, uid: str, image: str, conf: float = 0.25, iou: float = 0.45) -> dict:
-    """训后试跑（M8 05 号票）：按需导出 ONNX 缓存于 Run 目录 + 训练 venv 推理叠框。"""
+    """训后试跑（M8 05 号票）：按需导出 ONNX 缓存于 Run 目录 + 训练 venv 推理叠框。
+    image 支持：单图 / 图片目录（递归取前 30 张，响应附 dir_total 供 UI 提示截断）/ 视频（入口抽帧）。"""
     import subprocess
 
     if not image or not Path(image).exists():
         raise _http_err("invalid_args", f"图片不存在：{image}", 400)
+    images, dir_total = [image], None
+    if Path(image).is_dir():
+        from ..datasets.validate import list_images
+
+        found = list_images(Path(image))
+        if not found:
+            raise _http_err("invalid_args", f"目录内没有图片：{image}", 400)
+        dir_total = len(found)
+        images = [str(p) for p in found[:MAX_DIR_IMAGES]]
     with manager.Session() as s:
         from visiontrainer.db.models import Run, Task
 
@@ -697,7 +710,7 @@ def test_infer(manager, uid: str, image: str, conf: float = 0.25, iou: float = 0
     onnx_cache = out_dir / "model.onnx"
     payload = {"pt": str(best_pt),
                "onnx": str(onnx_cache) if onnx_cache.exists() else None,
-               "out_dir": str(out_dir), "images": [image],
+               "out_dir": str(out_dir), "images": images,
                "imgsz": imgsz, "conf": conf, "iou": iou}
     # 入口内部：onnx 已存在则直接复用（缓存语义）；否则按需导出
     if not onnx_cache.exists():
@@ -710,7 +723,10 @@ def test_infer(manager, uid: str, image: str, conf: float = 0.25, iou: float = 0
                               timeout=600)
     if proc.returncode != 0:
         raise _http_err("state_conflict", f"试跑入口退出码 {proc.returncode}（见 test_infer/entry.log）", 500)
-    return json.loads(result_path.read_text(encoding="utf-8"))
+    out = json.loads(result_path.read_text(encoding="utf-8"))
+    if dir_total is not None:
+        out["dir_total"] = dir_total
+    return out
 
 
 # ---------------------------------------------------------------- M8 07：模型库管理

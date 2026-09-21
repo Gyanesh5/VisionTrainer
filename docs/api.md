@@ -50,7 +50,7 @@
 | POST | `/api/v1/runs/{uid}/analysis` | 跑错误分析（长操作）：训练 venv 推理 + IoU 贪心匹配入 run_sample_errors；仅 done Run；重复触发覆盖 |
 | GET | `/api/v1/runs/{uid}/analysis/cell?gt=&pred=` | 混淆矩阵点格下钻：该 (GT,Pred) 格逐框记录 |
 | POST | `/api/v1/runs/{uid}/analysis/export` | 导出 FN/FP 改标清单 markdown 至 Run 目录 |
-| POST | `/api/v1/runs/{uid}/test-infer` | 训后试跑（M8 05）：body `{image, conf?, iou?}`；按需导出 ONNX 缓存 + 叠框图 |
+| POST | `/api/v1/runs/{uid}/test-infer` | 训后试跑（M8 05）：body `{image, conf?, iou?}`；image 支持单图/图片目录（递归取前 30 张，响应附 `dir_total` 供截断提示）/视频（抽帧）；按需导出 ONNX 缓存 + 叠框图 |
 | GET | `/api/v1/model-library` | 模型库目录视图（M8 07）：items[{name,size_mb,mtime,run_uid,verified,is_latest}] |
 | DELETE | `/api/v1/model-library/{name}` | 删除模型目录（防穿越校验），同步删 deployments 记录，返回 removed_deployments |
 

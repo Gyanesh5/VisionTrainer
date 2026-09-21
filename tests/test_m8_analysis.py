@@ -235,3 +235,22 @@ def test_test_infer_roundtrip(m8_client, m8_src):
     # ONNX 缓存复用（第二次不再导出：result 时间戳变化但 onnx 同路径）
     r2 = c.post(f"/api/v1/runs/{uid}/test-infer", json={"image": str(img)})
     assert r2.status_code == 200 and r2.json()["onnx"] == body["onnx"]
+
+
+def test_test_infer_directory(m8_client, m8_src):
+    """目录试跑（2026-09-21）：递归收集图片入参、响应带 dir_total；空目录 400。"""
+    from visiontrainer.datasets.validate import list_images
+
+    c = m8_client
+    _tid, uid = _done_task(c, "ti-dir")
+    r = c.post(f"/api/v1/runs/{uid}/test-infer", json={"image": str(m8_src)})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    expected = len(list_images(m8_src))
+    assert body["dir_total"] == expected
+    assert len(body["images"]) == expected  # 夹具不足 30 张上限，应全量试跑
+    assert all(Path(im["annotated"]).exists() for im in body["images"])
+    empty = m8_src / "empty_sub"
+    empty.mkdir()
+    r2 = c.post(f"/api/v1/runs/{uid}/test-infer", json={"image": str(empty)})
+    assert r2.status_code == 400, "空目录应 invalid_args 拒绝"

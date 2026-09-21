@@ -561,15 +561,15 @@ async def _io(fn, *args, **kwargs):
     return await run.io_bound(fn, *args, **kwargs)
 
 
-def _local_image(path: str, width: str = "100%") -> None:
-    """本地图片 → base64 内联（避免静态目录耦合）。"""
+def _local_image(path: str, width: str = "100%"):
+    """本地图片 → base64 内联（避免静态目录耦合）。返回元素供调用方挂交互。"""
     try:
         data = Path(path).read_bytes()
     except OSError:
-        return
+        return None
     suffix = Path(path).suffix.lstrip(".") or "png"
     mime = "jpeg" if suffix in ("jpg", "jpeg") else suffix
-    ui.image(f"data:image/{mime};base64,{b64encode(data).decode()}").style(f"width:{width}")
+    return ui.image(f"data:image/{mime};base64,{b64encode(data).decode()}").style(f"width:{width}")
 
 
 def _win_explorer_pick(start: str = "") -> str:
@@ -1190,6 +1190,11 @@ AI_STYLE = """
   --ai-edge: rgba(148, 163, 184, .16);
 }
 
+/* 骨架高度链：页面 wrapper 禁滚（残存 1–33px 文档滚动会拖走导航） */
+.nicegui-content {
+  overflow: hidden;
+}
+
 /* 主内容区：品牌色氛围光晕（浅色更淡，深色更明显） */
 .ai-main {
   background-image:
@@ -1306,7 +1311,7 @@ def _nav_rail(active: str) -> None:
         dark.toggle()
         app.storage.user["dark"] = dark.value
 
-    with ui.column().classes("w-16 items-center gap-1 pt-5 ai-nav").style("min-height: 96vh"):
+    with ui.column().classes("w-16 items-center gap-1 pt-5 ai-nav h-full shrink-0"):
         ui.label("YO").classes("ai-logo mb-3")
         for title, icon, path in NAV_ITEMS:
             with ui.column().classes("items-center gap-0 q-mb-xs" +
@@ -1325,11 +1330,14 @@ def _nav_rail(active: str) -> None:
 
 
 def _page_frame(active: str, title: str, actions=None, body=None) -> None:
-    """页面骨架：导航栏 + 标题行（含动作按钮）+ 内容区。"""
+    """页面骨架：导航栏 + 标题行（含动作按钮）+ 内容区。
+    高度链钉死：外框 calc(100vh − wrapper 16px×2 内边距)，导航满高恒定，
+    仅内容区（min-h-0 + overflow）独立滚动——导航图标位置永不漂移。"""
     ui.add_head_html(f"<style>{AI_STYLE}</style>")
-    with ui.row().classes("w-full m-0 p-0 gap-0 items-stretch"):
+    with ui.row().classes("w-full m-0 p-0 gap-0 items-stretch overflow-hidden"
+                          ).style("height: calc(100vh - 32px)"):
         _nav_rail(active)
-        with ui.column().classes("flex-1 p-6 gap-4 w-full ai-main"):
+        with ui.column().classes("flex-1 p-6 gap-4 w-full ai-main min-h-0 h-full overflow-y-auto"):
             with ui.row().classes("w-full items-center"):
                 ui.label(title).classes("text-xl font-bold ai-title")
                 ui.space()
@@ -1749,9 +1757,10 @@ def mount() -> None:
                     # ── M8 05：试跑（ONNX 叠框）
                     if run["status"] == "done":
                         with ui.expansion("试跑（ONNX 叠框 · 部署前人工验收）", icon="science").classes("w-full"):
-                            ti_path = ui.input("本地图片/视频绝对路径",
+                            ti_path = ui.input("本地图片/目录/视频绝对路径",
                                                value=state.get("ti_path", ""),
-                                               placeholder="/path/to/img.jpg（视频将抽帧）").classes("w-full")
+                                               placeholder="/path/to/img.jpg · 目录（递归取前 30 张）· 视频（抽帧）"
+                                               ).classes("w-full")
                             with ui.row().classes("w-full items-center gap-2"):
                                 ti_conf = ui.number("conf", value=0.25, min=0.01, max=1.0,
                                                     step=0.05).classes("w-28")
@@ -1764,7 +1773,7 @@ def mount() -> None:
                             async def do_test_infer() -> None:
                                 p = (ti_path.value or "").strip()
                                 if not p:
-                                    ui.notify("请填写图片/视频路径", type="warning")
+                                    ui.notify("请填写图片/目录/视频路径", type="warning")
                                     return
                                 state["ti_path"] = p
                                 with _busy(tib, "推理中…"):
@@ -1773,6 +1782,10 @@ def mount() -> None:
                                                       float(ti_conf.value or 0.25))
                                         ti_out.clear()
                                         with ti_out:
+                                            if r.get("dir_total", 0) > len(r.get("images") or []):
+                                                ui.label(f"目录共 {r['dir_total']} 张，按名称排序试跑前 "
+                                                         f"{len(r['images'])} 张").classes(
+                                                    "text-xs text-amber-600")
                                             for im in r.get("images") or []:
                                                 ui.label(Path(im["image"]).name +
                                                          (f" · 视频帧（共 {len(r['images'])} 帧网格）"
@@ -1904,11 +1917,27 @@ def mount() -> None:
                 if not found:
                     ui.label("（暂无产物图）").classes("text-xs opacity-40")
                     return
-                with ui.row().classes("w-full flex-wrap gap-2"):
-                    for p in found[:4]:
-                        with ui.column().classes("w-[31%] min-w-56"):
-                            ui.label(p.name).classes("text-[10px] opacity-50")
+
+                def _view(p: Path) -> None:
+                    """缩略图点击 → 大图查看（宽卡近全屏 + 纵向滚动，细节可读）。"""
+                    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[1800px] gap-2"):
+                        with ui.row().classes("w-full items-center gap-2"):
+                            ui.label(p.name).classes("font-bold flex-1")
+                            ui.button("关闭", icon="close", on_click=dlg.close).props("flat dense")
+                        with ui.scroll_area().classes("w-full h-[75vh]"):
                             _local_image(str(p))
+                    dlg.open()
+
+                with ui.row().classes("w-full flex-wrap gap-2"):
+                    for p in found:  # 全量展示（此前仅取前 4 张）
+                        with ui.column().classes("w-[48%] min-w-72"):
+                            ui.label(p.name).classes("text-[10px] opacity-50")
+                            img = _local_image(str(p))
+                            if img is not None:
+                                img.classes("cursor-zoom-in").on(
+                                    "click", lambda _e, _p=p: _view(_p))
+                                with img:
+                                    ui.tooltip("点击查看大图")
 
             def do_stop(uid: str) -> None:
                 tsvc.stop_run(get_manager(), uid)
