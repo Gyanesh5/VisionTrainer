@@ -572,6 +572,45 @@ def _local_image(path: str, width: str = "100%"):
     return ui.image(f"data:image/{mime};base64,{b64encode(data).decode()}").style(f"width:{width}")
 
 
+def _zoomable_image_dialog(path: str, title: str, on_open=None, hint: str | None = None) -> None:
+    """可缩放大图查看：默认 100% 适应窗口宽，滚轮 / ±按钮 / 「适应」缩放（50–400%），
+    放大后滚动区平移。产物图与错误分析叠加图共用（2026-09-21 用户反馈）。"""
+    st: dict = {"pct": 100, "img": None}
+    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[1700px] gap-1"):
+        with ui.row().classes("w-full items-center gap-1"):
+            ui.label(title).classes("font-bold flex-1 min-w-0 truncate")
+            pct_lab = ui.label("100%").classes("text-xs opacity-60 w-11 text-right shrink-0")
+
+            def _apply(pct: int) -> None:
+                st["pct"] = max(50, min(400, pct))
+                pct_lab.set_text(f"{st['pct']}%")
+                if st["img"] is not None:
+                    st["img"].style(f"width:{st['pct']}%")
+
+            for icon, delta in (("remove", -25), ("add", 25)):
+                zb = ui.button(icon=icon, on_click=lambda d=delta: _apply(st["pct"] + d)).props(
+                    "flat dense round size=sm color=grey")
+                with zb:
+                    ui.tooltip("缩小" if delta < 0 else "放大")
+            ui.button("适应", on_click=lambda: _apply(100)).props("flat dense size=sm color=grey")
+            if on_open is not None:
+                ob = ui.button(icon="open_in_new", on_click=on_open).props(
+                    "flat dense round size=sm color=blue")
+                with ob:
+                    ui.tooltip("在 X-AnyLabeling 中打开")
+            ui.button("关闭", icon="close", on_click=dlg.close).props("flat dense")
+        with ui.scroll_area().classes("w-full h-[75vh]"):
+            with ui.column().classes("w-full items-center"):
+                st["img"] = _local_image(path)
+                if st["img"] is not None:  # 滚轮缩放（上=放大）；放大后靠滚动条/拖动平移
+                    st["img"].on("wheel", lambda e: _apply(
+                        st["pct"] + (-25 if (e.args or {}).get("deltaY", 0) > 0 else 25)),
+                        ["deltaY"])
+        if hint:
+            ui.label(hint).classes("text-[11px] opacity-50")
+    dlg.open()
+
+
 def _win_explorer_pick(start: str = "") -> str:
     """Windows 资源管理器风格目录选择（Vista+ IFileOpenDialog + FOS_PICKFOLDERS）。
 
@@ -1628,20 +1667,13 @@ def mount() -> None:
                                     ui.notify(f"导出失败：{exc}", type="negative")
 
                             def _show_overlay(e_img: str, e_overlay: str, e_score: dict) -> None:
-                                with ui.dialog() as dlg, ui.card().classes("w-3xl max-w-[92vw] gap-2"):
-                                    with ui.row().classes("w-full items-center"):
-                                        ui.label(f"{Path(e_img).name} · 错框 {e_score['score']}"
-                                                 f"（FP {e_score['fp']} / FN {e_score['fn']} / "
-                                                 f"混淆 {e_score['confusion']}）").classes("font-bold")
-                                        ui.space()
-                                        ui.button(icon="open_in_new", on_click=lambda: _open_in_xal(e_img)).props(
-                                            "flat dense round color=blue")
-                                        ui.button("关闭", icon="close", on_click=dlg.close).props("flat dense")
-                                    with ui.scroll_area().classes("w-full h-[70vh]"):
-                                        _local_image(e_overlay)
-                                    ui.label("绿 = GT（真值）｜红 = Pred（预测，含置信度）｜紫文案见清单"
-                                             ).classes("text-[11px] opacity-50")
-                                dlg.open()
+                                _zoomable_image_dialog(
+                                    e_overlay,
+                                    f"{Path(e_img).name} · 错框 {e_score['score']}"
+                                    f"（FP {e_score['fp']} / FN {e_score['fn']} / "
+                                    f"混淆 {e_score['confusion']}）",
+                                    on_open=lambda: _open_in_xal(e_img),
+                                    hint="绿 = GT（真值类别）｜红 = Pred（预测类别 + 置信度）· 滚轮缩放，放大后拖动平移")
 
                             if not analysis:
                                 ui.label("尚未分析。以 best.pt 对切分清单 val 集逐图推理（低置信度全量采集），"
@@ -1925,14 +1957,8 @@ def mount() -> None:
                     return
 
                 def _view(p: Path) -> None:
-                    """缩略图点击 → 大图查看（宽卡近全屏 + 纵向滚动，细节可读）。"""
-                    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[1800px] gap-2"):
-                        with ui.row().classes("w-full items-center gap-2"):
-                            ui.label(p.name).classes("font-bold flex-1")
-                            ui.button("关闭", icon="close", on_click=dlg.close).props("flat dense")
-                        with ui.scroll_area().classes("w-full h-[75vh]"):
-                            _local_image(str(p))
-                    dlg.open()
+                    """缩略图点击 → 可缩放大图（默认适应窗口，滚轮/±缩放）。"""
+                    _zoomable_image_dialog(str(p), p.name)
 
                 with ui.row().classes("w-full flex-wrap gap-2"):
                     for p in found:  # 全量展示（此前仅取前 4 张）

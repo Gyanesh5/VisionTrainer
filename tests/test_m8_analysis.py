@@ -222,6 +222,27 @@ def test_deploy_uses_recommended_conf(m8_client, monkeypatch):
         assert conf == rec, f"部署应使用建议阈值 {rec}，实际 {conf}"
 
 
+def test_overlay_renders_with_image_scaled_strokes(tmp_path: Path):
+    """叠加图线宽/字号随图像尺寸缩放（2026-09-21 高分图细线小字不可见修复）+ 大图渲染冒烟。"""
+    small = ea._overlay_scales(640, 480)
+    big = ea._overlay_scales(4032, 3024)
+    huge = ea._overlay_scales(8000, 6000)
+    assert small == (3, 2, 13), f"小图保持原观感下限：{small}"
+    assert big[0] >= small[0] * 4 and big[1] >= small[1] * 4 and big[2] >= small[2] * 4, f"{big}"
+    assert huge[0] > big[0] and huge[2] > big[2], "更大图应更粗更大字"
+
+    from PIL import Image
+
+    src = tmp_path / "big.png"
+    Image.new("RGB", (3200, 2400), (40, 60, 80)).save(src)
+    out = tmp_path / "ov.jpg"
+    ea.render_overlay(str(src), [
+        {"gt": [100, 100, 800, 600], "cls_gt": "car"},
+        {"pred": [110, 110, 820, 640], "cls_pred": "car", "conf": 0.87},
+    ], out)
+    assert out.stat().st_size > 20_000, "大图叠加产物不应是近空文件"
+
+
 def test_test_infer_roundtrip(m8_client, m8_src):
     c = m8_client
     _tid, uid = _done_task(c, "ti")

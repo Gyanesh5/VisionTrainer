@@ -132,22 +132,38 @@ def sweep_thresholds(records: list[dict]) -> dict:
                     f"样本 TP{len(tp_all)}/FP{len(fp_all)}/FN{fn_all}）"}
 
 
+def _overlay_scales(w: int, h: int) -> tuple[int, int, int]:
+    """叠加图 (GT 线宽, Pred 线宽, 字号) 随图像尺寸缩放：以 800px 当量图为 1× 基准。
+    高分辨率原图上固定 2px 线 / 11px 字几乎不可见（2026-09-21 用户反馈）。"""
+    scale = max((w * h) ** 0.5 / 800.0, 1.0)
+    return max(3, round(3 * scale)), max(2, round(2 * scale)), max(13, round(13 * scale))
+
+
 def render_overlay(image_path: str, records: list[dict], out_path: Path) -> Path:
-    """GT 绿 / Pred 红 叠加大图（PIL 画框，平台零 cv2 依赖）。"""
-    from PIL import Image, ImageDraw
+    """GT 绿 / Pred 红 叠加大图（PIL 画框，平台零 cv2 依赖）。
+    线宽与标注字号按图像尺寸动态缩放；标注文字带黑描边（任意底色可读）。"""
+    from PIL import Image, ImageDraw, ImageFont
 
     im = Image.open(image_path).convert("RGB")
     d = ImageDraw.Draw(im)
+    lw_gt, lw_pred, fsize = _overlay_scales(*im.size)
+    font = ImageFont.load_default(size=fsize)
+    stroke = max(1, round(fsize / 14))
+    off = max(2, round(fsize * 0.25))
+
+    def _label(xy, text: str, fill) -> None:
+        d.text(xy, text, fill=fill, font=font, stroke_width=stroke, stroke_fill=(0, 0, 0))
+
     for r in records:
         if r.get("gt"):
             x0, y0, x1, y1 = r["gt"]
-            d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94), width=3)
-            d.text((x0 + 2, max(y0 - 12, 0)), f"GT {r['cls_gt']}", fill=(34, 197, 94))
+            d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94), width=lw_gt)
+            _label((x0 + off, max(y0 - fsize - off, 0)), f"GT {r['cls_gt']}", (34, 197, 94))
         if r.get("pred"):
             x0, y0, x1, y1 = r["pred"]
             conf = f" {r['conf']:.2f}" if r.get("conf") is not None else ""
-            d.rectangle([x0, y0, x1, y1], outline=(239, 68, 68), width=2)
-            d.text((x0 + 2, y1 + 2), f"P {r['cls_pred']}{conf}", fill=(239, 68, 68))
+            d.rectangle([x0, y0, x1, y1], outline=(239, 68, 68), width=lw_pred)
+            _label((x0 + off, y1 + off), f"P {r['cls_pred']}{conf}", (239, 68, 68))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     im.save(out_path, quality=88)
     return out_path
