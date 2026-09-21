@@ -70,3 +70,41 @@ def test_shape_matches_task():
     assert shape_matches_task("detect", {"rectangle"})
     assert not shape_matches_task("detect", {"polygon"})
     assert shape_matches_task("classify", set())
+    assert shape_matches_task("detect", {"circle"})
+    assert shape_matches_task("segment", {"circle"})
+    assert not shape_matches_task("obb", {"circle"})
+
+
+def test_detect_circle_circumscribed_box():
+    # circle 两点 = 圆心 + 圆上点：半径 100 → 外接框 200x200，中心即圆心
+    data = {"imageWidth": 640, "imageHeight": 480,
+            "shapes": [{"label": "plate", "shape_type": "circle", "points": [[300, 200], [400, 200]]}]}
+    lines, has = json_to_yolo_lines(data, "detect", ["plate"])
+    assert has
+    _, xc, yc, w, h = lines[0].split()
+    assert abs(float(xc) - 300 / 640) < 1e-6
+    assert abs(float(yc) - 200 / 480) < 1e-6
+    assert abs(float(w) - 200 / 640) < 1e-6
+    assert abs(float(h) - 200 / 480) < 1e-6
+
+
+def test_seg_circle_sampled_polygon():
+    data = {"imageWidth": 640, "imageHeight": 480,
+            "shapes": [{"label": "plate", "shape_type": "circle", "points": [[320, 240], [420, 240]]}]}
+    lines, has = json_to_yolo_lines(data, "segment", ["plate"])
+    assert has
+    coords = lines[0].split()[1:]
+    assert len(coords) == 2 * 12  # 12 个采样点
+    xs = [float(coords[i]) for i in range(0, len(coords), 2)]
+    assert abs(min(xs) - 220 / 640) < 1e-6  # 最左点 = cx - r
+    assert abs(max(xs) - 420 / 640) < 1e-6
+
+
+def test_degenerate_circle_skipped():
+    data = {"imageWidth": 640, "imageHeight": 480,
+            "shapes": [
+                {"label": "p", "shape_type": "circle", "points": [[10, 10]]},
+                {"label": "p", "shape_type": "circle", "points": [[10, 10], [10, 10]]},
+            ]}
+    lines, has = json_to_yolo_lines(data, "segment", ["p"])
+    assert lines == [] and not has

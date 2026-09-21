@@ -6,16 +6,37 @@
 
 from __future__ import annotations
 
+import math
 import pathlib
 
-# task_type → (mode, 合法 shape_type)
+# task_type → (mode, 合法 shape_type)。circle 为跨任务形状：源标注不动，
+# 转换时按任务展开等价几何——detect=外接矩形、segment=圆周采样多边形（见 _circle_equiv）
 TASK_SHAPES: dict[str, tuple[str, tuple[str, ...]]] = {
-    "detect": ("hbb", ("rectangle",)),
-    "segment": ("seg", ("polygon",)),
+    "detect": ("hbb", ("rectangle", "circle")),
+    "segment": ("seg", ("polygon", "circle")),
     "obb": ("obb", ("rotation",)),
     "pose": ("pose", ("rectangle", "point")),
     "classify": ("classify", ()),
 }
+
+CIRCLE_POLY_POINTS = 12  # circle → seg 多边形的圆周采样点数
+
+
+def _circle_equiv(points: list, mode: str) -> tuple[str, list] | None:
+    """circle 两点（圆心 + 圆上点）→ 任务等价形状。非法圆（点数不足 / 零半径）返回 None。"""
+    if len(points) < 2:
+        return None
+    (cx, cy), (ex, ey) = points[0], points[1]
+    r = math.hypot(float(ex) - float(cx), float(ey) - float(cy))
+    if r <= 0:
+        return None
+    if mode == "hbb":
+        return "rectangle", [[cx - r, cy - r], [cx + r, cy + r]]  # 对角两点模式，走 rectangle 分支
+    return "polygon", [
+        [cx + r * math.cos(2 * math.pi * i / CIRCLE_POLY_POINTS),
+         cy + r * math.sin(2 * math.pi * i / CIRCLE_POLY_POINTS)]
+        for i in range(CIRCLE_POLY_POINTS)
+    ]
 
 
 def shape_matches_task(task_type: str, shape_types: set[str]) -> bool:
@@ -66,7 +87,13 @@ def json_to_yolo_lines(
         if label not in classes:
             continue
         class_index = classes.index(label)
-        points = clamp_points(shape.get("points", []), width, height)
+        if st == "circle" and mode in ("hbb", "seg"):
+            equiv = _circle_equiv(shape.get("points", []), mode)
+            if equiv is None:
+                continue
+            st, points = equiv[0], clamp_points(equiv[1], width, height)
+        else:
+            points = clamp_points(shape.get("points", []), width, height)
         if st == "rotation":
             points = [[float(x), float(y)] for x, y in shape.get("points", [])]  # obb 不钳制：越界即跳过（上游默认策略）
 

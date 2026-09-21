@@ -55,3 +55,13 @@ def test_background_counted_as_negative(tmp_path):
     make_annotation(src, "neg", [])
     report = validate_dataset(src, "detect", ["car"])
     assert report["background"] == 1 and report["labeled"] == 0
+
+
+def test_circle_only_image_matches_segment(tmp_path):
+    # circle 是 detect/segment 的合法形状（转换时等价展开），不应报 no_matching_shape
+    src = _src(tmp_path)
+    make_image(src, "circ.png")
+    make_annotation(src, "circ", [{"label": "car", "shape_type": "circle", "points": [[50, 50], [90, 50]]}])
+    report = validate_dataset(src, "segment", ["car"])
+    assert report["counts"]["no_matching_shape"] == 0
+    assert report["ok"]
