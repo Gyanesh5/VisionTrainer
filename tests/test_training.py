@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -307,3 +310,204 @@ def test_bulk_delete_tasks(training_client):
         assert r.status_code == 200, r.text
     left = {t["uid"] for t in c.get("/api/v1/tasks").json()}
     assert not (left & set(uids)), "批量删除后不应残留勾选任务"
+
+
+# ---------------------------------------------------------------- 2026-09-21 停止链三 bug 回归
+# 事故形态：停止请求落库后平台重启 → stopping Run 无人收养 → Task 聚合 running →
+# 删除 409 + UI 无停止按钮（按钮只认 queued/running）→ 死锁。
+
+
+def _db_exec(db_path: Path, sql: str, params: tuple) -> None:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(sql, params)
+    conn.commit()
+    conn.close()
+
+
+def _run_pid(db_path: Path, uid: str) -> int:
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    pid = conn.execute("SELECT pid FROM runs WHERE uid=?", (uid,)).fetchone()[0]
+    conn.close()
+    return pid
+
+
+def _wait_run_status(client: TestClient, run_uid: str, statuses: set[str], timeout: float) -> str:
+    deadline = time.time() + timeout
+    status = None
+    while time.time() < deadline:
+        status = client.get(f"/api/v1/runs/{run_uid}").json().get("status")
+        if status in statuses:
+            return status
+        time.sleep(0.2)
+    raise TimeoutError(f"等待 {statuses} 超时（{timeout}s），最后状态：{status}")
+
+
+def test_adopt_stopping_orphan_resumes_stop_chain(tmp_path, datasets_root, detect_source, monkeypatch):
+    """回归①：重启前已 stopping 且进程吞了 SIGTERM 仍存活 → 收养即续走停止链，
+    最终落 cancelled，任务恢复可删（不再 409 死锁）。
+
+    STUB_TRAP_SIGTERM 让 stub 忽略 SIGTERM，复现事故中"优雅停止被吞"的失控进程；
+    app2 的 stop_timeout 调小到 2s 加速 SIGKILL 升级。断言窗口 < app1 watchdog 的
+    10s 兜底升级，保证失败构建（不收养 stopping）在窗口内必然超时。
+    """
+    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    monkeypatch.setenv("STUB_TRAP_SIGTERM", "1")
+    db = tmp_path / "db.sqlite"
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{db}",
+                        "check_occupancy": False}}
+    app1 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app1) as c1:
+        task_id = c1.post("/api/v1/tasks", json={"name": "stuck-stop", "base_model": "stub",
+                                                 "dataset": "plate", "epochs": 100}).json()["id"]
+        run_uid = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            runs = c1.get(f"/api/v1/tasks/{task_id}").json()["runs"]
+            if runs and runs[0]["status"] == "running":
+                run_uid = runs[0]["uid"]
+                break
+            time.sleep(0.1)
+        assert run_uid, "训练未进入 running"
+        # 事故时序：停止请求已落库（stopping），进程吞了 SIGTERM 仍在跑，随即平台重启
+        _db_exec(db, "UPDATE runs SET status='stopping' WHERE uid=?", (run_uid,))
+    pid = _run_pid(db, run_uid)
+    os.kill(pid, 0)  # 脱离进程随"崩溃"存活
+
+    app2 = create_app(cfg=cfg, with_ui=False)
+    app2.state.manager.s.stop_timeout = 2.0
+    with TestClient(app2) as c2:
+        final = _wait_run_status(c2, run_uid, {"cancelled"}, timeout=8.0)
+        assert final == "cancelled"
+        # 用户原始症状：终态后删除不再被 409 拒绝
+        r = c2.delete(f"/api/v1/tasks/{task_id}")
+        assert r.status_code == 200, r.text
+
+
+def test_adopt_stopping_dead_pid_finalizes_cancelled(tmp_path, datasets_root, detect_source):
+    """回归②：pid 已死的 stopping 孤儿按用户停止意图落 cancelled，不误判 failed。"""
+    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    db = tmp_path / "db.sqlite"
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{db}",
+                        "check_occupancy": False}}
+    app1 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app1) as c1:
+        task_id = c1.post("/api/v1/tasks", json={"name": "dead-stop", "base_model": "stub",
+                                                 "dataset": "plate", "epochs": 100}).json()["id"]
+        run_uid = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            runs = c1.get(f"/api/v1/tasks/{task_id}").json()["runs"]
+            if runs and runs[0]["status"] == "running":
+                run_uid = runs[0]["uid"]
+                break
+            time.sleep(0.1)
+        assert run_uid, "训练未进入 running"
+        # 进程被杀（产物不完整 → 孤儿判定为 failed 的形态），等 watchdog 落定后再伪造 stopping
+        os.kill(_run_pid(db, run_uid), signal.SIGKILL)
+        _wait_run_status(c1, run_uid, {"failed"}, timeout=10.0)
+        _db_exec(db, "UPDATE runs SET status='stopping' WHERE uid=?", (run_uid,))
+
+    app2 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app2) as c2:
+        final = _wait_run_status(c2, run_uid, {"cancelled", "failed", "done"}, timeout=10.0)
+        assert final == "cancelled", f"stopping 孤儿应落 cancelled（用户已请求停止），实际 {final}"
+
+
+def test_force_stop_running(training_client):
+    """回归③：running Run 强制终止 → SIGKILL 立即生效，watchdog 收割落 cancelled。"""
+    c = training_client
+    task_uid = _create_task(c, epochs=100, name="fs-running")
+    task = _wait_task(c, task_uid, {"running"})
+    run_uid = task["runs"][0]["uid"]
+    r = c.post(f"/api/v1/runs/{run_uid}/force-stop")
+    assert r.status_code == 200, r.text
+    assert r.json()["state"] == "stopping"  # watchdog 在场：终态由其收割落定
+    assert _wait_run_status(c, run_uid, {"cancelled"}, timeout=10.0) == "cancelled"
+
+
+def test_force_stop_orphaned_stopping(training_client):
+    """回归④：stopping 但无 watchdog 纳管（watchdog 已死/未收养孤儿）→ 强制终止同步
+    就地落 cancelled，不依赖重启自愈。直接伪造孤儿行（自起 sleep 进程 + 手插 Run/Task），
+    不经启动链，保证确实没有 watchdog 在场。"""
+    import subprocess as sp
+
+    from visiontrainer.db.models import Run, Task
+
+    c = training_client
+    mgr = c.app.state.manager
+    proc = sp.Popen(["sleep", "300"], start_new_session=True)
+    try:
+        with mgr.Session() as s:
+            t = Task(uid="orph0001", name="fs-orphan", source="manual", status="running",
+                     base_model="stub", train_args={"epochs": 1})
+            s.add(t)
+            s.flush()
+            task_id = t.id
+            s.add(Run(uid="orph0001", task_id=t.id, round_no=1, status="stopping", pid=proc.pid))
+            s.commit()
+        r = c.post("/api/v1/runs/orph0001/force-stop")
+        assert r.status_code == 200, r.text
+        assert r.json()["state"] == "cancelled"  # 无 watchdog：同步就地落终态
+        deadline = time.time() + 5
+        while time.time() < deadline and proc.poll() is None:  # 本测试持有 Popen，负责收割
+            time.sleep(0.1)
+        assert proc.poll() is not None, "强制终止后进程仍存活"
+        assert _wait_run_status(c, "orph0001", {"cancelled"}, timeout=5.0) == "cancelled"
+        task_row = [t for t in c.get("/api/v1/tasks").json() if t["id"] == task_id][0]
+        assert task_row["status"] == "cancelled", "Task 聚合应随 Run 终态更新"
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+def test_trainer_entry_sigterm_during_warmup_stops_training(tmp_path):
+    """回归⑤：热身期（on_train_start 前）收到的 SIGTERM 记账、训练开始即停——
+    修复前信号被静默吞掉，进程失控长跑（只能靠 SIGKILL 兜底）。"""
+    import subprocess
+
+    from visiontrainer.training import trainer_entry as te
+
+    fake = tmp_path / "fakelib"
+    fake.mkdir()
+    marker = tmp_path / "warmup.marker"
+    (fake / "ultralytics.py").write_text(
+        "import os, time\n"
+        "class YOLO:\n"
+        "    def __init__(self, name):\n"
+        "        self.cbs = {}\n"
+        "    def add_callback(self, event, fn):\n"
+        "        self.cbs.setdefault(event, []).append(fn)\n"
+        "    def train(self, **kw):\n"
+        f"        open(r'{marker}', 'w').close()\n"  # 热身期开始（信号处理器已注册）
+        "        time.sleep(1.0)\n"
+        "        t = type('T', (), {'stop': False})()\n"
+        "        for fn in self.cbs.get('on_train_start', []):\n"
+        "            fn(t)\n"
+        "        for _ in range(600):\n"  # 未收到停止则长跑 60s
+        "            if t.stop:\n"
+        "                break\n"
+        "            time.sleep(0.1)\n",
+        encoding="utf-8")
+    payload = tmp_path / "payload.json"
+    payload.write_text(json.dumps({"run_dir": str(tmp_path / "run"), "base_model": "m",
+                                   "data_yaml": "d.yaml", "args": {"epochs": 1}}), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(fake)}
+    proc = subprocess.Popen([sys.executable, te.__file__, str(payload)], env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.time() + 10
+    while time.time() < deadline and not marker.exists():  # 确保信号落在热身窗口内
+        time.sleep(0.05)
+    assert marker.exists(), "fake ultralytics 热身未开始"
+    os.kill(proc.pid, signal.SIGTERM)
+    try:
+        rc = proc.wait(timeout=6)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        pytest.fail("热身期 SIGTERM 被吞：训练未停止（长跑至超时）")
+    assert rc == 0, f"应经 stop 标志优雅退出，实际退出码 {rc}"

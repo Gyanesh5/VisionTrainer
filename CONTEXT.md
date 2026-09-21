@@ -37,8 +37,13 @@ GPU 被非平台进程占用的状态；此时队首任务保持 queued 并向�
 **优雅停止（Graceful stop）**:
 SIGTERM → `trainer.stop` 标志（batch 边界生效）→ 超时 killpg SIGKILL 的三级升级序列。
 
+**强制终止（Force stop）**:
+跳过前两级直接 killpg SIGKILL 的兜底出口（`POST /runs/{uid}/force-stop`）；
+watchdog 不在场的 stopping 孤儿就地落 cancelled，不依赖重启自愈（2026-09-21）。
+
 **孤儿收养（Adoption）**:
-平台重启后，依据持久化的 pid 与 results.csv 重新纳管仍在运行的训练子进程。
+平台重启后，依据持久化的 pid 与 results.csv 重新纳管仍在运行的训练子进程
+（running/stopping 都收养，后者续走停止链）。
 
 **来源（Source）**:
 任务的提交者类别：manual（用户手动）或 agent（自动调参循环）。

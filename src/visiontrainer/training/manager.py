@@ -2,7 +2,8 @@
 
 - 单飞 FIFO：同一时刻至多一个 Run 处于 running，完成自动取下一个；
 - 训练子进程 start_new_session 脱离启动，平台重启不杀训练；
-- Adopter：平台重启后按 pid 收养存活进程、判定死亡进程为 failed；
+- Adopter：平台重启后按 pid 收养存活进程（running/stopping 都纳管，后者续走停止链）、
+  判定死亡进程终态；
 - 停止链：SIGTERM → 超时 killpg SIGKILL；
 - 外部占用：pynvml 检测，占用则队首保持 queued 并给出原因；
 - 指标：watchdog 线程 tail <run_dir>/metrics.jsonl（worker 的 callback 产出），
@@ -170,12 +171,14 @@ class TrainingManager:
         t.start()
 
     def adopt(self) -> None:
-        """平台重启后：running 且 pid 存活 → 重新挂 watchdog 继续监控；pid 已死 → 按产物判定终态。"""
+        """平台重启后：running/stopping 且 pid 存活 → 重新挂 watchdog 继续监控
+        （重启前已请求停止的，收养即续走停止链，不再孤儿化）；pid 已死 → 按产物判定终态。"""
         with self.Session() as s:
-            rows = s.query(Run).filter(Run.status == "running").all()
+            rows = s.query(Run).filter(Run.status.in_(RUNNING_STATES)).all()
             for r in rows:
                 if self.current is not None:
                     return  # 单飞：一次只收养一个
+                was_stopping = r.status == "stopping"
                 alive = False
                 if r.pid:
                     try:
@@ -185,15 +188,15 @@ class TrainingManager:
                         alive = False
                 if alive:
                     self._attach(r.id)
-                    # 竞态防护：收养窗口期内用户可能已请求停止（status=stopping），
-                    # attach 会把状态写回 running，这里复查并补挂停止标志
-                    with self.Session() as s3:
-                        r3 = s3.get(Run, r.id)
-                        if r3 and r3.status == "stopping" and self.current and self.current.run_id == r3.id:
-                            self.current.stop_requested = True
+                    # 重启前已 stopping：补挂停止标志，watchdog 下一循环续走
+                    # 停止链（重发 SIGTERM → 超时升级 SIGKILL）
+                    if was_stopping and self.current and self.current.run_id == r.id:
+                        self.current.stop_requested = True
                 else:
                     # pid 已死 ≠ 崩溃：脱离进程可能在平台停机期间自然跑完——按产物判定
                     status, error = self._judge_orphan(s, r)
+                    if was_stopping and status != "done":
+                        status, error = "cancelled", None  # 用户已请求停止，不判 failed
                     r.status = status
                     r.error = error
                     r.finished_at = _now()
@@ -334,13 +337,16 @@ class TrainingManager:
     # ------------------------------------------------------------ watchdog
 
     def _attach(self, run_id: int) -> None:
-        """孤儿收养：进程还活着，重建监控（不重启进程）。"""
+        """孤儿收养：进程还活着，重建监控（不重启进程）。
+        stopping 保留不覆写——停止意图以 DB 状态为单一数据源，watchdog 循环会读到它并续走停止链。"""
         with self.Session() as s:
             run = s.get(Run, run_id)
             task = s.get(Task, run.task_id)
             proc = ExternalProc(run.pid)
-            run.status = "running"
+            if run.status not in RUNNING_STATES:
+                run.status = "running"
             s.commit()
+            status = run.status
             self.current = CurrentRun(run_id=run_id, uid=run.uid, task_id=run.task_id,
                                       pid=run.pid, proc=proc,
                                       gpu_device=device_index_of((task.train_args or {}).get("device")),
@@ -350,7 +356,7 @@ class TrainingManager:
         w = threading.Thread(target=self._watchdog, args=(self.current,), daemon=True, name=f"adopt-{run.uid}")
         self.current.watchdog = w
         w.start()
-        publish_threadsafe({"type": "run.status", "run_uid": run.uid, "status": "running", "error": None})
+        publish_threadsafe({"type": "run.status", "run_uid": run.uid, "status": status, "error": None})
 
     def _tail_metrics(self, cur: CurrentRun, metrics_path) -> None:
         """增量 tail 指标文件（offset 记忆）；进程退出后的收尾排水也复用本方法。"""
@@ -521,6 +527,42 @@ class TrainingManager:
                     self.current.stop_requested = True
                 return "stopping"
             return run.status
+
+    def force_stop(self, run_uid: str) -> str:
+        """强制终止（优雅停止的兜底出口）：跳过 SIGTERM 直接 killpg SIGKILL。
+        watchdog 在场由其收割落 cancelled；不在场（watchdog 已死/未收养孤儿）就地落终态，
+        不再依赖重启自愈。"""
+        with self.Session() as s:
+            run = s.query(Run).filter(Run.uid == run_uid).one_or_none()
+            if run is None:
+                raise KeyError(run_uid)
+            if run.status not in RUNNING_STATES:
+                return run.status
+            run.status = "stopping"
+            s.commit()
+            run_id, pid = run.id, run.pid
+        publish_threadsafe({"type": "run.status", "run_uid": run_uid, "status": "stopping", "error": None})
+        cur = self.current
+        if cur is not None and cur.run_id == run_id:
+            cur.stop_requested = True
+            _killpg(pid, signal.SIGKILL)
+            return "stopping"  # watchdog 收割进程后落 cancelled
+        if pid:
+            _killpg(pid, signal.SIGKILL)
+        with self.Session() as s:
+            run = s.get(Run, run_id)
+            run.status = "cancelled"
+            run.finished_at = _now()
+            if run.run_dir:  # 与 adopt 死亡分支同款产物回填
+                weights = Path(run.run_dir) / "weights"
+                best, last = weights / "best.pt", weights / "last.pt"
+                run.best_pt = str(best) if best.exists() else None
+                run.last_pt = str(last) if last.exists() else None
+            s.commit()
+            self._aggregate(s, run.task_id)
+        publish_threadsafe({"type": "run.status", "run_uid": run_uid, "status": "cancelled", "error": None})
+        self._publish_queue(None)
+        return "cancelled"
 
     def resume(self, run_uid: str) -> str:
         """人工续训：按原 Run 的任务与参数建新 Run（从不自动续训，04 号票）。"""

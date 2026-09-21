@@ -1473,6 +1473,11 @@ def mount() -> None:
                             if run["status"] in ("queued", "running"):
                                 ui.button("停止", icon="stop", color="negative",
                                           on_click=lambda: do_stop(uid)).props("outline dense")
+                            if run["status"] == "stopping":
+                                fs_btn = ui.button("强制终止", icon="dangerous", color="negative",
+                                                   on_click=lambda: do_force_stop(uid)).props("outline dense")
+                                with fs_btn:
+                                    ui.tooltip("跳过优雅停止直接 SIGKILL（stopping 卡死时的兜底出口）")
                             ui.button("删除任务", icon="delete", color="negative",
                                       on_click=lambda: open_del(task, task_id)).props("outline dense")
                     if run.get("error"):
@@ -1530,8 +1535,12 @@ def mount() -> None:
                                 with lp_btn:
                                     ui.tooltip("磁盘管理：删 last.pt 留 best.pt")
                         log_box = ui.log(max_lines=12).classes("w-full h-32 text-xs")
-                        for line in tsvc.run_logs(get_manager(), uid, tail=12):
-                            log_box.push(line)
+                        if run.get("run_dir"):
+                            for line in tsvc.run_logs(get_manager(), uid, tail=12):
+                                log_box.push(line)
+                        else:
+                            ui.label("Run 尚未启动（排队/被外部占用阻塞），暂无日志").classes(
+                                "text-xs opacity-40")
                     with ui.expansion("产物图（训练结束后由 ultralytics 生成）", icon="image").classes("w-full"):
                         _artifact_gallery(run.get("run_dir"))
                     with ui.expansion("运行快照（启动时冻结的训练输入）", icon="ac_unit").classes("w-full"):
@@ -1806,13 +1815,20 @@ def mount() -> None:
 
                     if run["status"] == "running":
 
+                        def _set_echart(chart, options: dict) -> None:
+                            """EChart.options 只读（直接赋值每秒抛 AttributeError）：
+                            就地替换内容后 update() 推送前端。"""
+                            chart.options.clear()
+                            chart.options.update(options)
+                            chart.update()
+
                         def poll() -> None:
                             try:
                                 r = tsvc.get_run(get_manager(), uid)
                             except Exception:  # noqa: BLE001
                                 return
-                            chart.options = _chart_options(r["metrics"], r.get("task_type"))
-                            chart_loss.options = _loss_options(r["metrics"])
+                            _set_echart(chart, _chart_options(r["metrics"], r.get("task_type")))
+                            _set_echart(chart_loss, _loss_options(r["metrics"]))
                             pg = r.get("progress")
                             if pg:
                                 prog_bar.set_visibility(True)
@@ -1898,6 +1914,14 @@ def mount() -> None:
                 tsvc.stop_run(get_manager(), uid)
                 ui.notify(f"停止请求已发出：{uid}")
 
+            def do_force_stop(uid: str) -> None:
+                try:
+                    tsvc.force_stop_run(get_manager(), uid)
+                    ui.notify(f"强制终止已发出：{uid}")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"强制终止失败：{exc}", type="negative")
+                render_detail()
+
             def do_deploy(uid: str) -> None:
                 try:
                     r = tsvc.deploy_run(get_manager(), uid)
@@ -1965,7 +1989,6 @@ def mount() -> None:
                 with ui.column().classes("q-px-md max-h-[64vh] overflow-y-auto gap-1 pb-2"):
                     # ── 分区 1：数据与模型
                     _form_section("dataset", "数据与模型")
-                    c_name = ui.input("任务名", value=f"训练-{datetime.now():%m%d-%H%M}").classes("w-full")
                     managed = {d["name"]: d["name"] for d in ds.list_datasets()
                                if d["form"] == "managed" and d.get("active_manifest")}
                     c_ds = ui.select(managed or {"": "（暂无托管数据集，请先到数据集页导入）"}, label="数据集",
@@ -1974,6 +1997,22 @@ def mount() -> None:
                     with c_model:
                         ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
                     c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
+                    c_name = ui.input("任务名", value="",
+                                      placeholder="数据集_基模型_日期_时间（随数据集/基模型自动生成，可改）"
+                                      ).classes("w-full")
+
+                    def _auto_name() -> str:
+                        return (f"{c_ds.value or '数据集'}_{(c_model.value or '').strip() or '模型'}"
+                                f"_{datetime.now():%Y%m%d_%H%M}")
+
+                    _name_state: dict = {"auto": None}
+
+                    def _sync_name() -> None:
+                        """默认名跟随数据集/基模型；用户手改过则不覆盖；未选数据集时留占位符。"""
+                        cur = (c_name.value or "").strip()
+                        if c_ds.value and (not cur or cur == _name_state["auto"]):
+                            _name_state["auto"] = _auto_name()
+                            c_name.set_value(_name_state["auto"])
                     # ── M8 08：预设实验模板（批量建 Task；与手填二选一）
                     c_tpl = ui.select({
                         "": "（不使用模板 · 手动填参）",
@@ -2078,6 +2117,10 @@ def mount() -> None:
                         ui.button("取消", on_click=create_dialog.close).props("flat")
                         c_ok = ui.button("创建任务", icon="add", on_click=lambda: do_create()).props("unelevated")
                 _wire_model_dataset(c_model, c_ds, c_reason, c_ok)
+                # 默认任务名联动：注册在 wire 之后，数据集带出基模型的级联里最后落定
+                c_ds.on_value_change(lambda _e: _sync_name())
+                c_model.on_value_change(lambda _e: _sync_name())
+                _sync_name()
 
                 def do_create() -> None:
                     if not (c_name.value or "").strip():

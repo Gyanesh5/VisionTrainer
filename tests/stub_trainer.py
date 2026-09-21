@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -15,6 +17,9 @@ payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 run_dir = Path(payload["run_dir"])
 run_dir.mkdir(parents=True, exist_ok=True)
 metrics_path = run_dir / "metrics.jsonl"
+
+if os.environ.get("STUB_TRAP_SIGTERM"):
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)  # 复现"优雅停止被吞、只有 SIGKILL 有效"的失控进程形态
 
 epochs = int((payload.get("args") or {}).get("epochs", 3))
 for e in range(1, epochs + 1):

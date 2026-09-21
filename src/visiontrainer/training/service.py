@@ -216,6 +216,14 @@ def stop_run(manager, uid: str) -> str:
         raise _http_err("not_found", f"Run 不存在：{uid}", 404)
 
 
+def force_stop_run(manager, uid: str) -> str:
+    """强制终止：跳过优雅停止直接 SIGKILL（优雅停止无响应时的兜底出口）。"""
+    try:
+        return manager.force_stop(uid)
+    except KeyError:
+        raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+
+
 def resume_run(manager, uid: str) -> str:
     try:
         return manager.resume(uid)

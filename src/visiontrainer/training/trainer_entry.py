@@ -7,6 +7,7 @@ payload：{"run_dir", "base_model", "data_yaml", "args": {...}}
 - 逐 epoch 指标经 on_fit_epoch_end 回调写 <run_dir>/metrics.jsonl；
 - batch 级进度按 1Hz 节流写同文件（progress 行），平台 watchdog 解析后走 run.progress 事件；
 - SIGTERM → trainer.stop=True（batch 边界优雅停止）→ 平台超时 killpg 兜底；
+  热身期（on_train_start 前）收到的 SIGTERM 先记账，on_train_start 补生效不被吞；
 - results.csv 由 ultralytics 自动产出，作为平台侧兜底审计源。
 """
 
@@ -31,11 +32,17 @@ def main() -> None:
 
     model = YOLO(payload["base_model"])
     trainer_ref: dict = {}
+    # 热身期（on_train_start 前）收到的 SIGTERM 记账：此时尚无 trainer 可置 stop，
+    # 不记账信号就被静默吞掉（2026-09-21 停止失灵根因），on_train_start 补生效
+    sigterm_early: dict = {}
 
     def on_train_start(trainer) -> None:
         trainer_ref["t"] = trainer
+        if sigterm_early:
+            trainer.stop = True
 
     def on_sigterm(_signum, _frame):
+        sigterm_early["hit"] = True
         t = trainer_ref.get("t")
         if t is not None:
             t.stop = True  # batch 边界生效的优雅停止开关（01 号票）

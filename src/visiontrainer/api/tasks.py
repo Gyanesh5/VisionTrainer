@@ -124,6 +124,13 @@ def stop_run(uid: str, request: Request):
     return {"run_uid": uid, "state": tsvc.stop_run(_manager(request), uid)}
 
 
+@router.post("/runs/{uid}/force-stop")
+@_maps_errors
+def force_stop_run(uid: str, request: Request):
+    """强制终止：跳过优雅停止直接 killpg SIGKILL（stopping 卡死时的兜底出口）。"""
+    return {"run_uid": uid, "state": tsvc.force_stop_run(_manager(request), uid)}
+
+
 @router.post("/runs/{uid}/resume")
 @_maps_errors
 def resume_run(uid: str, request: Request):
