@@ -131,6 +131,18 @@ def test_validate_obb_invalid_collinear(tmp_path):
     assert any(p["code"] == "obb_invalid" for p in report["problems"])
 
 
+def test_validate_obb_out_of_bounds_flagged(tmp_path):
+    """2026-09-22 口径变更：obb 越界不再丢弃——钳制入界 + 超 ±1% 容差记 out_of_bounds 待修。"""
+    src = tmp_path / "obb2"
+    src.mkdir()
+    _png(src / "o.png")
+    _label_file(src / "o.json", [{"label": "c", "shape_type": "rotation",
+                                  "points": [[-40, 0], [100, 0], [100, 80], [-40, 80]]}])
+    report = validate_dataset(src, "obb", ["c"])
+    assert any(p["code"] == "out_of_bounds" for p in report["problems"])
+    assert not [p for p in report["problems"] if p["code"] == "drop"]  # 钳制可用，不进丢弃清单
+
+
 def test_validate_keypoints_negative(tmp_path):
     src = tmp_path / "pose"
     src.mkdir()
@@ -213,6 +225,10 @@ def test_relabel_refresh_single_and_incremental(tmp_path, tmp_db):
     os.utime(src / "b.json")  # 模拟 b 被编辑（mtime 推进）
     r3 = svc.relabel_refresh("m9rf", root=root)
     assert r3["refreshed"] == 1
+
+    # force=True：mtime 未变也全量重转换（转换器规则变更后的恢复通道）
+    r4 = svc.relabel_refresh("m9rf", force=True, root=root)
+    assert r4["refreshed"] == 2
 
     with pytest.raises(DatasetError):
         svc.relabel_refresh("m9rf", image=str(src / "nope.png"), root=root)

@@ -51,6 +51,7 @@ class ExcludeBody(BaseModel):
 
 class RelabelRefreshBody(BaseModel):
     image: str | None = None  # 省略 = 全清单按 mtime 增量
+    force: bool = False       # 跳过增量判断全量重转换（转换器规则变更后的恢复通道）
 
 
 class ReviewDecideBody(BaseModel):
@@ -159,9 +160,10 @@ def exclude_files(name: str, body: ExcludeBody):
 
 @router.post("/{name}/relabel-refresh")
 def relabel_refresh(name: str, body: RelabelRefreshBody | None = None):
-    """标注变更联动（M9）：单图（body.image）或全清单按 mtime 增量重转换派生 YOLO txt。"""
+    """标注变更联动（M9）：单图重转换刷新派生 YOLO txt。body: `{image?, force?}`。"""
     try:
-        return svc.relabel_refresh(name, body.image if body else None)
+        b = body or RelabelRefreshBody()
+        return svc.relabel_refresh(name, b.image, b.force)
     except DatasetError as exc:
         return _error_response(exc)
 

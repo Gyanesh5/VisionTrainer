@@ -39,12 +39,24 @@ def test_seg_polygon_normalized():
     assert coords[0] == "0.000000" and coords[-1] == "1.000000"
 
 
-def test_obb_out_of_bounds_skipped():
+def test_obb_out_of_bounds_clipped():
+    # 2026-09-22 口径变更：越界钳制入界（与 detect/segment 及 Ultralytics 训练侧一致），
+    # 不再整框丢弃——框的可见部分是有效训练信号；超容差由校验报告记 out_of_bounds
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "car", "shape_type": "rotation", "points": [[-5, 0], [100, 0], [100, 80], [-5, 80]]}]}
     lines, has, drops = json_to_yolo_lines(data, "obb", ["car"])
+    assert has and len(lines) == 1 and drops == []
+    xs = [float(lines[0].split()[i]) for i in range(1, 9, 2)]  # 偶数位为 x（0 起）
+    assert min(xs) == 0.0  # -5 钳到 0
+
+
+def test_obb_fully_outside_dropped():
+    data = {"imageWidth": 640, "imageHeight": 480,
+            "shapes": [{"label": "car", "shape_type": "rotation",
+                        "points": [[700, 0], [800, 0], [800, 80], [700, 80]]}]}
+    lines, has, drops = json_to_yolo_lines(data, "obb", ["car"])
     assert lines == [] and not has
-    assert [d["reason"] for d in drops] == ["obb_out_of_bounds"]
+    assert [d["reason"] for d in drops] == ["degenerate_box"]
 
 
 def test_pose_group():

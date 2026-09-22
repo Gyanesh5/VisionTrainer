@@ -124,8 +124,6 @@ def json_to_yolo_lines(
             st, points = equiv[0], clamp_points(equiv[1], width, height)
         else:
             points = clamp_points(shape.get("points", []), width, height)
-        if st == "rotation":
-            points = [[float(x), float(y)] for x, y in shape.get("points", [])]  # obb 不钳制：越界即跳过（上游默认策略）
 
         matched = False
         if mode == "hbb" and st == "rectangle":
@@ -153,9 +151,13 @@ def json_to_yolo_lines(
             if len(points) != 4:
                 _drop(i, shape, "too_few_points")
                 continue
-            if any(not (0 <= x <= width and 0 <= y <= height) for x, y in points):
-                _drop(i, shape, "obb_out_of_bounds")
-                continue  # 上游默认 obb_boundary_policy=skip
+            # 越界钳制入界（2026-09-22 用户裁决：与 detect/segment 及 Ultralytics 训练侧同口径——
+            # 框的可见部分是有效训练信号；超 ±1% 容差由校验报告记 out_of_bounds 待修，不再整框丢弃）
+            xs = [p[0] for p in points]
+            ys = [p[1] for p in points]
+            if max(xs) - min(xs) <= 0 or max(ys) - min(ys) <= 0:
+                _drop(i, shape, "degenerate_box")  # 整框在画布外：钳制后零面积
+                continue
             flat = [coord for pt in points for coord in pt]
             norm = " ".join(
                 f"{flat[i] / width:.6f}" if i % 2 == 0 else f"{flat[i] / height:.6f}" for i in range(8)

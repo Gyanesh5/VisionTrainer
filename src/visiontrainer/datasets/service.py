@@ -398,10 +398,12 @@ def ack_drops(name: str, root: Path | None = None) -> dict:
     return {"name": name, "drops_acked": True, "pending": False}
 
 
-def relabel_refresh(name: str, image: str | None = None, root: Path | None = None) -> dict:
+def relabel_refresh(name: str, image: str | None = None, force: bool = False,
+                    root: Path | None = None) -> dict:
     """标注变更联动（M9 01 号票）：单图（image 给定）或全清单按 mtime 增量重转换派生 YOLO txt。
 
-    派生结构与其余产物不动（图片 symlink 不变）；健康报告随「重新校验」刷新（契约）。
+    force=True 跳过增量判断全量重转换——转换器规则变更后（如 OBB 越界改钳制），
+    JSON mtime 未变但派生 txt 已过时，增量模式看不见，须强制重建。
     返回 {refreshed, drops}——刷新过程中出现的转换丢弃逐条带回（不自动确认，重校验后入账）。
     """
     meta = get_dataset(name, root)
@@ -424,7 +426,7 @@ def relabel_refresh(name: str, image: str | None = None, root: Path | None = Non
         txt = ds_dir / "derived" / manifest["uid"] / "labels" / split / f"{p.stem}.txt"
         lbl = by_image[img].get("label")
         lbl_path = Path(lbl) if lbl else None
-        if image is None:  # 增量模式：JSON 未变（不比派生 txt 新）且 txt 存在则跳过
+        if image is None and not force:  # 增量模式：JSON 未变（不比派生 txt 新）且 txt 存在则跳过
             try:
                 if txt.exists() and (not lbl_path or lbl_path.exists()
                                      and lbl_path.stat().st_mtime_ns <= txt.stat().st_mtime_ns):

@@ -2495,6 +2495,22 @@ def mount() -> None:
                                           on_click=lambda: ui.navigate.to(f"/?dataset={name}")).props("unelevated dense")
                                 val_btn = ui.button("重新校验", icon="fact_check", on_click=lambda: do_validate(name))
                                 val_btn.props("outline dense")
+
+                                async def _do_relabel_refresh(ds_name: str) -> None:
+                                    ui.notify("重转换派生中…")
+                                    try:
+                                        r = await _io(ds.relabel_refresh, ds_name, None, True)
+                                        n_drop = len(r.get("drops") or [])
+                                        ui.notify(f"已重转换 {r['refreshed']} 个派生标注"
+                                                  + (f"（丢弃 {n_drop} 条，明细见重新校验）" if n_drop else ""),
+                                                  type="positive")
+                                    except Exception as exc:  # noqa: BLE001
+                                        ui.notify(f"重转换失败：{exc}", type="negative")
+
+                                rfr_btn = ui.button("重建派生标注", icon="sync_alt",
+                                                    on_click=lambda: _do_relabel_refresh(name))
+                                rfr_btn.props("outline dense").tooltip(
+                                    "全量重转换派生 YOLO 标注（转换器规则变更后的恢复通道；日常标注修改自动增量刷新）")
                                 res_btn = ui.button("重切分", icon="call_split", on_click=lambda: open_resplit(meta))
                                 res_btn.props("outline dense")
                             del_btn = ui.button("删除", icon="delete", color="negative",
@@ -2597,10 +2613,19 @@ def mount() -> None:
                                     ui.label(zh).classes("text-[11px] font-semibold opacity-60 w-8 shrink-0 pt-0.5")
                                     ui.label(g.get(key, "")).classes("text-[11px] opacity-80 flex-1 min-w-0")
                             for p in items[:20]:
+                                det = ""
+                                if p.get("detail"):
+                                    if p["code"] == "drop" and isinstance(p["detail"], dict):
+                                        d = p["detail"]
+                                        det = (f"（丢弃 {d.get('reason')}:"
+                                               f" shape #{d.get('index')} · {d.get('label')}）")
+                                    elif p["code"] == "unknown_labels":
+                                        det = f"（未登记类别：{p['detail']}）"
+                                    else:
+                                        det = f"（{p['detail']}）"
                                 with ui.row().classes("w-full items-center gap-1"):
-                                    ui.label(Path(p["image"]).name + (
-                                        f"（未登记类别：{p['detail']}）" if p.get("detail") else "")
-                                    ).classes("text-[11px] opacity-70 break-all flex-1 min-w-0")
+                                    ui.label(Path(p["image"]).name + det).classes(
+                                        "text-[11px] opacity-70 break-all flex-1 min-w-0")
                                     cp = ui.button(icon="content_copy",
                                                    on_click=lambda img=p["image"]: _copy_path(img)).props(
                                         "flat dense round size=xs color=grey")

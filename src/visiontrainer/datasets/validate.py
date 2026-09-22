@@ -191,7 +191,7 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
             for s in shapes:
                 st = s.get("shape_type")
                 box = shape_bbox_px(s)
-                if task_type in ("detect", "segment") and box and w and h:
+                if task_type in ("detect", "segment", "obb") and box and w and h:
                     x0, y0, x1, y1 = box
                     if (x0 < -OOB_TOLERANCE * w or y0 < -OOB_TOLERANCE * h
                             or x1 > (1 + OOB_TOLERANCE) * w or y1 > (1 + OOB_TOLERANCE) * h):
