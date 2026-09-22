@@ -40,6 +40,13 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
     except DatasetError as exc:
         raise _http_err(exc.code, exc.message, {"invalid_args": 400, "not_found": 404, "state_conflict": 409}[exc.code])
 
+    # M9 确认门：存在未确认的转换丢弃时拒绝提交（到数据集页查看丢弃清单并确认，或先修复标注）
+    if meta.get("drops_pending_ack"):
+        n = (meta.get("last_validation") or {}).get("drops") or "存在"
+        raise _http_err("state_conflict",
+                        f"数据集「{dataset}」有 {n} 条标注被转换丢弃且未确认——"
+                        "请到数据集页查看丢弃清单：确认有意丢弃，或先回 X-AnyLabeling 修复", 409)
+
     if meta["form"] == "managed":
         uid = manifest_id or meta.get("active_manifest")
         if not uid:

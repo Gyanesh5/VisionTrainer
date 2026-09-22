@@ -6,7 +6,7 @@ from visiontrainer.datasets.convert import json_to_yolo_lines, shape_matches_tas
 def test_detect_rectangle():
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "car", "shape_type": "rectangle", "points": [[10, 10], [110, 10], [110, 110], [10, 110]]}]}
-    lines, has = json_to_yolo_lines(data, "detect", ["car"])
+    lines, has, _drops = json_to_yolo_lines(data, "detect", ["car"])
     assert has
     idx, xc, yc, w, h = lines[0].split()
     assert idx == "0"
@@ -17,7 +17,7 @@ def test_detect_rectangle():
 def test_detect_diagonal_two_point_mode():
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "car", "shape_type": "rectangle", "points": [[10, 10], [110, 110]]}]}
-    lines, _ = json_to_yolo_lines(data, "detect", ["car"])
+    lines, _, _ = json_to_yolo_lines(data, "detect", ["car"])
     _, _, _, w, _ = lines[0].split()
     assert abs(float(w) - 100 / 640) < 1e-6
 
@@ -25,15 +25,16 @@ def test_detect_diagonal_two_point_mode():
 def test_unknown_label_skipped():
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "bus", "shape_type": "rectangle", "points": [[10, 10], [110, 10], [110, 110], [10, 110]]}]}
-    lines, has = json_to_yolo_lines(data, "detect", ["car"])
+    lines, has, drops = json_to_yolo_lines(data, "detect", ["car"])
     assert lines == [] and not has
+    assert [d["reason"] for d in drops] == ["unknown_class"]  # M9：丢弃留痕，不静默
 
 
 def test_seg_polygon_normalized():
     pts = [[0, 0], [640, 0], [640, 480]]
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "cat", "shape_type": "polygon", "points": pts}]}
-    lines, _ = json_to_yolo_lines(data, "segment", ["cat"])
+    lines, _, _ = json_to_yolo_lines(data, "segment", ["cat"])
     coords = lines[0].split()[1:]
     assert coords[0] == "0.000000" and coords[-1] == "1.000000"
 
@@ -41,8 +42,9 @@ def test_seg_polygon_normalized():
 def test_obb_out_of_bounds_skipped():
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "car", "shape_type": "rotation", "points": [[-5, 0], [100, 0], [100, 80], [-5, 80]]}]}
-    lines, has = json_to_yolo_lines(data, "obb", ["car"])
+    lines, has, drops = json_to_yolo_lines(data, "obb", ["car"])
     assert lines == [] and not has
+    assert [d["reason"] for d in drops] == ["obb_out_of_bounds"]
 
 
 def test_pose_group():
@@ -52,7 +54,7 @@ def test_pose_group():
                 {"label": "eye", "shape_type": "point", "group_id": 1, "points": [[50, 60]]},
                 {"label": "eye", "shape_type": "point", "group_id": 1, "difficult": True, "points": [[60, 62]]},
             ]}
-    lines, has = json_to_yolo_lines(data, "pose", ["person", "eye"])
+    lines, has, _drops = json_to_yolo_lines(data, "pose", ["person", "eye"])
     assert has
     parts = lines[0].split()
     assert parts[0] == "0"
@@ -62,7 +64,7 @@ def test_pose_group():
 
 def test_classify_flags():
     data = {"imageWidth": 100, "imageHeight": 100, "shapes": [], "flags": {"cat": True, "dog": False}}
-    _, has = json_to_yolo_lines(data, "classify", ["cat"])
+    _, has, _ = json_to_yolo_lines(data, "classify", ["cat"])
     assert has
 
 
@@ -79,7 +81,7 @@ def test_detect_circle_circumscribed_box():
     # circle 两点 = 圆心 + 圆上点：半径 100 → 外接框 200x200，中心即圆心
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "plate", "shape_type": "circle", "points": [[300, 200], [400, 200]]}]}
-    lines, has = json_to_yolo_lines(data, "detect", ["plate"])
+    lines, has, _drops = json_to_yolo_lines(data, "detect", ["plate"])
     assert has
     _, xc, yc, w, h = lines[0].split()
     assert abs(float(xc) - 300 / 640) < 1e-6
@@ -91,7 +93,7 @@ def test_detect_circle_circumscribed_box():
 def test_seg_circle_sampled_polygon():
     data = {"imageWidth": 640, "imageHeight": 480,
             "shapes": [{"label": "plate", "shape_type": "circle", "points": [[320, 240], [420, 240]]}]}
-    lines, has = json_to_yolo_lines(data, "segment", ["plate"])
+    lines, has, _drops = json_to_yolo_lines(data, "segment", ["plate"])
     assert has
     coords = lines[0].split()[1:]
     assert len(coords) == 2 * 12  # 12 个采样点
@@ -106,5 +108,6 @@ def test_degenerate_circle_skipped():
                 {"label": "p", "shape_type": "circle", "points": [[10, 10]]},
                 {"label": "p", "shape_type": "circle", "points": [[10, 10], [10, 10]]},
             ]}
-    lines, has = json_to_yolo_lines(data, "segment", ["p"])
+    lines, has, drops = json_to_yolo_lines(data, "segment", ["p"])
     assert lines == [] and not has
+    assert [d["reason"] for d in drops] == ["invalid_circle", "invalid_circle"]

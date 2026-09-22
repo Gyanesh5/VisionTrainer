@@ -81,11 +81,14 @@ def test_selfcheck_endpoint(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- 校验修复指引（05 号票）
 
-def test_guidance_covers_all_five_rules():
+def test_guidance_covers_all_problem_codes():
+    """修复指引覆盖全部问题码（05 号票五规则 + M9 01 号票标注级 lint）。"""
     from visiontrainer.datasets.validate import GUIDANCE
 
     assert set(GUIDANCE) == {"unreadable_image", "bad_json", "no_matching_shape",
-                             "unknown_labels", "missing_json"}
+                             "unknown_labels", "missing_json",
+                             "drop", "out_of_bounds", "orphan_json",
+                             "polygon_invalid", "obb_invalid", "keypoints_invalid"}
     for code, g in GUIDANCE.items():
         assert all(g.get(k) for k in ("error", "cause", "fix")), f"{code} 缺三行文案之一"
         assert "X-AnyLabeling" in g["fix"] or "平台" in g["fix"] or "无需修复" in g["fix"], \
@@ -115,7 +118,11 @@ def test_report_problems_complete_per_entry(tmp_path):
 
     report = validate_dataset(src, "detect", ["car"])
     codes = {p["code"] for p in report["problems"]}
-    assert codes == {"bad_json", "unreadable_image", "no_matching_shape", "unknown_labels"}
+    # M9 01 号票：跨任务形状与未登记类别同时进转换丢弃清单（code=drop，逐 shape reason）
+    assert {"bad_json", "unreadable_image", "no_matching_shape", "unknown_labels"} <= codes
+    drop_reasons = {p["detail"]["reason"] for p in report["problems"] if p["code"] == "drop"}
+    assert drop_reasons == {"task_mismatch", "unknown_class"}
+    assert report["drops"] == 2 and report["needs_confirm"]
     unk = next(p for p in report["problems"] if p["code"] == "unknown_labels")
     assert unk["detail"] == "bus"  # 未登记类别明细随条目给出
     assert report["background"] == 2 and report["labeled"] == 3  # 坏 JSON 图与空标注图各计负样本

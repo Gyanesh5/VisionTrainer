@@ -48,6 +48,10 @@ class ExcludeBody(BaseModel):
     reason: str = ""
 
 
+class RelabelRefreshBody(BaseModel):
+    image: str | None = None  # 省略 = 全清单按 mtime 增量
+
+
 @router.get("")
 def list_datasets():
     return svc.list_datasets()
@@ -135,6 +139,24 @@ def exclude_files(name: str, body: ExcludeBody):
         m = svc.exclude_files(name, body.files, body.reason)
         return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"]),
                 "excluded": len(m.get("excluded") or [])}
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/relabel-refresh")
+def relabel_refresh(name: str, body: RelabelRefreshBody | None = None):
+    """标注变更联动（M9）：单图（body.image）或全清单按 mtime 增量重转换派生 YOLO txt。"""
+    try:
+        return svc.relabel_refresh(name, body.image if body else None)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/drops-ack")
+def drops_ack(name: str):
+    """确认接受丢弃（M9 确认门）：同一批丢弃确认一次即粘住，出现新丢弃集合才重新要求。"""
+    try:
+        return svc.ack_drops(name)
     except DatasetError as exc:
         return _error_response(exc)
 

@@ -6,6 +6,10 @@
 - 跨切分泄漏：同组内成员分属 train 与 val（指标虚高的头号来源）
 - 类别失衡：某类实例数 < 最大类的 IMBALANCE_RATIO 且最大类 ≥ IMBALANCE_MIN_ABS
 
+M9 01 号票新增：
+- 同图重复/高度重叠（duplicates_within）：同 label 标注对外接矩形 IoU ≥ 0.85 的对——
+  >0.999 完全重复档（exact）、0.85–0.95 复核档（review）；只报告不自动去重（FiftyOne find_duplicates 口径）。
+
 缓存：fingerprint = manifest uid + 清单内全部文件（图片与标注 JSON）的 (size, mtime_ns) 摘要；
 命中即返回缓存（秒回），文件变化（含排除处置）自动失效。
 审计对象 = 活跃切分清单成员（排除后即从体检范围消失）。
@@ -18,9 +22,28 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from .convert import shape_bbox_px
+
 NEAR_HASH_THRESHOLD = 8  # phash 汉明距离阈值（64 位 hash，≤8 视为近似同图）
 IMBALANCE_RATIO = 0.1   # 类别失衡：min/max 实例数比低于此值
 IMBALANCE_MIN_ABS = 20  # 且最大类实例数达到此值才告警（样本太少时比例无意义）
+DUP_IOU_REVIEW = 0.85   # 同图高度重叠：≥此值进人工复核档
+DUP_IOU_EXACT = 0.999   # >此值为完全重复档（FiftyOne find_duplicates 官方默认）
+DUP_MAX_REPORT = 200    # 同图重复报告上限（超出截断，计数保留全量）
+
+
+def _iou(a, b) -> float:
+    if not a or not b:
+        return 0.0
+    ax0, ay0, ax1, ay1 = a
+    bx0, by0, bx1, by1 = b
+    ix = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    iy = max(0.0, min(ay1, by1) - max(ay0, by0))
+    inter = ix * iy
+    if inter <= 0:
+        return 0.0
+    ua = (ax1 - ax0) * (ay1 - ay0) + (bx1 - bx0) * (by1 - by0) - inter
+    return inter / ua if ua > 0 else 0.0
 
 
 def _sha256(path: Path) -> str:
@@ -159,6 +182,33 @@ def compute_audit(manifest: dict, progress=None) -> dict:
         if mx >= IMBALANCE_MIN_ABS and any(n / mx < IMBALANCE_RATIO for n in counts.values()):
             imbalance["ok"] = False
 
+    # M9：同图重复/高度重叠（只报告不自动去重——去重是人的决定，修改回 XAL）
+    duplicates_within: list[dict] = []
+    dup_total = 0
+    for f in manifest["files"]:
+        lbl = f.get("label")
+        if not lbl:
+            continue
+        try:
+            data = json.loads(Path(lbl).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        shapes = [s for s in (data.get("shapes") or []) if s.get("label")]
+        boxes = [shape_bbox_px(s) for s in shapes]
+        for a in range(len(shapes)):
+            for b in range(a + 1, len(shapes)):
+                if shapes[a].get("label") != shapes[b].get("label"):
+                    continue
+                iou = _iou(boxes[a], boxes[b])
+                if iou >= DUP_IOU_REVIEW:
+                    dup_total += 1
+                    if len(duplicates_within) < DUP_MAX_REPORT:
+                        duplicates_within.append({
+                            "image": f["image"], "name": Path(f["image"]).name,
+                            "label": shapes[a].get("label"), "iou": round(iou, 3),
+                            "kind": "exact" if iou > DUP_IOU_EXACT else "review",
+                            "a": a, "b": b})
+
     return {
         "checked_at": datetime.now().isoformat(timespec="seconds"),
         "fingerprint": fingerprint_of(manifest),
@@ -168,8 +218,11 @@ def compute_audit(manifest: dict, progress=None) -> dict:
         "near_groups": [[_item(i, splits) for i in g] for g in near_groups],
         "leaks": leaks,
         "imbalance": imbalance,
+        "duplicates_within": {"items": duplicates_within, "total": dup_total,
+                              "truncated": dup_total > len(duplicates_within)},
         "summary": {"exact": len(exact_groups), "near": len(near_groups),
-                    "leaks": len(leaks), "imbalance_ok": imbalance["ok"]},
+                    "leaks": len(leaks), "imbalance_ok": imbalance["ok"],
+                    "duplicates_within": dup_total},
     }
 
 

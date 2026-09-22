@@ -46,6 +46,7 @@
 | POST | `/api/v1/datasets/{id}/label-probe` | 跑标注质检（M9，后台作业：训练 venv yolo11n 快训 3–5 epoch → 全量低 conf 推理 → 平台侧三榜单重组）；进行中重复触发 409 |
 | GET | `/api/v1/datasets/{id}/label-probe` | 质检作业/结果读：`{status: running\|done\|failed, started_at, report?{missing[], misclass[], spurious[]}}`；未跑过返回 `null` |
 | POST | `/api/v1/datasets/{id}/relabel-refresh` | 标注变更联动（M9）：单图重转换刷新派生 YOLO txt。body: `{image?}`（省略=全清单按 mtime 增量）；返回刷新数 |
+| POST | `/api/v1/datasets/{id}/drops-ack` | 确认接受丢弃（M9 确认门）：`drops_pending_ack=true` 时提交训练被 409 拒绝，确认后方可继续；同一批丢弃（签名相同）确认一次即粘住 |
 
 v1.2 同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/validate` 的 validation_report 新增发现类型——`drops`（丢弃清单：shape 数守恒，图/shape/类别/原因逐条）/ `degenerate`（零面积与 <2px）/ `out_of_bounds`（±1% 容差）/ `orphan`（图↔JSON↔txt）/ `polygon_invalid`·`obb_invalid`·`keypoints_invalid`（按 task_type 启用）；导入含 drops 时响应带 `needs_confirm`，确认动作后方可继续（确认门）；`GET .../audit` 报告新增 `duplicates_within`（同图重复两档：IoU>0.999 完全重复 / 0.85–0.95 复核，只报告）；`GET .../stats` 的 `sizes` 增加阈值线与 `small_ratio`；`POST /datasets/{id}/resplit` body 增加可选 `approved_only`（「只训已审」开关落点——true 时新清单只含 `checked:true` 图，旧清单保留可切回）；`GET /datasets/{id}` 与 `GET /datasets` 增加审查进度摘要；`POST /tasks` 提交确认附审查完成度提示（低占比黄牌提醒，不阻断）。无 WS 新事件（质检作业走 REST 轮询）；DB schema 维持 v4（审查状态寄生 JSON，不落库）。
 

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -64,6 +65,19 @@ def _slug(name: str) -> str:
 
 
 # ---------------------------------------------------------------- 导入/注册
+
+def _drops_signature(report: dict) -> str:
+    """丢弃集合签名（M9 确认门）：同一批丢弃确认一次即粘住，重校验同签名不再要求确认。"""
+    drops = sorted((p.get("image"), str(p.get("detail", {}).get("index")),
+                    str(p.get("detail", {}).get("reason")))
+                   for p in report.get("problems", []) if p.get("code") == "drop")
+    return hashlib.sha256(json.dumps(drops, ensure_ascii=False).encode()).hexdigest()
+
+
+def _mark_drops(meta: dict, report: dict) -> None:
+    meta["drops_signature"] = _drops_signature(report)
+    meta["drops_pending_ack"] = bool(report.get("drops")) and meta.get("drops_acked") != meta["drops_signature"]
+
 
 def import_dataset(
     name: str,
@@ -127,6 +141,7 @@ def import_dataset(
         "active_manifest": manifest["uid"],
         "last_validation": report,
     }
+    _mark_drops(meta, report)
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return meta
 
@@ -227,6 +242,7 @@ def validate_dataset_by_name(name: str, root: Path | None = None) -> dict:
     report = validate_dataset(src, meta["task_type"], meta["classes"], scan=scan)
     (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     meta["last_validation"] = report
+    _mark_drops(meta, report)  # M9：新丢弃集合出现才重新要求确认（同签名已确认则粘住）
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     # 健康报告聚合随校验刷新（当前活跃清单画像；M6 01 号票）
     manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
@@ -343,6 +359,62 @@ def cached_audit(name: str, root: Path | None = None) -> dict | None:
     return load_cached(name, meta.get("active_manifest"))
 
 
+def ack_drops(name: str, root: Path | None = None) -> dict:
+    """确认接受丢弃（M9 确认门）：签名粘住——同一批丢弃确认一次，直到出现新丢弃集合。"""
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集无丢弃确认概念")
+    meta["drops_acked"] = meta.get("drops_signature") or ""
+    meta["drops_pending_ack"] = False
+    ds_dir = _ds_dir(name, root)
+    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"name": name, "drops_acked": True, "pending": False}
+
+
+def relabel_refresh(name: str, image: str | None = None, root: Path | None = None) -> dict:
+    """标注变更联动（M9 01 号票）：单图（image 给定）或全清单按 mtime 增量重转换派生 YOLO txt。
+
+    派生结构与其余产物不动（图片 symlink 不变）；健康报告随「重新校验」刷新（契约）。
+    返回 {refreshed, drops}——刷新过程中出现的转换丢弃逐条带回（不自动确认，重校验后入账）。
+    """
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集只读，无重转换概念")
+    ds_dir = _ds_dir(name, root)
+    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+    task_type, classes = meta["task_type"], meta["classes"]
+    by_image = {f["image"]: f for f in manifest["files"]}
+    train_set = set(manifest["train"])
+    if image is not None and image not in by_image:
+        raise DatasetError("not_found", f"图片不在活跃切分清单内：{Path(image).name}")
+    targets = [image] if image is not None else list(by_image)
+
+    refreshed = 0
+    drops: list[dict] = []
+    for img in targets:
+        p = Path(img)
+        split = "train" if img in train_set or str(p) in train_set else "val"
+        txt = ds_dir / "derived" / manifest["uid"] / "labels" / split / f"{p.stem}.txt"
+        lbl = by_image[img].get("label")
+        lbl_path = Path(lbl) if lbl else None
+        if image is None:  # 增量模式：JSON 未变（不比派生 txt 新）且 txt 存在则跳过
+            try:
+                if txt.exists() and (not lbl_path or lbl_path.exists()
+                                     and lbl_path.stat().st_mtime_ns <= txt.stat().st_mtime_ns):
+                    continue
+            except OSError:
+                continue
+        lines: list[str] = []
+        if lbl_path and lbl_path.exists():
+            data = _read_json(str(lbl_path))
+            if data.get("imageWidth") is not None:
+                lines, _has, d = json_to_yolo_lines(data, task_type, classes)
+                drops.extend({"image": img, **item} for item in d)
+        write_label(txt, lines)
+        refreshed += 1
+    return {"refreshed": refreshed, "drops": drops, "manifest": manifest["uid"]}
+
+
 # ---------------------------------------------------------------- 派生结构
 
 def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
@@ -385,7 +457,7 @@ def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
         if f["label"] and Path(f["label"]).exists():
             data = _read_json(f["label"])
             if data.get("imageWidth") is not None:  # 坏 JSON 解析为空 → 空标签（负样本处理）
-                lines, _has = json_to_yolo_lines(data, task_type, classes)
+                lines, _has, _drops = json_to_yolo_lines(data, task_type, classes)
         write_label(derived / "labels" / split / f"{image.stem}.txt", lines)
 
     if mode != "classify":

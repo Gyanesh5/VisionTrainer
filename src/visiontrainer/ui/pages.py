@@ -55,6 +55,12 @@ PROBLEM_ZH = {
     "unreadable_image": "图片不可读",
     "no_matching_shape": "标注形状与任务类型不符",
     "unknown_labels": "含未登记类别",
+    "drop": "标注被转换丢弃",
+    "out_of_bounds": "坐标越界（超 ±1% 容差）",
+    "orphan_json": "孤儿标注（无对应图片）",
+    "polygon_invalid": "多边形无效（自交/退化）",
+    "obb_invalid": "旋转框无效（退化/非凸）",
+    "keypoints_invalid": "关键点坐标为负",
 }
 
 CHART_PALETTE = ["#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#dc2626", "#0891b2"]
@@ -2509,6 +2515,28 @@ def mount() -> None:
                             elif lv.get("background"):
                                 ui.label("负样本（无标注图）是设计内行为：只进 train 充当背景，不算错误。"
                                          ).classes("text-[11px] opacity-45")
+                # M9 确认门：转换丢弃未确认 → 横幅 + 确认按钮（确认前提交训练被拒）
+                if meta.get("drops_pending_ack"):
+                    n_drop = (lv.get("drops") or
+                              sum(1 for p in lv.get("problems") or [] if p.get("code") == "drop"))
+
+                    async def _ack_drops(ds_name: str) -> None:
+                        try:
+                            await _io(ds.ack_drops, ds_name)
+                            ui.notify("已确认接受丢弃（同一批丢弃不再重复要求确认）", type="positive")
+                        except Exception as exc:  # noqa: BLE001
+                            ui.notify(f"确认失败：{exc}", type="negative")
+                        refresh()
+                        render_detail()
+
+                    with ui.row().classes("w-full items-center gap-2 q-pa-sm rounded").style(
+                            "background:rgba(245,158,11,.12)"):
+                        ui.icon("warning").classes("text-amber-400")
+                        ui.label(f"转换丢弃了 {n_drop} 条标注且未确认——明细见上方问题清单「标注被转换丢弃」；"
+                                 "确认接受后方可提交训练").classes("text-xs flex-1 min-w-0")
+                        ui.button("确认接受丢弃", icon="done_all",
+                                  on_click=lambda: _ack_drops(meta["name"])).props(
+                            "dense unelevated color=warning")
                 # 切分历史（排除/重切都会新增版本，旧版本保留可查）
                 if len(meta.get("manifests") or []) > 1:
                     with ui.row().classes("w-full gap-2 items-start"):
@@ -2622,6 +2650,20 @@ def mount() -> None:
                             ch_heat = ui.echart(_center_heat_options(payload), renderer="svg").classes("w-full h-56")
                             ch_heat.on_point_click(_on_heat_cell)
                             ch_heat.on("chart:brushEnd", _on_brush, ["areas"])
+                    # M9 E：目标尺寸画像（COCO 32²/96² 口径 + 640 训练尺度换算）
+                    osz = (payload.get("agg") or {}).get("obj_size")
+                    if osz:
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap text-[11px]"):
+                            ui.icon("straighten").classes("text-[14px] opacity-50")
+                            ui.label("目标尺寸（COCO 口径 32²/96² px）").classes("opacity-60")
+                            for k, zh, c in (("small", "小", "amber"), ("medium", "中", "blue"),
+                                             ("large", "大", "green")):
+                                ui.badge(f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
+                                         ).props(f"color={c} outline").style("font-size:10px")
+                            s640 = (osz.get("scaled_640") or {}).get("small_ratio")
+                            if s640 is not None:
+                                ui.label(f"按 640 训练尺度换算后小目标占 {s640:.0%}"
+                                         "——小目标多可考虑提高 imgsz").classes("opacity-45")
                 else:
                     ui.label("分类任务无目标框：直方图 / 尺寸散点 / 中心热力图不适用").classes("text-xs opacity-40")
                 rerender_drill()

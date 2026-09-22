@@ -12,6 +12,8 @@ from __future__ import annotations
 from datetime import datetime
 
 HEATMAP_GRID = 20  # 标注中心热力图网格边长
+SMALL_AREA = 32 ** 2   # COCOeval 官方小目标线（px²）
+MEDIUM_AREA = 96 ** 2  # 中目标线
 
 
 def _split_of(image: str, manifest: dict) -> str | None:
@@ -40,6 +42,9 @@ def build_stats(entries: list[dict], manifest: dict, task_type: str,
             "n": len(meta.get("objs", [])),
             "labels": labels,
             "centers": [[o["cx"], o["cy"]] for o in meta.get("objs", [])],
+            # M9：目标像素宽高（小目标占比原料；旧画像无此键，重校验后补全）
+            "objs": [{"label": o["label"], "w": o.get("w"), "h": o.get("h")}
+                     for o in meta.get("objs", []) if o.get("w") and o.get("h")],
         }
         if task_type == "classify":
             row["cls"] = meta.get("flag")
@@ -95,6 +100,31 @@ def _compose(dataset: str, task_type: str, classes: list[str],
             heat[iy][ix] += 1
 
     labeled = sum(1 for r in per_image if r.get("labels") or r.get("cls"))
+    # M9 E：目标尺寸画像（COCO 32²/96² 口径 + 640 训练尺度换算）
+    obj_size = None
+    if task_type in ("detect", "segment", "obb"):
+        small = medium = large = small_640 = total = 0
+        for r in per_image:
+            rw, rh = r.get("w"), r.get("h")
+            scale = (640.0 / max(float(rw), float(rh))) if rw and rh else None
+            for o in r.get("objs") or []:
+                bw, bh = o.get("w"), o.get("h")
+                if not bw or not bh:
+                    continue
+                total += 1
+                if bw * bh < SMALL_AREA:
+                    small += 1
+                elif bw * bh < MEDIUM_AREA:
+                    medium += 1
+                else:
+                    large += 1
+                if scale is not None and (bw * scale) * (bh * scale) < SMALL_AREA:
+                    small_640 += 1
+        if total:
+            obj_size = {"total": total, "small": small, "medium": medium, "large": large,
+                        "small_ratio": round(small / total, 4),
+                        "thresholds": {"small_px2": SMALL_AREA, "medium_px2": MEDIUM_AREA},
+                        "scaled_640": {"imgsz": 640, "small_ratio": round(small_640 / total, 4)}}
     return {
         "dataset": dataset,
         "task_type": task_type,
@@ -115,6 +145,7 @@ def _compose(dataset: str, task_type: str, classes: list[str],
             "obj_hist": sorted(obj_hist.items()),
             "sizes": sizes,
             "heatmap": heat,
+            "obj_size": obj_size,  # M9：小目标占比（无目标数据时 null）
         },
     }
 
