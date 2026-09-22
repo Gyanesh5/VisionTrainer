@@ -523,8 +523,8 @@ _REVIEW_PALETTE = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373", "#ba68c8", "#fff1
 _REVIEW_IMG_CACHE: dict[str, str] = {}
 
 
-def _review_img_url(path: str, max_w: int = 1280) -> str | None:
-    """审查大图 data URL（约 1280 宽 JPEG，小容量 LRU——单会话逐张看，容量无需大）。"""
+def _review_img_url(path: str, max_w: int = 1920) -> str | None:
+    """审查画布大图 data URL（约 1920 宽 JPEG——放大到 200%+ 仍可辨细节；小容量 LRU）。"""
     key = f"{path}:{max_w}"
     if key in _REVIEW_IMG_CACHE:
         return _REVIEW_IMG_CACHE[key]
@@ -2685,8 +2685,17 @@ def mount() -> None:
                 except Exception as exc:  # noqa: BLE001
                     ui.label(f"审查队列加载失败：{exc}").classes("text-rose-400 text-xs")
                     return
-                rst = {"items": queue["items"], "filter": "pending", "i": 0, "reject_open": False}
+                rst = {"items": queue["items"], "filter": "pending", "i": 0, "reject_open": False,
+                       "pct": 100}
                 zh_state = {"pending": "待审", "approved": "通过", "rejected": "驳回", "skipped": "跳过"}
+
+                def _apply_pct(pct: int) -> None:
+                    """画布缩放（50–400%，与全站可缩放大图查看同一档位/步长）；直改样式不重建画布。"""
+                    rst["pct"] = max(50, min(400, pct))
+                    if rst.get("pct_label") is not None:
+                        rst["pct_label"].set_text(f"{rst['pct']}%")
+                    if rst.get("stage") is not None:
+                        rst["stage"].style(f"width:{rst['pct']}%")
 
                 def _fl() -> list[dict]:
                     if rst["filter"] == "all":
@@ -2698,6 +2707,7 @@ def mount() -> None:
                 def _go(d: int) -> None:
                     rst["i"] = (rst["i"] + d) % max(len(_fl()), 1)
                     rst["reject_open"] = False
+                    rst["pct"] = 100  # 切图回适应画布
 
                 async def _decide(state_: str, reason: str = "") -> None:
                     fl = _fl()
@@ -2876,12 +2886,32 @@ def mount() -> None:
                     rst["i"] = min(rst["i"], len(fl) - 1)
                     cur = fl[rst["i"]]
                     with ui.row().classes("w-full gap-3 items-start no-wrap"):
-                        with ui.column().classes("grow min-w-0 items-center gap-1"):
+                        with ui.column().classes("grow min-w-0 items-center gap-1 w-full"):
                             url = _review_img_url(cur["image"])
                             if url:
-                                with ui.element("div").classes("relative w-full"):
-                                    ui.image(url).classes("w-full block rounded")
-                                    ui.html(_review_overlay_svg(cur["label"])).classes("absolute inset-0")
+                                # 画布工具行：缩放百分比 + ±/适应（滚轮在画布上等效）
+                                with ui.row().classes("w-full items-center justify-end gap-1"):
+                                    rst["pct_label"] = ui.label(f"{rst['pct']}%").classes(
+                                        "text-[10px] opacity-60 w-9 text-right")
+                                    for icon, delta in (("remove", -25), ("add", 25)):
+                                        ui.button(icon=icon, on_click=lambda d=delta: _apply_pct(
+                                            rst["pct"] + d)).props("flat dense round size=xs color=grey")
+                                    ui.button("适应", on_click=lambda: _apply_pct(100)).props(
+                                        "flat dense size=xs color=grey")
+                                # 画布：图像默认 100% 适应画布宽；放大后滚动区平移；
+                                # SVG 叠加按百分比坐标随画布同步缩放（线宽/字号按图缩放）
+                                canvas = ui.scroll_area().classes(
+                                    "w-full h-[62vh] rounded border border-white/10")
+                                with canvas, ui.column().classes("w-full items-center"):
+                                    rst["stage"] = ui.element("div").classes("relative").style(
+                                        f"width:{rst['pct']}%")
+                                    with rst["stage"]:
+                                        ui.image(url).classes("w-full block")
+                                        ui.html(_review_overlay_svg(cur["label"])).classes(
+                                            "absolute inset-0")
+                                canvas.on("wheel", lambda e: _apply_pct(
+                                    rst["pct"] + (-25 if (e.args or {}).get("deltaY", 0) > 0 else 25)),
+                                    ["deltaY"])
                             with ui.row().classes("items-center gap-1 flex-wrap max-w-full"):
                                 eff = cur["effective"]
                                 ui.label(zh_state.get(eff, eff)).classes(
