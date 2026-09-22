@@ -37,6 +37,7 @@ class ResplitBody(BaseModel):
     ratio: float = Field(gt=0.0, lt=1.0)
     seed: int = 42
     stratify: bool = False
+    approved_only: bool = False  # M9 03「只训已审」：只含通过图（负样本恒保留）
 
 
 class ClassesBody(BaseModel):
@@ -50,6 +51,13 @@ class ExcludeBody(BaseModel):
 
 class RelabelRefreshBody(BaseModel):
     image: str | None = None  # 省略 = 全清单按 mtime 增量
+
+
+class ReviewDecideBody(BaseModel):
+    image: str
+    state: str  # pending / approved / rejected / skipped
+    reason: str = ""
+    note: str = ""
 
 
 @router.get("")
@@ -76,9 +84,15 @@ def register_external(body: ExternalBody):
 @router.get("/{name}")
 def get_dataset(name: str):
     try:
-        return svc.get_dataset(name)
+        meta = svc.get_dataset(name)
     except DatasetError as exc:
         return _error_response(exc)
+    if meta.get("form") == "managed":  # M9 03：详情附审查进度摘要（列表不带——全量解析成本）
+        try:
+            return {**meta, "review": svc.review_progress(name)}
+        except DatasetError:
+            pass
+    return meta
 
 
 @router.post("/{name}/validate")
@@ -92,7 +106,7 @@ def validate_dataset(name: str):
 @router.post("/{name}/resplit")
 def resplit_dataset(name: str, body: ResplitBody):
     try:
-        return svc.resplit_dataset(name, body.ratio, body.seed, body.stratify)
+        return svc.resplit_dataset(name, body.ratio, body.seed, body.stratify, body.approved_only)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -148,6 +162,51 @@ def relabel_refresh(name: str, body: RelabelRefreshBody | None = None):
     """标注变更联动（M9）：单图（body.image）或全清单按 mtime 增量重转换派生 YOLO txt。"""
     try:
         return svc.relabel_refresh(name, body.image if body else None)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.get("/{name}/review")
+def review_queue(name: str):
+    """审查队列读（M9 02）：双指纹现算有效状态 + 可疑度降序（先审最可疑的）。"""
+    try:
+        return svc.review_queue(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/review")
+def review_decide(name: str, body: ReviewDecideBody):
+    """判定一图（M9 02）：窄写 checked/vt_review 原子落盘（ADR 0003）；rejected 必填 reason。"""
+    try:
+        return svc.review_decide(name, body.image, body.state, body.reason, body.note)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/review/export")
+def export_review_rejects(name: str):
+    """导出驳回清单 markdown 至数据集目录（M9 05，与改标清单同构）。"""
+    try:
+        return svc.export_review_rejects(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/label-probe")
+def run_label_probe(name: str):
+    """跑标注质检（M9 04，后台作业：快训探针→全量推理→三嫌疑榜单）；进行中重复触发 409。"""
+    try:
+        return svc.run_label_probe(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.get("/{name}/label-probe")
+def label_probe_status(name: str):
+    """质检作业/结果读（M9 04）：{status: running|done|failed, report?}；未跑过返回 null。"""
+    try:
+        return svc.label_probe_status(name)
     except DatasetError as exc:
         return _error_response(exc)
 

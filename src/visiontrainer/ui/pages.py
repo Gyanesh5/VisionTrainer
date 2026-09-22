@@ -519,6 +519,74 @@ def _open_in_xal(image: str) -> None:
         ui.notify(f"调起失败：{exc}（训练 python 须指向 X-AnyLabeling 环境，见设置页）", type="negative")
 
 
+_REVIEW_PALETTE = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373", "#ba68c8", "#fff176", "#4dd0e1"]
+_REVIEW_IMG_CACHE: dict[str, str] = {}
+
+
+def _review_img_url(path: str, max_w: int = 1280) -> str | None:
+    """审查大图 data URL（约 1280 宽 JPEG，小容量 LRU——单会话逐张看，容量无需大）。"""
+    key = f"{path}:{max_w}"
+    if key in _REVIEW_IMG_CACHE:
+        return _REVIEW_IMG_CACHE[key]
+    import io
+
+    from PIL import Image
+
+    try:
+        with Image.open(path) as im:
+            im = im.convert("RGB")
+            im.thumbnail((max_w, max_w * 3))
+            buf = io.BytesIO()
+            im.save(buf, format="JPEG", quality=80)
+        url = "data:image/jpeg;base64," + b64encode(buf.getvalue()).decode()
+    except Exception:  # noqa: BLE001 — 坏图占位
+        return None
+    if len(_REVIEW_IMG_CACHE) > 40:
+        _REVIEW_IMG_CACHE.clear()
+    _REVIEW_IMG_CACHE[key] = url
+    return url
+
+
+def _review_overlay_svg(label_path: str | None) -> str:
+    """labelme shapes → 百分比坐标 SVG（标注审查大图叠加；多边形直绘、两点外接框、类别着色）。"""
+    if not label_path or not Path(label_path).exists():
+        return ""
+    try:
+        j = json.loads(Path(label_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 坏 JSON 不叠加，不炸审查
+        return ""
+    w, h = j.get("imageWidth") or 1, j.get("imageHeight") or 1
+    colors: dict[str, str] = {}
+    parts: list[str] = []
+    for s in j.get("shapes") or []:
+        label = str(s.get("label", "?"))
+        if label not in colors:
+            colors[label] = _REVIEW_PALETTE[len(colors) % len(_REVIEW_PALETTE)]
+        c = colors[label]
+        try:
+            pts = s.get("points") or []
+            if len(pts) >= 3:
+                p = " ".join(f"{x / w * 100:.2f},{y / h * 100:.2f}" for x, y in pts)
+                parts.append(f'<polygon points="{p}" fill="{c}22" stroke="{c}" stroke-width="0.35"/>')
+            elif len(pts) == 2:
+                x0, y0 = pts[0]
+                x1, y1 = pts[1]
+                parts.append(
+                    f'<rect x="{min(x0, x1) / w * 100:.2f}" y="{min(y0, y1) / h * 100:.2f}" '
+                    f'width="{abs(x1 - x0) / w * 100:.2f}" height="{abs(y1 - y0) / h * 100:.2f}" '
+                    f'fill="{c}22" stroke="{c}" stroke-width="0.35"/>')
+            if pts:
+                tx, ty = pts[0][0] / w * 100, pts[0][1] / h * 100
+                parts.append(
+                    f'<text x="{tx + 1:.2f}" y="{max(ty - 1, 2):.2f}" font-size="2.6" fill="{c}" '
+                    f'stroke="#00000088" stroke-width="0.12" paint-order="stroke">{label}</text>')
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+    return ('<svg viewBox="0 0 100 100" preserveAspectRatio="none" '
+            'style="position:absolute;inset:0;width:100%;height:100%">'
+            + "".join(parts) + "</svg>")
+
+
 _THUMB_CACHE: OrderedDict = OrderedDict()  # (path, mtime, box) -> data URL，LRU
 _THUMB_CACHE_MAX = 2000
 
@@ -2157,7 +2225,41 @@ def mount() -> None:
                         tpl_preview.set_text(f"将创建 {len(plan)} 个任务：" + "；".join(parts))
 
                     c_tpl.on_value_change(lambda _e: _upd_tpl_preview())
-                    c_ds.on_value_change(lambda _e: _upd_tpl_preview())
+
+                    # M9 03：审查完成度提示（仅提示不阻断——快训探针场景不受阻）
+                    rv_hint = ui.label("").classes("text-[11px] opacity-60")
+
+                    async def _upd_review_hint() -> None:
+                        ds_name = c_ds.value
+                        if not ds_name:
+                            rv_hint.set_text("")
+                            return
+                        try:
+                            meta = await _io(ds.get_dataset, ds_name)
+                            if meta.get("form") != "managed":
+                                rv_hint.set_text("")
+                                return
+                            p = await _io(ds.review_progress, ds_name)
+                        except Exception:  # noqa: BLE001 — 提示属增强，失败即隐
+                            rv_hint.set_text("")
+                            return
+                        if not p["total"]:
+                            rv_hint.set_text("")
+                            return
+                        ready = p["counts"]["approved"] + p["counts"]["skipped"]
+                        ratio = ready / p["total"]
+                        warn = ratio < 0.8
+                        rv_hint.set_text(
+                            f"{'⚠️' if warn else '✅'} 审查完成度：通过+跳过 {ready}/{p['total']}（{ratio:.0%}）"
+                            + ("——低于 80%，建议先到数据集「标注审查」页过一遍" if warn else "")
+                            + (f" · 负样本 {p['unlabeled']} 不计" if p["unlabeled"] else ""))
+
+                    def _on_ds_changed(_e=None) -> None:
+                        _upd_tpl_preview()
+                        asyncio.create_task(_upd_review_hint())
+
+                    c_ds.on_value_change(lambda _e: _on_ds_changed())
+                    asyncio.create_task(_upd_review_hint())
                     # ── 分区 2：训练核心
                     _form_section("speed", "训练核心")
                     with ui.row().classes("w-full"):
@@ -2418,11 +2520,12 @@ def mount() -> None:
                                          f"seed {brief['seed']} · {'分层' if brief['stratify'] else '不分层'} · "
                                          f"{_fmt_ts(brief.get('created_at'))}").classes(
                                     "text-xs opacity-70 break-all flex-1 min-w-0")
-                        # ── M6：详情页签化——概览与校验 / 健康报告 / 质量审计
+                        # ── M6：详情页签化——概览与校验 / 健康报告 / 质量审计；M9：标注审查
                         with ui.tabs().classes("w-full text-xs") as dtabs:
                             ui.tab("overview", label="概览与校验", icon="fact_check")
                             ui.tab("health", label="健康报告", icon="monitor_heart")
                             ui.tab("audit", label="质量审计", icon="health_and_safety")
+                            ui.tab("review", label="标注审查", icon="new_label")
                         with ui.tab_panels(dtabs, value=state.get("ds_tab") or "overview"
                                            ).classes("w-full") as dpanels:
                             with ui.tab_panel("overview"):
@@ -2436,12 +2539,20 @@ def mount() -> None:
                                 # ping_timeout=2s，2026-09-21 审计页断连根因）
                                 audit_box = ui.column().classes("w-full gap-2")
                                 state["audit_built"] = False  # render_detail 重建时重开懒构建
+                            with ui.tab_panel("review"):
+                                # 同懒构建：队列要解析全部标注 JSON，急切构建会拖慢详情页
+                                review_box = ui.column().classes("w-full gap-2")
+                                state["review_built"] = False
 
                             def _ensure_audit_panel(tab: str) -> None:
                                 if tab == "audit" and not state.get("audit_built"):
                                     state["audit_built"] = True
                                     with audit_box:
                                         _render_audit(name, meta)
+                                if tab == "review" and not state.get("review_built"):
+                                    state["review_built"] = True
+                                    with review_box:
+                                        _render_review(meta)
 
                             def _on_ds_tab(e) -> None:
                                 state["ds_tab"] = e.value
@@ -2543,12 +2654,14 @@ def mount() -> None:
                         ui.label("切分历史").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
                         with ui.row().classes("flex-wrap gap-1 flex-1 min-w-0"):
                             for m in meta["manifests"]:
-                                chip = ui.chip(f"{m['uid']} · {m['ratio']} · seed {m['seed']}")
+                                chip = ui.chip(f"{m['uid']} · {m['ratio']} · seed {m['seed']}"
+                                               + (" · 只训已审" if m.get("approved_only") else ""))
                                 chip.props("dense outline square" + (" color=blue" if m["uid"] == meta.get("active_manifest") else ""))
                                 chip.classes("text-[10px]")
                                 with chip:
                                     ui.tooltip(("当前活跃清单 · " if m["uid"] == meta.get("active_manifest") else "历史清单（派生结构保留）· ")
-                                               + _fmt_ts(m.get("created_at")))
+                                               + _fmt_ts(m.get("created_at"))
+                                               + (" · 只训已审清单" if m.get("approved_only") else ""))
                 excluded = meta.get("excluded") or []
                 if excluded:
                     with ui.row().classes("w-full gap-2 items-start"):
@@ -2560,6 +2673,303 @@ def mount() -> None:
                                 for e in excluded:
                                     ui.label(f"{Path(e['file']).name} · {_fmt_ts(e['at'])} · {e.get('reason', '')}"
                                              ).classes("text-[11px] opacity-60 break-all")
+
+            # ── 标注审查页签（M9 02 号票）：键盘流判定 + 可疑度排序胶片条（ADR 0003 状态寄生 JSON）
+            def _render_review(meta: dict) -> None:
+                from concurrent.futures import ThreadPoolExecutor
+
+                from ..datasets.review import REVIEW_REASONS
+
+                try:
+                    queue = ds.review_queue(meta["name"])
+                except Exception as exc:  # noqa: BLE001
+                    ui.label(f"审查队列加载失败：{exc}").classes("text-rose-400 text-xs")
+                    return
+                rst = {"items": queue["items"], "filter": "pending", "i": 0, "reject_open": False}
+                zh_state = {"pending": "待审", "approved": "通过", "rejected": "驳回", "skipped": "跳过"}
+
+                def _fl() -> list[dict]:
+                    if rst["filter"] == "all":
+                        return rst["items"]
+                    if rst["filter"] == "modified":
+                        return [it for it in rst["items"] if it["modified"]]
+                    return [it for it in rst["items"] if it["effective"] == rst["filter"]]
+
+                def _go(d: int) -> None:
+                    rst["i"] = (rst["i"] + d) % max(len(_fl()), 1)
+                    rst["reject_open"] = False
+
+                async def _decide(state_: str, reason: str = "") -> None:
+                    fl = _fl()
+                    if not fl:
+                        return
+                    cur = fl[rst["i"]]
+                    try:
+                        r = await _io(ds.review_decide, meta["name"], cur["image"], state_, reason)
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"判定失败：{exc}", type="negative")
+                        return
+                    cur.update(state=r["state"], effective=r["effective"],
+                               reason=r["reason"], modified=False)
+                    ui.notify(f"{Path(cur['image']).name} → {zh_state.get(r['effective'], r['effective'])}"
+                              + (f"（{reason}）" if reason else ""), type="positive")
+                    rst["reject_open"] = False
+                    _go(1)
+                    _view.refresh()
+
+                async def _exclude_cur() -> None:
+                    fl = _fl()
+                    if not fl:
+                        return
+                    cur = fl[rst["i"]]
+                    try:
+                        await _io(ds.exclude_files, meta["name"], [cur["image"]], "标注审查驳回处置")
+                        ui.notify(f"已从切分清单排除 {Path(cur['image']).name}（新清单已切活跃）", type="positive")
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"排除失败：{exc}", type="negative")
+                        return
+                    refresh()
+                    render_detail()
+
+                async def _reload() -> None:
+                    try:
+                        q = await _io(ds.review_queue, meta["name"])
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"刷新失败：{exc}", type="negative")
+                        return
+                    rst["items"] = q["items"]
+                    rst["i"] = min(rst["i"], max(len(_fl()) - 1, 0))
+                    _view.refresh()
+
+                async def _run_probe() -> None:
+                    try:
+                        await _io(ds.run_label_probe, meta["name"])
+                        ui.notify("标注质检已启动：探针快训 + 全量推理（几分钟，本页签自动刷新）",
+                                  type="positive")
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"启动失败：{exc}", type="negative")
+                    _probe_area.refresh()
+
+                async def _export_rejects() -> None:
+                    try:
+                        r = await _io(ds.export_review_rejects, meta["name"])
+                        ui.notify(f"驳回清单已导出：{r['path']}（{r['count']} 张）", type="positive")
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"导出失败：{exc}", type="negative")
+
+                @ui.refreshable
+                def _probe_area() -> None:
+                    try:
+                        p = ds.label_probe_status(meta["name"])
+                    except Exception:  # noqa: BLE001
+                        p = None
+                    if not p:
+                        return
+                    if p["status"] == "running":
+                        with ui.row().classes("items-center gap-2 text-[11px] opacity-70"):
+                            ui.spinner("dots", size="sm")
+                            ui.label("标注质检运行中：探针快训 + 全量推理…（本区自动刷新）")
+                        return
+                    rep = p.get("report")
+                    if p["status"] == "failed":
+                        with ui.row().classes("items-center gap-2 text-[11px] text-rose-300"):
+                            ui.icon("error").classes("text-[14px]")
+                            ui.label(f"上次标注质检失败：{p.get('error', '')}").classes("break-all")
+                        return
+                    if not rep:
+                        return
+                    zh = {"missing": "漏标嫌疑", "misclass": "类错标嫌疑", "spurious": "幽灵标嫌疑"}
+                    with ui.row().classes("items-center gap-2 text-[11px]"):
+                        ui.icon("biotech").classes("text-[13px] opacity-60")
+                        ui.label(f"标注质检 {_fmt_ts(rep.get('checked_at'))} · {rep.get('images', 0)} 图"
+                                 ).classes("opacity-60")
+                        for k in ("missing", "misclass", "spurious"):
+                            n = (rep.get("counts") or {}).get(k, 0)
+                            ui.badge(f"{zh[k]} {n}").props(
+                                "outline " + ("color=negative" if k == "missing" else
+                                              "color=warning" if k == "misclass" else "color=grey-6")
+                            ).style("font-size:10px")
+                    for k in ("missing", "misclass", "spurious"):
+                        items = rep.get(k) or []
+                        if not items:
+                            continue
+                        with ui.expansion(f"{zh[k]}（前 15 / 共 {len(items)}）——逐项可直达 XAL 修改",
+                                          icon="rule").classes("w-full text-xs"):
+                            for it in items[:15]:
+                                with ui.row().classes("w-full items-center gap-2"):
+                                    detail = (f"conf {it.get('conf'):.2f} · {it.get('cls_gt')}→{it.get('cls_pred')}"
+                                              if k == "misclass" else
+                                              f"conf {it.get('conf'):.2f} · {it.get('cls')}" if k == "missing"
+                                              else f"{it.get('cls')}（无任何重叠预测）")
+                                    src = _thumb_src(it["image"], box=96)
+                                    if src:
+                                        ui.image(src).classes("w-14 h-9 object-cover rounded-sm shrink-0")
+                                    ui.label(detail).classes("text-[10px] opacity-60 w-48 shrink-0")
+                                    ui.label(Path(it["image"]).name).classes(
+                                        "text-[11px] truncate flex-1 min-w-0")
+
+                                    def _jump(img=it["image"]) -> None:
+                                        rst["filter"] = "all"
+                                        idx = next((i for i, x in enumerate(_fl())
+                                                    if x["image"] == img), None)
+                                        if idx is not None:
+                                            rst["i"] = idx
+                                            _view.refresh()
+
+                                    ui.button("审查此图", icon="gavel").props(
+                                        "flat dense size=xs color=primary").on_click(_jump)
+                                    ui.button(icon="open_in_new",
+                                              on_click=lambda img=it["image"]: _open_in_xal(img)).props(
+                                        "flat dense size=xs").tooltip("在 X-AnyLabeling 中打开")
+
+                def _probe_tick() -> None:
+                    try:
+                        p = ds.label_probe_status(meta["name"]) or {}
+                    except Exception:  # noqa: BLE001
+                        return
+                    if p.get("status") == "running":
+                        _probe_area.refresh()
+
+                ui.timer(3.0, _probe_tick)
+
+                @ui.refreshable
+                def _view() -> None:
+                    items = rst["items"]
+                    fl = _fl()
+                    c = {"pending": 0, "approved": 0, "rejected": 0, "skipped": 0, "modified": 0}
+                    for it in items:
+                        c[it["effective"]] += 1
+                        c["modified"] += int(it["modified"])
+                    done = c["approved"] + c["rejected"] + c["skipped"]
+                    with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                        ui.linear_progress(done / max(len(items), 1), show_value=False).classes("grow max-w-56")
+                        ui.label(f"已审 {done}/{len(items)}"
+                                 + (f" · 负样本 {queue.get('unlabeled', 0)} 不入队" if queue.get("unlabeled") else "")
+                                 ).classes("text-xs opacity-70")
+                        for k, cls in (("pending", "bg-slate-600"), ("approved", "bg-emerald-600"),
+                                       ("rejected", "bg-rose-600"), ("skipped", "bg-amber-600")):
+                            ui.label(f"{zh_state[k]} {c[k]}").classes(
+                                f"{cls} text-white text-[10px] px-1.5 py-0.5 rounded-sm")
+                        if c["modified"]:
+                            ui.label(f"已修改 {c['modified']}").classes("text-[10px] text-purple-300")
+                        ui.space()
+                        ui.button("标注质检", icon="biotech").props("flat dense size=xs").tooltip(
+                            "训前探针：yolo11n 快训 3 epoch → 全量低置信度推理 → 漏标/类错标/幽灵标三嫌疑榜单（约几分钟）"
+                        ).on_click(_run_probe)
+                        ui.button("导出驳回清单", icon="fact_check").props("flat dense size=xs").tooltip(
+                            "驳回图 markdown 清单落数据集目录（与改标清单同构）").on_click(_export_rejects)
+                        ui.button("刷新队列", icon="refresh").props("flat dense size=xs").on_click(_reload)
+                    _probe_area()
+                    with ui.row().classes("w-full gap-1 flex-wrap text-[10px]"):
+                        for key, zh in (("pending", "待审"), ("modified", "已修改"), ("rejected", "驳回"),
+                                        ("approved", "通过"), ("skipped", "跳过"), ("all", "全部")):
+                            hot = rst["filter"] == key
+                            ui.button(zh, on_click=lambda k=key: [
+                                rst.__setitem__("filter", k), rst.__setitem__("i", 0), _view.refresh()]
+                            ).props(f"dense no-caps {'unelevated' if hot else 'flat outline'} color=primary"
+                                    ).classes("px-2")
+                    if not fl:
+                        ui.label("该过滤下没有图片"
+                                 + ("——全部审完。" if rst["filter"] == "pending" else "")).classes(
+                            "text-xs opacity-50 q-pa-md")
+                        return
+                    rst["i"] = min(rst["i"], len(fl) - 1)
+                    cur = fl[rst["i"]]
+                    with ui.row().classes("w-full gap-3 items-start no-wrap"):
+                        with ui.column().classes("grow min-w-0 items-center gap-1"):
+                            url = _review_img_url(cur["image"])
+                            if url:
+                                with ui.element("div").classes("relative w-full"):
+                                    ui.image(url).classes("w-full block rounded")
+                                    ui.html(_review_overlay_svg(cur["label"])).classes("absolute inset-0")
+                            with ui.row().classes("items-center gap-1 flex-wrap max-w-full"):
+                                eff = cur["effective"]
+                                ui.label(zh_state.get(eff, eff)).classes(
+                                    {"pending": "bg-slate-600", "approved": "bg-emerald-600",
+                                     "rejected": "bg-rose-600", "skipped": "bg-amber-600"}[eff]
+                                    + " text-white text-[10px] px-1.5 py-0.5 rounded-sm")
+                                if cur["modified"]:
+                                    ui.badge("已修改", color="purple").props("outline")
+                                if cur["reason"]:
+                                    ui.label(cur["reason"]).classes("text-[10px] text-rose-300")
+                                if cur["sources"]:
+                                    ui.label("可疑 " + "/".join(cur["sources"])
+                                             + (f" {cur['susp']:.2f}" if cur["susp"] else "")
+                                             ).classes("text-[10px] text-amber-300")
+                                ui.label(f"{cur['split']} · {cur['name']}"
+                                         ).classes("text-[10px] opacity-60 truncate max-w-72")
+                                ui.label(f"{rst['i'] + 1}/{len(fl)}").classes("text-[10px] opacity-40")
+                            with ui.row().classes("gap-1 flex-wrap"):
+                                ui.button("← 上一张", on_click=lambda: [_go(-1), _view.refresh()]
+                                          ).props("outline dense")
+                                ui.button("通过 n", icon="check",
+                                          on_click=lambda: _decide("approved")).props(
+                                    "unelevated dense color=positive")
+                                ui.button("驳回 b", icon="close",
+                                          on_click=lambda: [rst.__setitem__("reject_open", True),
+                                                            _view.refresh()]).props(
+                                    "unelevated dense color=negative")
+                                ui.button("跳过 s", icon="skip_next",
+                                          on_click=lambda: _decide("skipped")).props(
+                                    "outline dense color=warning")
+                                ui.button("下一张 →", on_click=lambda: [_go(1), _view.refresh()]
+                                          ).props("outline dense")
+                                ui.button(icon="open_in_new",
+                                          on_click=lambda: _open_in_xal(cur["image"])).props(
+                                    "flat dense").tooltip("在 X-AnyLabeling 中打开修改")
+                                ui.button("去排除", icon="visibility_off",
+                                          on_click=_exclude_cur).props(
+                                    "flat dense color=negative").tooltip("从切分清单排除（复用质量审计处置）")
+                            if rst["reject_open"]:
+                                with ui.row().classes("gap-1 flex-wrap"):
+                                    for k, r in enumerate(REVIEW_REASONS, 1):
+                                        ui.button(f"{k} · {r}", on_click=lambda r=r: _decide("rejected", r)
+                                                  ).props("dense color=negative")
+                        with ui.column().classes("w-24 shrink-0"):
+                            with ui.scroll_area().classes("h-[62vh]"):
+                                for idx, it in enumerate(fl[:80]):
+                                    hot = idx == rst["i"]
+                                    with ui.element("div").classes(
+                                            "cursor-pointer mb-1 rounded-sm border-2 "
+                                            + ("border-primary" if hot else "border-transparent")
+                                            ).on("click", lambda i=idx: [rst.__setitem__("i", i),
+                                                                         _view.refresh()]):
+                                        src = _thumb_src(it["image"], box=72)
+                                        if src:
+                                            ui.image(src).classes("w-full h-12 object-cover")
+                                        ui.label(zh_state.get(it["effective"], "?")[:2]
+                                                 + ("改" if it["modified"] else "")
+                                                 ).classes("text-[9px] text-center opacity-60")
+                            if len(fl) > 80:
+                                ui.label(f"前 80 / {len(fl)}").classes("text-[9px] opacity-40")
+                # 首屏胶片条缩略图并行预热（M6 断连教训：不在线程外批量解码）
+                with ThreadPoolExecutor(max_workers=8) as pool:
+                    list(pool.map(lambda it: _thumb_src(it["image"], box=72), rst["items"][:80]))
+                _view()
+
+                async def _on_key(e) -> None:
+                    if (state.get("ds_tab") or "overview") != "review":
+                        return
+                    if not e.action.keydown or e.action.repeat:
+                        return
+                    k = str(e.key)
+                    if k == "ArrowRight":
+                        _go(1)
+                        _view.refresh()
+                    elif k == "ArrowLeft":
+                        _go(-1)
+                        _view.refresh()
+                    elif k == "n":
+                        await _decide("approved")
+                    elif k == "s":
+                        await _decide("skipped")
+                    elif k == "b" and not rst["reject_open"]:
+                        rst["reject_open"] = True
+                        _view.refresh()
+                    elif k in ("1", "2", "3", "4") and rst["reject_open"]:
+                        await _decide("rejected", REVIEW_REASONS[int(k) - 1])
+
+                ui.keyboard(on_key=_on_key)
 
             # ── 健康报告页签：四图 + 下钻筛图 + 在 X-AnyLabeling 中打开（01/02 号票）
             def _render_health(name: str, meta: dict) -> None:
@@ -3240,6 +3650,8 @@ def mount() -> None:
                 r_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05)
                 r_seed = ui.number("随机种子", value=42, precision=0)
                 r_strat = ui.checkbox("按类别分层")
+                # M9 03「只训已审」：数据集级开关的落点（默认关；重切生成只含通过图的新清单）
+                r_appr = ui.checkbox("只训已审：仅含「通过」图（负样本保留；未审/驳回/跳过不入，旧清单保留可切回）")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=resplit_dialog.close).props("flat")
                     r_ok = ui.button("重切", icon="call_split", on_click=lambda: do_resplit2()).props("unelevated")
@@ -3251,9 +3663,11 @@ def mount() -> None:
                     with _busy(r_ok, "重切分中…"):
                         try:
                             m = await _io(ds.resplit_dataset, name, r_ratio.value or 0.8,
-                                          int(r_seed.value or 42), r_strat.value)
+                                          int(r_seed.value or 42), r_strat.value, r_appr.value)
                             resplit_dialog.close()
-                            ui.notify(f"新清单 {m['uid']}：train {len(m['train'])} / val {len(m['val'])}",
+                            extra = f" · 只训已审（滤除未通过 {m.get('approved_dropped', 0)} 图）" \
+                                if m.get("approved_only") else ""
+                            ui.notify(f"新清单 {m['uid']}：train {len(m['train'])} / val {len(m['val'])}{extra}",
                                       type="positive")
                         except Exception as exc:  # noqa: BLE001
                             ui.notify(f"重切失败：{exc}", type="negative")

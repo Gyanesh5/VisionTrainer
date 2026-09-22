@@ -1,0 +1,202 @@
+"""标注审查（M9 02 号票，[ADR 0003](../../../docs/adr/0003-review-state-in-annotation-json.md)）。
+
+状态机：pending / approved / rejected / skipped（图级硬编码，驳回必附理由）。
+- `checked`（X-AnyLabeling v4 官方顶层字段）⇔ approved——XAL 文件列表图标 / checked::0
+  过滤 / Ctrl+Shift+D 跳未审图零改动互通；无 `vt_review` 且 checked=true → approved
+  （来源 XAL 内手动 Ctrl+Alt+K，双向互认）。
+- `vt_review` 平台自有顶层键（经 XAL other_data 机制读写往返幸存，勿与九个基础字段同名）：
+  {state, reason, note, decided_at, shapes_hash, mtime_ns, size}。
+- 有效状态（双指纹失效）：stat（mtime_ns+size）快筛命中 → 信任存储态；stat 变了 →
+  shapes 序列化哈希权威比对——一致（只动过元数据/checked）状态维持，不一致（标注内容
+  改过）→ pending + 「已修改」标记。核心不变式：改过的图必须重新人眼判定。
+- 平台写路径（首次放宽「JSON 只读」）：白名单仅 checked/vt_review 两键；
+  tempfile+fsync+os.replace 原子写（对齐 XAL 行为）；并发 last-writer-wins（ADR 0003）。
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+REVIEW_STATES = ("pending", "approved", "rejected", "skipped")
+REVIEW_REASONS = ("漏标", "多标", "框不准", "类别错")  # 驳回理由预设（CVAT quick issue 式）
+
+# 可疑度权重（01 号报告「先审最可疑的」）：校验未过 > 审计命中 > 错误分析 FN/FP
+SUSP_VALIDATION = 0.6
+SUSP_AUDIT_DUP = 0.7
+SUSP_AUDIT_LEAK = 0.9
+SUSP_ANALYSIS_PER_ERROR = 0.05
+SUSP_CAP = 1.0
+
+
+def shapes_hash(data: dict) -> str:
+    """shapes 序列化哈希——权威指纹：只动 checked/vt_review 等元数据不改变它。"""
+    return hashlib.sha256(
+        json.dumps(data.get("shapes") or [], ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def read_state(label_path: Path) -> dict:
+    """读单图审查状态 → {state, effective, reason, note, decided_at, modified, source}。
+
+    effective 为派生态：标注内容变更后的已判定图降级 pending 并带 modified 标记。
+    JSON 缺失/坏文件 → pending（负样本无标注，不入审查队列由上层过滤）。
+    """
+    try:
+        data = json.loads(Path(label_path).read_text(encoding="utf-8"))
+        st = Path(label_path).stat()
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return {"state": "pending", "effective": "pending", "reason": "", "note": "",
+                "decided_at": None, "modified": False, "source": None}
+
+    vt = data.get("vt_review") or {}
+    stored = vt.get("state") if vt.get("state") in REVIEW_STATES else None
+    if stored is None:
+        if data.get("checked") is True:  # XAL 内手动标记：无平台记录但已勾选 → 互认为通过
+            return {"state": "approved", "effective": "approved", "reason": "", "note": "",
+                    "decided_at": None, "modified": False, "source": "xal"}
+        return {"state": "pending", "effective": "pending", "reason": "", "note": "",
+                "decided_at": None, "modified": False, "source": None}
+
+    state = stored
+    modified = False
+    if (vt.get("mtime_ns"), vt.get("size")) != (st.st_mtime_ns, st.st_size):
+        # stat 变了不等于内容变了（XAL 只存 checked / 平台写元数据都会动 mtime）→ 哈希裁决
+        modified = vt.get("shapes_hash") != shapes_hash(data)
+        if modified:
+            state = "pending"
+    # XAL 内后手动勾选 checked 且内容未变 → 通过覆盖（人刚在 XAL 里判定过）
+    if data.get("checked") is True and not modified:
+        state = "approved"
+    return {"state": stored, "effective": state, "reason": vt.get("reason") or "",
+            "note": vt.get("note") or "", "decided_at": vt.get("decided_at"),
+            "modified": modified and stored != "pending", "source": "vt"}
+
+
+def write_review(label_path: Path, state: str, reason: str = "", note: str = "") -> dict:
+    """窄写白名单两键（checked + vt_review）并原子落盘；返回写后的存储记录。
+
+    mtime_ns/size 存的是**写前** stat：本次写入必然推进 mtime，下次读取走哈希裁决路径
+    （shapes 未动 → 状态维持）——存陈旧 stat 无害，且免去「写后指纹回填再写一次又失效」
+    的鸡生蛋问题（ADR 0003 备选实现，取更简者）。
+    """
+    if state not in REVIEW_STATES:
+        raise ValueError(f"非法审查状态：{state}")
+    if state == "rejected" and not reason:
+        raise ValueError("驳回必附理由")
+    p = Path(label_path)
+    data = json.loads(p.read_text(encoding="utf-8"))
+    st = p.stat()
+    record = {
+        "state": state,
+        "reason": reason,
+        "note": note,
+        "decided_at": datetime.now().isoformat(timespec="seconds"),
+        "shapes_hash": shapes_hash(data),
+        "mtime_ns": st.st_mtime_ns,
+        "size": st.st_size,
+    }
+    data["checked"] = state == "approved"  # XAL 官方字段：通过 ⇔ 绿标
+    data["vt_review"] = record
+    _atomic_write_json(p, data)
+    return record
+
+
+def _atomic_write_json(p: Path, data: dict) -> None:
+    """tempfile+fsync+os.replace（对齐 XAL 保存行为：外部按 mtime 感知可靠，无半截文件）。"""
+    text = json.dumps(data, ensure_ascii=False, indent=2)
+    fd, tmp = tempfile.mkstemp(prefix=".vt_", dir=str(p.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
+# ---------------------------------------------------------------- 可疑度聚合
+
+def compute_suspicion(meta: dict, manifest: dict, dataset: str,
+                      probe_report: dict | None = None) -> dict[str, dict]:
+    """聚合可疑度来源（0–1）：校验问题 / 审计命中（重复·泄漏·同图重复）/ 训后错误分析
+    FN·FP / 标注质检三榜单。返回 {image: {"susp": float, "sources": [str]}}。
+
+    DB 不可用或某来源无数据时该来源自然缺席。
+    """
+    out: dict[str, dict] = {}
+
+    def _add(image: str, source: str, weight: float):
+        rec = out.setdefault(str(image), {"susp": 0.0, "sources": []})
+        rec["susp"] = min(rec["susp"] + weight, SUSP_CAP)
+        if source not in rec["sources"]:
+            rec["sources"].append(source)
+
+    # ① 校验未过（missing_json 是负样本设计内行为，不计）
+    for p in (meta.get("last_validation") or {}).get("problems") or []:
+        if p.get("code") and p["code"] not in ("missing_json",):
+            _add(p["image"], "校验", SUSP_VALIDATION)
+
+    # ② 审计缓存命中（只读缓存，未跑过体检则缺席）
+    from .audit import load_cached
+
+    audit = load_cached(dataset, manifest.get("uid") or "")
+    if audit:
+        for g in audit.get("exact_groups") or []:
+            for it in g:
+                _add(it["image"], "审计·重复", SUSP_AUDIT_DUP)
+        for g in audit.get("near_groups") or []:
+            for it in g:
+                _add(it["image"], "审计·重复", SUSP_AUDIT_DUP * 0.9)
+        for leak in audit.get("leaks") or []:
+            for it in leak.get("items") or []:
+                _add(it["image"], "审计·泄漏", SUSP_AUDIT_LEAK)
+        for d in (audit.get("duplicates_within") or {}).get("items") or []:
+            _add(d["image"], "审计·同图重复", SUSP_AUDIT_DUP * 0.8)
+
+    # ③ 标注质检三嫌疑榜单（M9 04；报告落盘由 service 读入传入）
+    if probe_report:
+        for m in probe_report.get("missing") or []:
+            _add(m["image"], "标注质检", 0.8)
+        for m in probe_report.get("misclass") or []:
+            _add(m["image"], "标注质检", 0.8)
+        for m in probe_report.get("spurious") or []:
+            _add(m["image"], "标注质检", 0.7)
+
+    # ③ 训后错误分析（该数据集最近一次 Run 的逐框错误）：FN/FP/混淆 图级计数
+    try:
+        from ..db.models import Run, RunSampleError, Task
+        from ..db.runtime import get_session_factory
+
+        factory = get_session_factory()
+        if factory is not None:
+            with factory() as s:
+                task = (
+                    s.query(Task)
+                    .filter(Task.dataset_manifest_path.like(f"%/{dataset}/derived/%"))
+                    .order_by(Task.id.desc())
+                    .first()
+                )
+                if task:
+                    run = s.query(Run).filter(Run.task_id == task.id).order_by(Run.id.desc()).first()
+                    if run:
+                        rows = (
+                            s.query(RunSampleError.image, RunSampleError.kind)
+                            .filter(RunSampleError.run_id == run.id,
+                                    RunSampleError.kind.in_(("fp", "fn", "confusion")))
+                            .all()
+                        )
+                        counts: dict[str, int] = {}
+                        for img, _kind in rows:
+                            counts[img] = counts.get(img, 0) + 1
+                        for img, n in counts.items():
+                            _add(img, "错误分析", min(n * SUSP_ANALYSIS_PER_ERROR, 0.5))
+    except Exception:  # noqa: BLE001 — 可疑度是增强信号，任何来源失败都不炸审查
+        pass
+    return out

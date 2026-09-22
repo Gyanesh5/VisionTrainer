@@ -40,7 +40,7 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, images[{image,label,name,split,state,effective,reason,modified,excluded,susp,src}]}`——有效状态按双指纹现算（shapes 哈希变更 → pending+modified 标记）；可疑度分值与来源（校验/审计/健康/改标清单/质检榜单）由平台聚合 |
+| GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,split,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——有效状态按双指纹现算（shapes 哈希变更 → pending+modified 标记）；负样本（无标注 JSON）不入队；可疑度分值与来源（校验/审计/错误分析/标注质检）由平台聚合，队列按可疑度降序 |
 | POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单（`checked`/`vt_review`）原子写回标注 JSON（ADR 0003）；rejected 必填 reason（漏标/多标/框不准/类别错+note）；图不在活跃清单 404 |
 | POST | `/api/v1/datasets/{id}/review/export` | 导出驳回清单 markdown 至数据集目录（与改标清单同构：逐项图名+理由+XAL 直达行） |
 | POST | `/api/v1/datasets/{id}/label-probe` | 跑标注质检（M9，后台作业：训练 venv yolo11n 快训 3–5 epoch → 全量低 conf 推理 → 平台侧三榜单重组）；进行中重复触发 409 |

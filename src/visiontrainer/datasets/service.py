@@ -11,6 +11,8 @@ import hashlib
 import json
 import os
 import shutil
+import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -250,8 +252,14 @@ def validate_dataset_by_name(name: str, root: Path | None = None) -> dict:
     return report
 
 
-def resplit_dataset(name: str, ratio: float, seed: int, stratify: bool, root: Path | None = None) -> dict:
-    """显式重切：基于既有文件清单生成新 manifest（新 uid），派生新结构，切换 active。"""
+def resplit_dataset(name: str, ratio: float, seed: int, stratify: bool,
+                    approved_only: bool = False, root: Path | None = None) -> dict:
+    """显式重切：基于既有文件清单生成新 manifest（新 uid），派生新结构，切换 active。
+
+    approved_only（M9 03「只训已审」，默认关）：只保留有效状态=通过（checked:true）的图；
+    负样本（无标注 JSON）恒保留（无标注即无审查风险）；未审/驳回/跳过不入新清单，
+    旧清单保留可切回（机制同排除）。
+    """
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不参与切分")
@@ -261,7 +269,26 @@ def resplit_dataset(name: str, ratio: float, seed: int, stratify: bool, root: Pa
         {"image": f["image"], "label": f["label"], "primary_label": f.get("primary_label")}
         for f in prev["files"]
     ]
+    dropped_review = 0
+    if approved_only:
+        from . import review as rv
+
+        kept = []
+        for e in entries:
+            lbl = e.get("label")
+            if not lbl or not Path(lbl).exists():
+                kept.append(e)  # 负样本保留
+            elif rv.read_state(Path(lbl))["effective"] == "approved":
+                kept.append(e)
+            else:
+                dropped_review += 1
+        if not any(e.get("primary_label") for e in kept):
+            raise DatasetError("state_conflict",
+                               "「只训已审」过滤后没有任何已通过的标注图——先到数据集「标注审查」页判定")
+        entries = kept
     manifest = build_manifest(entries, ratio, seed, stratify, prev_manifest=prev)
+    manifest["approved_only"] = bool(approved_only)
+    manifest["approved_dropped"] = dropped_review
     _derive(ds_dir, manifest, meta["task_type"], meta["classes"])  # 先派生（会清空同 uid 目录）
     save_manifest(ds_dir, manifest)  # 再落盘 manifest，避免被 _derive 的清理删除
     if manifest["uid"] != meta["active_manifest"]:
@@ -415,6 +442,180 @@ def relabel_refresh(name: str, image: str | None = None, root: Path | None = Non
     return {"refreshed": refreshed, "drops": drops, "manifest": manifest["uid"]}
 
 
+# ---------------------------------------------------------------- 标注审查（M9 02 号票）
+
+def review_queue(name: str, root: Path | None = None) -> dict:
+    """审查队列：活跃清单成员的有效状态（双指纹现算）+ 可疑度排序（降序 = 先审最可疑的）。
+
+    负样本（无标注 JSON）不入队列——审查对象是标注，负样本随标注产生再进队列。
+    """
+    from . import review as rv
+
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不做标注审查")
+    ds_dir = _ds_dir(name, root)
+    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+    train_set = set(manifest["train"])
+    from .label_probe import load_probe_report
+
+    susp = rv.compute_suspicion(meta, manifest, name,
+                                probe_report=load_probe_report(ds_dir, manifest["uid"]))
+
+    counts = {"pending": 0, "approved": 0, "rejected": 0, "skipped": 0, "modified": 0}
+    items, unlabeled = [], 0
+    for f in manifest["files"]:
+        lbl = f.get("label")
+        if not lbl or not Path(lbl).exists():
+            unlabeled += 1
+            continue
+        st = rv.read_state(Path(lbl))
+        eff = st["effective"]
+        counts[eff] += 1
+        if st["modified"]:
+            counts["modified"] += 1
+        s = susp.get(f["image"]) or {"susp": 0.0, "sources": []}
+        items.append({
+            "image": f["image"], "label": lbl,
+            "name": Path(f["image"]).name,
+            "split": "train" if f["image"] in train_set else "val",
+            "state": st["state"], "effective": eff,
+            "reason": st["reason"], "note": st["note"],
+            "decided_at": st["decided_at"], "modified": st["modified"], "source": st["source"],
+            "susp": round(s["susp"], 3), "sources": s["sources"],
+        })
+    items.sort(key=lambda x: (-x["susp"], x["name"]))
+    done = counts["approved"] + counts["rejected"] + counts["skipped"]
+    return {"counts": counts, "done": done, "total": len(items),
+            "unlabeled": unlabeled, "manifest": manifest["uid"], "items": items}
+
+
+def review_decide(name: str, image: str, state: str, reason: str = "",
+                  note: str = "", root: Path | None = None) -> dict:
+    """判定一图（窄写 checked/vt_review，ADR 0003）；驳回必附理由。返回写后状态。"""
+    from . import review as rv
+
+    if state not in rv.REVIEW_STATES:
+        raise DatasetError("invalid_args", f"state 必须是 {list(rv.REVIEW_STATES)}")
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不做标注审查")
+    ds_dir = _ds_dir(name, root)
+    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+    entry = next((f for f in manifest["files"] if f["image"] == image), None)
+    if entry is None:
+        raise DatasetError("not_found", f"图片不在活跃切分清单内：{Path(image).name}")
+    lbl = entry.get("label")
+    if not lbl or not Path(lbl).exists():
+        raise DatasetError("invalid_args", "负样本无标注 JSON，随标注产生后才能审查")
+    try:
+        rv.write_review(Path(lbl), state, reason, note)
+    except ValueError as exc:
+        raise DatasetError("invalid_args", str(exc))
+    st = rv.read_state(Path(lbl))
+    return {"image": image, "state": st["state"], "effective": st["effective"],
+            "reason": st["reason"], "checked_synced": True}
+
+
+def review_progress(name: str, root: Path | None = None) -> dict:
+    """审查完成度摘要（M9 03：训练提交提示用；解析全部标注 JSON，按需调用、勿进列表接口）。"""
+    q = review_queue(name, root)
+    c = q["counts"]
+    return {"counts": c, "done": q["done"], "total": q["total"], "unlabeled": q["unlabeled"]}
+
+
+def export_review_rejects(name: str, root: Path | None = None) -> dict:
+    """导出驳回清单 markdown（M9 05：与改标清单同构——逐图分组 + 理由 + XAL 修法提示）。"""
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不做标注审查")
+    q = review_queue(name, root)
+    rejects = [it for it in q["items"] if it["effective"] == "rejected"]
+    if not rejects:
+        raise DatasetError("state_conflict", "当前没有驳回状态的图片，无需导出")
+    lines = ["# 标注审查驳回清单", "",
+             f"- 数据集：{name} · 共 {len(rejects)} 张（状态真源在标注 JSON，本清单是导出视图）",
+             "- 修法：在 X-AnyLabeling 中打开对应图片，按理由补框/删框/调框/改类别；"
+             "修完回平台「标注审查」页复审（内容变更会自动回待审）", ""]
+    cur = None
+    for it in rejects:
+        if it["image"] != cur:
+            cur = it["image"]
+            lines += [f"## {it['name']}", f"路径：{cur}", ""]
+        note = f" · 备注：{it['note']}" if it.get("note") else ""
+        lines.append(f"- [驳回] 理由：{it['reason'] or '—'}{note}（判定于 {it.get('decided_at') or '—'}）")
+    out = _ds_dir(name, root) / f"review-rejects-{datetime.now().strftime('%Y%m%d-%H%M%S')}.md"
+    out.write_text("\n".join(lines), encoding="utf-8")
+    return {"path": str(out), "count": len(rejects),
+            "entries": [{"image": it["image"], "reason": it["reason"]} for it in rejects]}
+
+
+# ---------------------------------------------------------------- 标注质检（M9 04 号票）
+
+_LABEL_PROBE_JOBS: dict[str, dict] = {}  # name -> {status: running|done|failed, started_at, ...}
+
+
+def label_probe_status(name: str, root: Path | None = None) -> dict | None:
+    """质检作业/结果读：内存作业态优先（running/failed），否则落盘报告（done），未跑过 null。"""
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不做标注质检")
+    job = _LABEL_PROBE_JOBS.get(name)
+    report = None
+    try:
+        from .label_probe import load_probe_report
+
+        report = load_probe_report(_ds_dir(name, root), meta["active_manifest"])
+    except Exception:  # noqa: BLE001 — 报告读取失败按未跑过处理
+        report = None
+    if job and job["status"] == "running":
+        return {"status": "running", "started_at": job.get("started_at")}
+    if job and job["status"] == "failed":
+        return {"status": "failed", "started_at": job.get("started_at"),
+                "error": job.get("error") or "未知错误", "report": report}
+    return {"status": "done", "report": report} if report else None
+
+
+def run_label_probe(name: str, root: Path | None = None) -> dict:
+    """启动标注质检（后台线程）：快训探针 → 全量推理 → 三嫌疑榜单；进行中重复触发 409。"""
+    from .label_probe import PROBE_MODELS
+
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不做标注质检")
+    if meta["task_type"] not in PROBE_MODELS:
+        raise DatasetError("invalid_args",
+                           f"标注质检仅支持检测/分割/旋转框任务（当前 {meta['task_type']}）")
+    job = _LABEL_PROBE_JOBS.get(name)
+    if job and job["status"] == "running":
+        raise DatasetError("state_conflict", "标注质检正在运行中（全量推理需几分钟）")
+    _LABEL_PROBE_JOBS[name] = {"status": "running",
+                               "started_at": datetime.now().isoformat(timespec="seconds")}
+    threading.Thread(target=_probe_worker, args=(name, root), daemon=True).start()
+    return {"status": "running", **_LABEL_PROBE_JOBS[name]}
+
+
+def _probe_worker(name: str, root: Path | None = None) -> None:
+    from .label_probe import run_probe
+
+    job = _LABEL_PROBE_JOBS.setdefault(name, {"status": "running",
+                                              "started_at": datetime.now().isoformat(timespec="seconds")})
+    try:
+        from ..config import load_config
+
+        meta = get_dataset(name, root)
+        ds_dir = _ds_dir(name, root)
+        manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"]
+                              / "split_manifest.json")
+        py = load_config().get("training", {}).get("python") or sys.executable
+        report = run_probe(ds_dir, manifest, meta["task_type"], meta["classes"], py)
+        job.update(status="done", report=report,
+                   finished_at=datetime.now().isoformat(timespec="seconds"))
+    except Exception as exc:  # noqa: BLE001 — 作业失败落状态供 GET 读，不炸线程
+        job.update(status="failed", error=str(exc),
+                   finished_at=datetime.now().isoformat(timespec="seconds"))
+
+
 # ---------------------------------------------------------------- 派生结构
 
 def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
@@ -492,6 +693,7 @@ def _manifest_brief(manifest: dict) -> dict:
         "ratio": manifest["ratio"],
         "stratify": manifest["stratify"],
         "created_at": manifest["created_at"],
+        "approved_only": bool(manifest.get("approved_only")),
     }
 
 
