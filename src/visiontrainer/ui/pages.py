@@ -1360,8 +1360,25 @@ body.body--dark .q-table thead tr th { background: rgba(99, 102, 241, .10) !impo
 """
 
 
+# 产品标识：检测框四角括号（视觉检测）+ 上升收敛曲线（训练过程），品牌渐变与主题一致
+_LOGO_SVG = (
+    '<svg width="34" height="34" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">'
+    '<defs><linearGradient id="vt-g" x1="4" y1="4" x2="32" y2="32" gradientUnits="userSpaceOnUse">'
+    '<stop stop-color="#6366f1"/><stop offset=".52" stop-color="#8b5cf6"/>'
+    '<stop offset="1" stop-color="#06b6d4"/></linearGradient></defs>'
+    '<path d="M2.5 10.5V5A2.5 2.5 0 0 1 5 2.5h5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M25.5 2.5H31A2.5 2.5 0 0 1 33.5 5v5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M33.5 25.5V31a2.5 2.5 0 0 1-2.5 2.5h-5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M10.5 33.5H5A2.5 2.5 0 0 1 2.5 31v-5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M8 26c4.5-1 6.5-8 10.5-11 3-2.2 7-4 10-5.5" stroke="url(#vt-g)" stroke-width="2.6" '
+    'stroke-linecap="round"/>'
+    '<circle cx="28.5" cy="9.5" r="2.6" fill="#06b6d4"/>'
+    '</svg>'
+)
+
+
 def _nav_rail(active: str) -> None:
-    """左侧窄导航栏：图标 + 文字小标签 + 深浅色切换 + 底部版本号。"""
+    """左侧窄导航栏：产品标识 + 图标 + 文字小标签 + 深浅色切换 + 底部版本号。"""
     dark = ui.dark_mode(bool(app.storage.user.get("dark")))
 
     def _toggle_dark() -> None:
@@ -1369,7 +1386,11 @@ def _nav_rail(active: str) -> None:
         app.storage.user["dark"] = dark.value
 
     with ui.column().classes("w-16 items-center gap-1 pt-5 ai-nav h-full shrink-0"):
-        ui.label("YO").classes("ai-logo mb-3")
+        with ui.element("div").classes("flex flex-col items-center mb-3 cursor-default"):
+            ui.html(_LOGO_SVG)
+            ui.label("VT").classes("ai-logo mt-0.5").style(
+                "font-size:10px; letter-spacing:.28em; margin-right:-.28em")
+            ui.tooltip("VisionTrainer · 单机 YOLO 训练平台")
         for title, icon, path in NAV_ITEMS:
             with ui.column().classes("items-center gap-0 q-mb-xs" +
                                      (" ai-active" if title == active else "")):
