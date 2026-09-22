@@ -224,6 +224,23 @@ def test_fingerprint_changes_with_mtime(tmp_path):
     assert fingerprint_of(m) != fp1
 
 
+def test_fingerprint_changes_with_label_edit(tmp_path):
+    """标注 JSON 变更必须使审计缓存失效（05 号票 D7①：指纹纳入 label stat）。"""
+    p = _png(tmp_path / "f.png")
+    lbl = tmp_path / "f.json"
+    lbl.write_text("{}", encoding="utf-8")
+    m = {"uid": "u", "seed": 1, "ratio": 0.5, "stratify": False,
+         "files": [{"image": str(p), "label": str(lbl), "primary_label": None}],
+         "train": [str(p)], "val": []}
+    fp1 = fingerprint_of(m)
+    import os
+    import time
+
+    lbl.write_text('{"shapes": []}', encoding="utf-8")
+    os.utime(lbl, (time.time() + 10, time.time() + 10))
+    assert fingerprint_of(m) != fp1
+
+
 def test_thumb_src_roundtrip(tmp_path):
     """缩略图助手（2026-09-21 网格改版）：真图 → data URL；坏图 → None；mtime 缓存命中。"""
     from PIL import Image

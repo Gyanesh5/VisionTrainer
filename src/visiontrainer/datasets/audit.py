@@ -6,7 +6,7 @@
 - 跨切分泄漏：同组内成员分属 train 与 val（指标虚高的头号来源）
 - 类别失衡：某类实例数 < 最大类的 IMBALANCE_RATIO 且最大类 ≥ IMBALANCE_MIN_ABS
 
-缓存：fingerprint = manifest uid + 清单内全部文件的 (size, mtime_ns) 摘要；
+缓存：fingerprint = manifest uid + 清单内全部文件（图片与标注 JSON）的 (size, mtime_ns) 摘要；
 命中即返回缓存（秒回），文件变化（含排除处置）自动失效。
 审计对象 = 活跃切分清单成员（排除后即从体检范围消失）。
 """
@@ -32,14 +32,21 @@ def _sha256(path: Path) -> str:
 
 
 def fingerprint_of(manifest: dict) -> str:
+    def _stamp(p: Path) -> str:
+        try:
+            st = p.stat()
+            return f"{st.st_size}:{st.st_mtime_ns}"
+        except OSError:
+            return "missing"
+
     parts = [manifest["uid"]]
     for f in sorted(manifest["files"], key=lambda x: x["image"]):
         p = Path(f["image"])
-        try:
-            st = p.stat()
-            parts.append(f"{p.name}:{st.st_size}:{st.st_mtime_ns}")
-        except OSError:
-            parts.append(f"{p.name}:missing")
+        parts.append(f"img:{p.name}:{_stamp(p)}")
+        lbl = f.get("label")
+        if lbl:
+            lp = Path(lbl)
+            parts.append(f"lbl:{lp.name}:{_stamp(lp)}")
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
