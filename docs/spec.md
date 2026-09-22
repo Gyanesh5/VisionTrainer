@@ -1,6 +1,6 @@
 # VisionTrainer 功能与架构 Spec
 
-Version 1.1 · 2026-09-20 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，见 `.scratch/visiontrainer-build/issues/`）；**v1.1 增补竞品对标优化 17 条 + quick-win**（新条目标注 [M6/M7/M8]，来源 `.scratch/competitive-optimization/`）
+Version 1.2 · 2026-09-22 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，见 `.scratch/visiontrainer-build/issues/`）；v1.1 增补竞品对标优化 17 条 + quick-win（[M6/M7/M8]，来源 `.scratch/competitive-optimization/`）；**v1.2 增补标注质量审查闭环**（新条目标注 [R#]，来源 `.scratch/annotation-quality-review/` 地图 05–08 号票，存储决策见 [ADR 0003](adr/0003-review-state-in-annotation-json.md)）
 
 单机 YOLO 训练平台：**数据集管理 → GPU 调度训练队列 → 实时曲线监控 → 结果归档对比**核心闭环，以 **Agent 自动调参**为核心卖点。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录与模型库打通 [T0]。
 
@@ -33,6 +33,12 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **健康报告** [M6]：导入/校验一次遍历聚合入 SQLite（dataset_stats）——逐切分 per-class 分布、每图目标数直方图、图像尺寸散点、标注中心热力图；热图框选/点柱筛图 → 图片清单 +「在 X-AnyLabeling 中打开」。回答「数据长什么样」。
 - **质量审计** [M6]：按需「跑体检」+ 结果缓存——sha256 精确重复、感知哈希（imagehash，唯一新增依赖）近似重复与跨切分泄漏、类别失衡警告；**只报告不动标注真源**，处置限定「从切分清单排除文件」。
 - **校验修复指引** [M6]：五条规则各配「错误→原因→修法」三行文案，错误列表可视化。
+- **校验规则扩充** [R6]：导入/重转换即拦四条——A 转换零静默丢弃（shape 数守恒，丢弃>0 出**丢弃清单**+确认门，永不静默；plate-circle 式事故防回归）/ B 退化框（零面积 error 剔除进丢弃清单、<2px 警告）/ C 坐标越界（±1% 容差带内 clip+记录、超带列待修）/ K 孤儿配对（图↔JSON↔txt 三方对应）；任务特化三条按 task_type 启用——H segment 多边形 `shapely.is_valid`（自交/碎片/退化，报告+建议回 XAL 重画，不自动 make_valid）/ I obb 四点退化·凸性·θ 归一化 / J pose 关键点列数与负坐标。shapely 为平台新依赖（纯几何零 torch）。
+- **审计与健康报告扩充** [R6]：质量审计新增**同图重复/高度重叠标注**（同 label IoU>0.999 完全重复档 + 0.85–0.95 人工复核档，两档均只报告不自动去重——派生忠实于 JSON 真源，去重是人的决定回 XAL 改）；健康报告尺寸散点叠加 32²/96² 官方阈值线 + 小目标占比 + 按训练 imgsz 换算提示。
+- **标注审查** [R5,R7]：数据集详情页第四页签「标注审查」，进入即沉浸键盘流——大图+标注叠加，`n` 通过 / `b` 驳回弹四理由（漏标/多标/框不准/类别错+备注，`1-4` 数字选）/ `s` 跳过 / `←→` 切图，右侧胶片条（轻量状态过滤）。状态机**三态+跳过图级硬编码**；**状态寄生标注 JSON**（XAL v4 官方 `checked`⇔通过 + 平台自有 `vt_review` 键；平台首获窄写白名单——仅此两键、原子写、写后指纹回填，见 ADR 0003）；**双指纹失效**（mtime_ns+size 快筛 + shapes 哈希权威比对：标注内容变更即自动回待审亮「已修改」；XAL 内手动 Ctrl+Alt+K 标记互认为通过）；胶片条与前进顺序=可疑度降序（校验未过/审计命中/健康报告低分/错误分析 FN-FP/同图重复/质检榜单来源加权）；已排除图标徽章不入前进序列；驳回时提供「去排除」与「直达 XAL」入口；**驳回清单 markdown 导出**（与改标清单同构）。训练提交显示审查完成度提示（approved+skipped 占比低于阈值黄牌提醒，不阻断）。
+- **「只训已审」开关** [R8]：数据集级开关（默认关）——开启后重切生成的切分清单与派生结构**只含有效状态=通过（`checked:true`）的图**（待审/驳回/跳过不入；机制同排除：新 manifest、旧清单保留可切回）。
+- **标注质检** [R6]：数据集页一键动作——训练 venv yolo11n 快训 3–5 epoch（探针权重用后即删）→ `analysis_entry` 全量低 conf 推理（图像清单传全量，零代码改动）→ 平台侧**三嫌疑榜单**：漏标嫌疑（高 conf FP 无 GT 匹配）/ 类错标嫌疑（高 IoU 跨类配对按 conf 降序）/ 幽灵标嫌疑（长期无匹配 GT）+ 复用叠加大图；后台作业+结果缓存，1000 图全程约 10 分钟；只建议不自动改。OOF k 折与 cleanlab 质量分二期再议。
+- **标注变更联动** [R4,R5]：单图标注修改 → 单图重转换刷新派生 YOLO txt（`json_to_yolo_lines`+`write_label` 纯函数现成，亚毫秒）+ 健康报告随重新校验刷新；审计缓存指纹已纳入标注 JSON stat（2026-09-22 已修）。
 
 ### 2.2 训练执行与调度 [T4, T1, ADR 0001]
 
@@ -96,11 +102,12 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **产物布局**：Run 目录即 ultralytics save_dir（`project=<runs_dir>/<task_uid>`、`name=<run_uid>`、exist_ok=True）；training.log/report.md/export/ 同目录；约定优于登记。
 - **迁移**：create_all + schema_version 幂等迁移函数，不上 Alembic（二期可引）。
 - **接口**：全部端点与消息 schema 见 [docs/api.md](./api.md)；Pydantic 硬契约 `src/visiontrainer/api/schemas.py`。
+- **审查寄生键** [R5]：标注 JSON 顶层 `checked`（XAL 官方字段，⇔通过）+ `vt_review`（平台自有：`{state, reason, note, decided_at, shapes_hash, mtime_ns, size}`）；无新 DB 表、schema 维持 v4；平台写 JSON 限定白名单两键 + tempfile/fsync/os.replace 原子写（对齐 XAL 行为），并发 last-writer-wins。平台 venv 新增依赖 shapely（唯一）。
 - **词汇表**：根目录 [CONTEXT.md](../CONTEXT.md)（Task/Run/单飞/切分清单/审批门……），实现与文档统一用语。
 
 ## 4. 非目标（Out of scope）
 
-标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · 工具调用业务 Agent · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理。v1.1 竞品对标再裁决的不做项（2026-09-20）：跨数据集合并训练 · 平台内模型测试模块（Test 页+改标清单已覆盖）· 离线增强管道 · 嵌入级分析（FiftyOne 内嵌或引导）· Optuna 模式 · 终端提交入口 · PWA 移动端 · 拖 .pt 导入历史权重。
+标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · 工具调用业务 Agent · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理。v1.1 竞品对标再裁决的不做项（2026-09-20）：跨数据集合并训练 · 平台内模型测试模块（Test 页+改标清单已覆盖）· 离线增强管道 · 嵌入级分析（FiftyOne 内嵌或引导）· Optuna 模式 · 终端提交入口 · PWA 移动端 · 拖 .pt 导入历史权重。v1.2 标注质量审查再裁决的不做项（2026-09-22）：平台内标注编辑（修改一律回 X-AnyLabeling，[ADR 0003](adr/0003-review-state-in-annotation-json.md) 维持出界）· 多标注者协议度（IAA/Cohen's kappa，单机自用）· OOF k 折与 cleanlab 质量分（二期候选，最小形态体感后再议）· training dynamics / zero-shot 大模型查漏标 · 任何硬性审查合格线（一律提示+人工确认）。
 
 ## 5. 路线图（M1–M5）
 
@@ -114,5 +121,6 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 | **M6 数据有底** [v1.1] | 健康报告 / 质量审计 / 校验修复指引 / 运行快照 / 启动配置简化 | ① 导入后健康报告四图可见，热图框选筛图并可「在 X-AnyLabeling 中打开」；②「跑体检」报重复/泄漏/失衡，重复项可从切分清单排除；③ 校验错误带「原因→修法」；④ 数据集变动后旧 Run manifest 仍完整可查；⑤ 启动时 config 问题有自检引导 |
 | **M7 Agent 锋利+训练顺滑** [v1.1] | Agent 页重做（原型先行）/ 参数重要性 / 烂轮早停 / 监控四件 / Retry / 表单工程学 | ① 原型过目后实装：循环总览+决策卡三段式+审批门主次分明；② Agent 决策含参数重要性统计且证据归档可回溯；③ 明显劣化轮在 1/2 epoch 被剪并记 pruned；④ Run 详情见 GPU 曲线、提交页见时长预估、完成有桌面通知、loss 双线；⑤ 失败 Run 一键重开；⑥ 表单只存非默认值 |
 | **M8 病根与价值可见** [v1.1] | 错误分析 / 复盘升级 / 阈值探索器 / Test 页 / 对比六件套 / 部署管理 / 实验模板 | ① Run 后最差样本榜+叠加大图+矩阵点格下钻可用；② FN/FP 清单可导出回 X-AnyLabeling；③ 复盘含「下一步实验推荐」且引用错误统计；④ 部署时建议置信度写入模型配置；⑤ 试跑页 ONNX 叠框正确；⑥ 对比页 diff 三件套+「与当前部署版对比」；⑦ 模板一键生成多 Task |
+| **M9 标注质量审查** [v1.2] | 校验规则扩充 / 审计与健康报告扩充 / 标注审查页签+键盘流 / 只训已审开关 / 标注质检探针 / 单图重转换联动 / 驳回清单导出 | ① 导入含非法 shape 的目录 → 丢弃清单+确认门，零静默（plate-circle 试金石）；退化框/越界/孤儿/同图重复均有报告；② 审查页签键盘判定写回 JSON，X-AnyLabeling 文件列表图标同步绿标；XAL 内改标注后平台自动回「已修改」待审；③ 单图改标后派生 txt 即时刷新、审计缓存正确失效；④ 标注质检三榜单+叠加图可用；⑤ 「只训已审」开启重切后清单只含通过图、旧清单保留可切回；⑥ 驳回清单可导出 markdown；⑦ 训练提交显示审查完成度提示 |
 
-依赖（v1.0）：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。依赖（v1.1 滚动三波）：M6 → M7 → M8 串行推进（每波落地一波验收一波）；M8 内复盘升级与阈值探索器依赖错误分析先落地。
+依赖（v1.0）：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。依赖（v1.1 滚动三波）：M6 → M7 → M8 串行推进（每波落地一波验收一波）；M8 内复盘升级与阈值探索器依赖错误分析先落地。依赖（v1.2）：M9 独立成波、无跨波硬依赖（基于既有数据集管线与错误分析回路扩展），随时可开工；波内建议序：规则扩充与联动底座 → 审查页签 → 只训已审 → 质检探针。
