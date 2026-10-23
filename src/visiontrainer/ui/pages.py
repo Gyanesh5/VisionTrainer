@@ -547,21 +547,47 @@ def _review_img_url(path: str, max_w: int = 1920) -> str | None:
     return url
 
 
+def _review_label_json(label_path: str | None) -> dict:
+    """标注 JSON 宽松读：缺失/坏文件归一 {}（与叠加、图例同一读取口径）。"""
+    if not label_path or not Path(label_path).exists():
+        return {}
+    try:
+        return json.loads(Path(label_path).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — 坏 JSON 不叠加，不炸审查
+        return {}
+
+
+def _review_label_colors(j: dict) -> dict[str, str]:
+    """label → 色板色（shapes 首现序分配）——叠加与图例共用，两处同色。"""
+    colors: dict[str, str] = {}
+    for s in j.get("shapes") or []:
+        lbl = str(s.get("label", "?"))
+        if lbl not in colors:
+            colors[lbl] = _REVIEW_PALETTE[len(colors) % len(_REVIEW_PALETTE)]
+    return colors
+
+
+def _review_shape_legend(label_path: str | None) -> list[tuple[str, int, str]]:
+    """本图标注图例（label × 数量 × 色板色）——审查检查器行/色卡。"""
+    j = _review_label_json(label_path)
+    colors = _review_label_colors(j)
+    counts: dict[str, int] = {}
+    for s in j.get("shapes") or []:
+        lbl = str(s.get("label", "?"))
+        counts[lbl] = counts.get(lbl, 0) + 1
+    return [(lbl, n, colors[lbl]) for lbl, n in counts.items()]
+
+
 def _review_overlay_svg(label_path: str | None) -> str:
     """labelme shapes → 百分比坐标 SVG（标注审查大图叠加；多边形直绘、两点外接框、类别着色）。"""
-    if not label_path or not Path(label_path).exists():
-        return ""
-    try:
-        j = json.loads(Path(label_path).read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001 — 坏 JSON 不叠加，不炸审查
+    j = _review_label_json(label_path)
+    if not j:
         return ""
     w, h = j.get("imageWidth") or 1, j.get("imageHeight") or 1
-    colors: dict[str, str] = {}
+    colors = _review_label_colors(j)
     parts: list[str] = []
     for s in j.get("shapes") or []:
         label = str(s.get("label", "?"))
-        if label not in colors:
-            colors[label] = _REVIEW_PALETTE[len(colors) % len(_REVIEW_PALETTE)]
         c = colors[label]
         try:
             pts = s.get("points") or []
@@ -1481,17 +1507,21 @@ def _nav_rail(active: str) -> None:
         ui.label(VERSION).classes("text-[9px] text-gray-600 mt-1 mb-3")
 
 
-def _page_frame(active: str, title: str, actions=None, body=None) -> None:
+def _page_frame(active: str, title: str, actions=None, body=None, subtitle: str = "") -> None:
     """页面骨架：导航栏 + 标题行（含动作按钮）+ 内容区。
     高度链钉死：外框 calc(100vh − wrapper 16px×2 内边距)，导航满高恒定，
-    仅内容区（min-h-0 + overflow）独立滚动——导航图标位置永不漂移。"""
+    仅内容区（min-h-0 + overflow）独立滚动——导航图标位置永不漂移。
+    subtitle：一句话功能陈述（maskflow-ui-study §2「页面副标题讲本页能干什么」）。"""
     ui.add_head_html(f"<style>{AI_STYLE}</style>")
     with ui.row().classes("w-full m-0 p-0 gap-0 items-stretch overflow-hidden"
                           ).style("height: calc(100vh - 32px)"):
         _nav_rail(active)
         with ui.column().classes("flex-1 p-6 gap-4 w-full ai-main min-h-0 h-full overflow-y-auto"):
             with ui.row().classes("w-full items-center"):
-                ui.label(title).classes("text-xl font-bold ai-title")
+                with ui.column().classes("gap-0"):
+                    ui.label(title).classes("text-xl font-bold ai-title")
+                    if subtitle:
+                        ui.label(subtitle).classes("text-xs opacity-55 mt-0.5")
                 ui.space()
                 if actions:
                     actions()
@@ -2228,18 +2258,23 @@ def mount() -> None:
 
                     # M9 03：审查完成度提示（仅提示不阻断——快训探针场景不受阻）
                     rv_hint = ui.label("").classes("text-[11px] opacity-60")
+                    cr_ctx: dict = {"meta": None, "progress": None}  # B 确认弹窗 facts 缓存
 
                     async def _upd_review_hint() -> None:
                         ds_name = c_ds.value
                         if not ds_name:
                             rv_hint.set_text("")
+                            cr_ctx.update(meta=None, progress=None)
                             return
                         try:
                             meta = await _io(ds.get_dataset, ds_name)
+                            cr_ctx["meta"] = meta
                             if meta.get("form") != "managed":
+                                cr_ctx["progress"] = None
                                 rv_hint.set_text("")
                                 return
                             p = await _io(ds.review_progress, ds_name)
+                            cr_ctx["progress"] = p
                         except Exception:  # noqa: BLE001 — 提示属增强，失败即隐
                             rv_hint.set_text("")
                             return
@@ -2323,7 +2358,7 @@ def mount() -> None:
                     _refresh_summary()
                     with ui.row().classes("w-full justify-end"):
                         ui.button("取消", on_click=create_dialog.close).props("flat")
-                        c_ok = ui.button("创建任务", icon="add", on_click=lambda: do_create()).props("unelevated")
+                        c_ok = ui.button("创建任务", icon="add", on_click=lambda: _open_confirm()).props("unelevated")
                 _wire_model_dataset(c_model, c_ds, c_reason, c_ok)
                 # 默认任务名联动：注册在 wire 之后，数据集带出基模型的级联里最后落定
                 c_ds.on_value_change(lambda _e: _sync_name())
@@ -2382,6 +2417,105 @@ def mount() -> None:
                     except Exception as exc:  # noqa: BLE001
                         ui.notify(f"创建失败：{exc}", type="negative")
 
+                # ── B 确认门（maskflow-ui-study §5.3）：facts 复述 + 三档检查 + 期望管理
+                # 不问新问题，只复述「你将得到什么」；blocker 不硬断（快训探针场景），
+                # 但红色示警让「校验未过/丢弃待确认」在点击创建前被看见。
+                def _confirm_payload() -> tuple[list[tuple[str, str]], list[str], list[str]]:
+                    """(facts 键值对, blockers, warnings)——打开确认弹窗时现算。"""
+                    meta = cr_ctx.get("meta") or {}
+                    lv = meta.get("last_validation") or {}
+                    prog = cr_ctx.get("progress") or {}
+                    facts: list[tuple[str, str]] = []
+                    facts.append(("任务名", (c_name.value or "").strip() or "（自动命名）"))
+                    plan = _tpl_plan()
+                    if plan:
+                        facts.append(("实验模板", f"将创建 {len(plan)} 个任务（"
+                                      + "；".join(f"·{v['suffix']}" for v in plan) + "）"))
+                    if meta:
+                        cls_n = len(meta.get("classes") or [])
+                        facts.append(("数据集", f"{c_ds.value} · {meta.get('task_type')} · {meta.get('form')}"
+                                      + (f" · {lv.get('total_images')} 张" if lv.get("total_images") else "")
+                                      + (f" · {cls_n} 类" if cls_n else "")))
+                    n_adv = len(_collect_params(param_fields))
+                    facts.append(("参数", f"{c_model.value or '?'} · {int(c_epochs.value or 0)} 轮"
+                                  f" · imgsz {c_imgsz.value}"
+                                  f" · batch {c_batch.value if c_batch.value is not None else '自动'}"
+                                  f" · 早停 {c_patience.value or 100} 轮 · GPU {c_device.value or '0'}"
+                                  + (f" · 高级参数 {n_adv} 项" if n_adv else "")))
+                    if prog.get("total"):
+                        ready = prog["counts"]["approved"] + prog["counts"]["skipped"]
+                        facts.append(("审查完成度", f"{ready}/{prog['total']}"
+                                      f"（{ready / prog['total']:.0%}）"
+                                      + (f" · 负样本 {prog.get('unlabeled', 0)} 张不计" if prog.get("unlabeled") else "")))
+                    if est_rate and c_epochs.value:
+                        facts.append(("时长预估", f"~{_fmt_duration(est_rate['seconds_per_epoch'] * float(c_epochs.value))}"
+                                      f"（历史 {est_rate['samples']} 个 Run 中位 {est_rate['seconds_per_epoch']}s/epoch）"))
+                    blockers: list[str] = []
+                    warnings: list[str] = []
+                    if meta.get("form") == "managed":
+                        if lv and not lv.get("ok"):
+                            blockers.append(f"校验未过（{len(lv.get('problems') or [])} 个问题）——"
+                                            "先到数据集页看报告与「错误→原因→修法」指引")
+                        if meta.get("drops_pending_ack"):
+                            blockers.append("存在未确认的丢弃清单（转换零静默守卫）——到数据集页确认后再训练")
+                        if prog.get("total") and \
+                                (prog["counts"]["approved"] + prog["counts"]["skipped"]) / prog["total"] < 0.8:
+                            warnings.append("审查完成度低于 80%——建议先过一遍「标注审查」页（不阻断）")
+                    return facts, blockers, warnings
+
+                def _confirm_notes() -> tuple[str, ...]:
+                    return (
+                        "单飞队列：同一时刻只跑一个 Run，其余排队；GPU 被外部占用时等待并在空闲后自动开始",
+                        "Run 启动即冻结快照（切分清单 + classes 哈希）——之后改标注不影响本次训练，历史 Run 可复现可 diff",
+                        "训练中可关闭页面甚至重启平台：训练子进程脱离运行，重启自动收养恢复曲线",
+                        f"验证指标连续 {c_patience.value or 100} 轮不提升会早停——正常现象，不是故障",
+                        "完成或失败会发桌面通知（notify-send）",
+                    )
+
+                with ui.dialog() as confirm_dlg, ui.card().classes("w-full max-w-2xl gap-2"):
+
+                    @ui.refreshable
+                    def _confirm_body() -> None:
+                        facts, blockers, warnings = _confirm_payload()
+                        ui.label("确认创建训练任务").classes("text-base font-bold")
+                        with ui.column().classes("w-full gap-1"):
+                            for k, v in facts:
+                                with ui.row().classes("items-start gap-3 w-full"):
+                                    ui.label(k).classes("text-xs text-slate-400 w-16 shrink-0 pt-0.5")
+                                    ui.label(v).classes("text-xs flex-1 min-w-0 break-all")
+                        for b in blockers:
+                            with ui.row().classes("items-start gap-2 w-full"):
+                                ui.icon("error", color="negative").classes("text-[15px] mt-0.5")
+                                ui.label(b).classes("text-xs text-rose-400 flex-1")
+                        for w in warnings:
+                            with ui.row().classes("items-start gap-2 w-full"):
+                                ui.icon("warning", color="warning").classes("text-[15px] mt-0.5")
+                                ui.label(w).classes("text-xs text-amber-400 flex-1")
+                        ui.separator().classes("w-full")
+                        ui.label("注意事项").classes("text-xs font-semibold opacity-70")
+                        with ui.column().classes("w-full gap-0.5"):
+                            for n in _confirm_notes():
+                                with ui.row().classes("items-start gap-2 w-full"):
+                                    ui.icon("info", color="grey-6").classes("text-[14px] mt-0.5")
+                                    ui.label(n).classes("text-[11px] opacity-65 flex-1")
+                        with ui.row().classes("w-full justify-end gap-2 mt-1"):
+                            ui.button("返回修改", on_click=confirm_dlg.close).props("flat")
+                            ui.button("确认创建", icon="rocket_launch",
+                                      on_click=lambda: [confirm_dlg.close(), do_create()]).props("unelevated")
+
+                    _confirm_body()
+
+                def _open_confirm() -> None:
+                    """必填项先行校验（与 do_create 同口径），过门再复述 facts。"""
+                    if not (c_name.value or "").strip():
+                        ui.notify("请填写任务名", type="warning")
+                        return
+                    if not c_ds.value:
+                        ui.notify("请选择数据集", type="warning")
+                        return
+                    _confirm_body.refresh()
+                    confirm_dlg.open()
+
             def refresh() -> None:
                 _update_rows(table, rows_data())
                 # 部署完成全局通知（训练页也能看到，不必切去结果页）
@@ -2416,7 +2550,8 @@ def mount() -> None:
                 else:
                     ui.notify(f"数据集 {prefill} 不存在或不可训练", type="warning")
 
-        _page_frame("训练", "训练任务", actions, body)
+        _page_frame("训练", "训练任务", actions, body,
+                    subtitle="提交训练、排队 GPU、实时曲线与结果对比；Agent 任务每轮暂停等你放行")
 
     # ================================================================ 数据集页
     @ui.page("/datasets")
@@ -2714,6 +2849,29 @@ def mount() -> None:
                        "pct": 100}
                 zh_state = {"pending": "待审", "approved": "通过", "rejected": "驳回", "skipped": "跳过"}
 
+                # 快捷键帮助浮层（maskflow-ui-study §5.1「按钮即文档」配套：? 呼出、键位与按钮互文）
+                with ui.dialog() as help_dlg, ui.card().classes("gap-2 max-w-md w-full"):
+                    ui.label("审查快捷键").classes("text-base font-bold")
+                    ui.label("沉浸键盘流：判定即写回标注 JSON 并自动前进；以下均在当前过滤子集内生效"
+                             ).classes("text-[11px] opacity-55")
+                    with ui.column().classes("w-full gap-1"):
+                        for k, d in [
+                            ("n", "通过当前图（写回 checked:true，自动前进）"),
+                            ("b", "驳回——数字 1–4 直选理由（"
+                                  + " / ".join(f"{k_}={r}" for k_, r in enumerate(REVIEW_REASONS, 1)) + "）"),
+                            ("s", "跳过（计入完成度，不算通过；「只训已审」开关不收录）"),
+                            ("← / →", "上一张 / 下一张（在当前过滤子集内循环）"),
+                            ("滚轮 / ±", "画布缩放 50–400%（放大后滚动平移）"),
+                            ("适应", "回 100% 适应画布（切图自动回适应）"),
+                            ("点缩略图", "胶片条直达指定图"),
+                        ]:
+                            with ui.row().classes("items-start gap-3 w-full"):
+                                ui.label(k).classes("text-[11px] font-mono bg-slate-600 text-white "
+                                                    "px-1.5 py-0.5 rounded shrink-0 w-16 text-center")
+                                ui.label(d).classes("text-[11px] opacity-75 flex-1")
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button("关闭", on_click=help_dlg.close).props("flat dense")
+
                 def _apply_pct(pct: int) -> None:
                     """画布缩放（50–400%，与全站可缩放大图查看同一档位/步长）；直改样式不重建画布。"""
                     rst["pct"] = max(50, min(400, pct))
@@ -2746,6 +2904,7 @@ def mount() -> None:
                         return
                     cur.update(state=r["state"], effective=r["effective"],
                                reason=r["reason"], modified=False)
+                    rst["last_decide"] = datetime.now().strftime("%H:%M")
                     ui.notify(f"{Path(cur['image']).name} → {zh_state.get(r['effective'], r['effective'])}"
                               + (f"（{reason}）" if reason else ""), type="positive")
                     rst["reject_open"] = False
@@ -2887,6 +3046,10 @@ def mount() -> None:
                                 f"{cls} text-white text-[10px] px-1.5 py-0.5 rounded-sm")
                         if c["modified"]:
                             ui.label(f"已修改 {c['modified']}").classes("text-[10px] text-purple-300")
+                        ui.badge(f"上次判定 {rst['last_decide']}" if rst.get("last_decide") else "判定即写回"
+                                 ).props("outline color=teal").style("font-size:10px").tooltip(
+                            "审查判定即时原子写回标注 JSON（白名单键 checked/vt_review，见 ADR 0003）——"
+                            "没有「未保存」态，X-AnyLabeling 里图标即时同步")
                         ui.space()
                         ui.button("标注质检", icon="biotech").props("flat dense size=xs").tooltip(
                             "训前探针：yolo11n 快训 3 epoch → 全量低置信度推理 → 漏标/类错标/幽灵标三嫌疑榜单（约几分钟）"
@@ -2898,11 +3061,14 @@ def mount() -> None:
                     with ui.row().classes("w-full gap-1 flex-wrap text-[10px]"):
                         for key, zh in (("pending", "待审"), ("modified", "已修改"), ("rejected", "驳回"),
                                         ("approved", "通过"), ("skipped", "跳过"), ("all", "全部")):
+                            n = c["modified"] if key == "modified" else (
+                                len(items) if key == "all" else c[key])
                             hot = rst["filter"] == key
-                            ui.button(zh, on_click=lambda k=key: [
+                            ui.button(f"{zh} {n}", on_click=lambda k=key: [
                                 rst.__setitem__("filter", k), rst.__setitem__("i", 0), _view.refresh()]
                             ).props(f"dense no-caps {'unelevated' if hot else 'flat outline'} color=primary"
-                                    ).classes("px-2")
+                                    ).classes("px-2 rounded-full").tooltip(
+                                "过滤审查队列（键盘流在该子集内前进）" if key != "all" else "全量队列")
                     if not fl:
                         ui.label("该过滤下没有图片"
                                  + ("——全部审完。" if rst["filter"] == "pending" else "")).classes(
@@ -2942,7 +3108,7 @@ def mount() -> None:
                                 ui.label(zh_state.get(eff, eff)).classes(
                                     {"pending": "bg-slate-600", "approved": "bg-emerald-600",
                                      "rejected": "bg-rose-600", "skipped": "bg-amber-600"}[eff]
-                                    + " text-white text-[10px] px-1.5 py-0.5 rounded-sm")
+                                    + " text-white text-[10px] px-2 py-0.5 rounded-full")
                                 if cur["modified"]:
                                     ui.badge("已修改", color="purple").props("outline")
                                 if cur["reason"]:
@@ -2954,6 +3120,18 @@ def mount() -> None:
                                 ui.label(f"{cur['split']} · {cur['name']}"
                                          ).classes("text-[10px] opacity-60 truncate max-w-72")
                                 ui.label(f"{rst['i'] + 1}/{len(fl)}").classes("text-[10px] opacity-40")
+                            # 本图标注图例（色卡与画布叠加同一分配序——检查器行模式）
+                            with ui.row().classes("items-center gap-2 flex-wrap max-w-full"):
+                                ui.label("本图标注").classes("text-[10px] opacity-45")
+                                legend = _review_shape_legend(cur["label"])
+                                if not legend:
+                                    ui.label("无标注 shapes（负样本路径）").classes("text-[10px] opacity-40")
+                                for lbl, n, color in legend:
+                                    with ui.row().classes("items-center gap-1"):
+                                        ui.element("span").style(
+                                            f"width:9px;height:9px;border-radius:2px;"
+                                            f"background:{color};display:inline-block")
+                                        ui.label(f"{lbl} ×{n}").classes("text-[10px] opacity-75")
                             with ui.row().classes("gap-1 flex-wrap"):
                                 ui.button("← 上一张", on_click=lambda: [_go(-1), _view.refresh()]
                                           ).props("outline dense")
@@ -2975,6 +3153,8 @@ def mount() -> None:
                                 ui.button("去排除", icon="visibility_off",
                                           on_click=_exclude_cur).props(
                                     "flat dense color=negative").tooltip("从切分清单排除（复用质量审计处置）")
+                                ui.button(icon="help_outline", on_click=help_dlg.open).props(
+                                    "flat dense").tooltip("快捷键说明")
                             if rst["reject_open"]:
                                 with ui.row().classes("gap-1 flex-wrap"):
                                     for k, r in enumerate(REVIEW_REASONS, 1):
@@ -3738,7 +3918,8 @@ def mount() -> None:
             ui.timer(0.3, _audit_tick)  # 体检进度条（单实例 timer，render_detail 重建元素也不叠 timer）
             refresh()
 
-        _page_frame("数据集", "数据集", actions, body)
+        _page_frame("数据集", "数据集", actions, body,
+                    subtitle="导入转换、校验体检、标注审查与切分管理——标注 JSON 为唯一真源")
 
     # ================================================================ 结果页
     @ui.page("/results")
@@ -4232,7 +4413,8 @@ def mount() -> None:
                     _sync_cmp_btn()
                     do_cross()
 
-        _page_frame("结果", "结果复盘", None, body)
+        _page_frame("结果", "结果复盘", None, body,
+                    subtitle="跨 Run 指标对比、错误分析与复盘报告——病根与价值可见")
 
     # ================================================================ Agent 页
     @ui.page("/agent")
@@ -4741,7 +4923,8 @@ def mount() -> None:
             ui.timer(2.0, refresh)
             refresh()
 
-        _page_frame("Agent", "Agent 调参", actions, body)
+        _page_frame("Agent", "Agent 调参", actions, body,
+                    subtitle="LLM 多模态读曲线自主调参——白名单 clamp + 审批门，不静默烧卡")
 
     # ================================================================ 设置页
     @ui.page("/settings")
@@ -4942,4 +5125,5 @@ def mount() -> None:
                     reason = None
                 _kv("占用检测", "空闲，可接受训练" if not reason else f"被占用：{reason}")
 
-        _page_frame("设置", "设置", actions, body)
+        _page_frame("设置", "设置", actions, body,
+                    subtitle="Agent LLM、训练与目录、服务参数——保存即校验写入，密钥只存本地")
