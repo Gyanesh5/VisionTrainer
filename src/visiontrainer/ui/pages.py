@@ -1819,9 +1819,11 @@ def mount() -> None:
                                     hint="绿 = GT（真值类别）｜红 = Pred（预测类别 + 置信度）· 滚轮缩放，放大后拖动平移")
 
                             if not analysis:
-                                ui.label("尚未分析。以 best.pt 对切分清单 val 集逐图推理（低置信度全量采集），"
-                                         "IoU 贪心匹配逐框记 TP/FP/FN/类混淆——回答「模型到底错在哪」。"
-                                         ).classes("text-xs opacity-50")
+                                _lbl = ui.label("best.pt 对 val 集逐图推理，逐框记 TP/FP/FN——回答「错在哪」"
+                                                ).classes("text-xs opacity-50")
+                                with _lbl:
+                                    ui.tooltip("低置信度全量采集 + IoU 贪心匹配；产出最差样本榜 / "
+                                               "GT-Pred 叠加大图 / 混淆矩阵下钻 / FN·FP 改标清单")
                                 ui.button("运行错误分析", icon="biotech",
                                           on_click=lambda: do_analysis(uid)).props("unelevated dense")
                             else:
@@ -2224,7 +2226,7 @@ def mount() -> None:
                         "lr": "lr 扫描——lr0 0.005/0.01/0.02 一键三任务",
                         "few": "少样本快训——10 epoch · 30% 数据采样",
                     }, value="", label="实验模板").classes("w-full")
-                    tpl_preview = ui.label("选择模板与数据集后预览将创建的任务").classes(
+                    tpl_preview = ui.label("选择模板后预览").classes(
                         "text-[11px] opacity-55")
 
                     def _tpl_plan() -> list[dict] | None:
@@ -2244,7 +2246,7 @@ def mount() -> None:
                     def _upd_tpl_preview() -> None:
                         plan = _tpl_plan()
                         if not plan:
-                            tpl_preview.set_text("选择模板与数据集后预览将创建的任务")
+                            tpl_preview.set_text("选择模板后预览")
                             return
                         parts = []
                         for v in plan:
@@ -2454,22 +2456,21 @@ def mount() -> None:
                     warnings: list[str] = []
                     if meta.get("form") == "managed":
                         if lv and not lv.get("ok"):
-                            blockers.append(f"校验未过（{len(lv.get('problems') or [])} 个问题）——"
-                                            "先到数据集页看报告与「错误→原因→修法」指引")
+                            blockers.append(f"校验未过（{len(lv.get('problems') or [])} 个问题）——去数据集页查看修法指引")
                         if meta.get("drops_pending_ack"):
-                            blockers.append("存在未确认的丢弃清单（转换零静默守卫）——到数据集页确认后再训练")
+                            blockers.append("丢弃清单待确认——去数据集页确认后再训练")
                         if prog.get("total") and \
                                 (prog["counts"]["approved"] + prog["counts"]["skipped"]) / prog["total"] < 0.8:
-                            warnings.append("审查完成度低于 80%——建议先过一遍「标注审查」页（不阻断）")
+                            warnings.append("审查完成度低于 80%（不阻断）——建议先过「标注审查」")
                     return facts, blockers, warnings
 
                 def _confirm_notes() -> tuple[str, ...]:
                     return (
-                        "单飞队列：同一时刻只跑一个 Run，其余排队；GPU 被外部占用时等待并在空闲后自动开始",
-                        "Run 启动即冻结快照（切分清单 + classes 哈希）——之后改标注不影响本次训练，历史 Run 可复现可 diff",
-                        "训练中可关闭页面甚至重启平台：训练子进程脱离运行，重启自动收养恢复曲线",
-                        f"验证指标连续 {c_patience.value or 100} 轮不提升会早停——正常现象，不是故障",
-                        "完成或失败会发桌面通知（notify-send）",
+                        "单飞队列一次一个 Run；GPU 被占用时自动排队",
+                        "启动即冻结切分与 classes 快照——改标注不影响本次",
+                        "可关闭页面或重启平台，训练继续、重启自动收养",
+                        f"连续 {c_patience.value or 100} 轮无提升会早停（正常现象）",
+                        "完成 / 失败发桌面通知",
                     )
 
                 with ui.dialog() as confirm_dlg, ui.card().classes("w-full max-w-2xl gap-2"):
@@ -2492,12 +2493,10 @@ def mount() -> None:
                                 ui.icon("warning", color="warning").classes("text-[15px] mt-0.5")
                                 ui.label(w).classes("text-xs text-amber-400 flex-1")
                         ui.separator().classes("w-full")
-                        ui.label("注意事项").classes("text-xs font-semibold opacity-70")
-                        with ui.column().classes("w-full gap-0.5"):
-                            for n in _confirm_notes():
-                                with ui.row().classes("items-start gap-2 w-full"):
-                                    ui.icon("info", color="grey-6").classes("text-[14px] mt-0.5")
-                                    ui.label(n).classes("text-[11px] opacity-65 flex-1")
+                        with ui.expansion("注意事项", icon="info").classes("w-full"):
+                            with ui.column().classes("w-full gap-1"):
+                                for n in _confirm_notes():
+                                    ui.label(f"· {n}").classes("text-[11px] opacity-65")
                         with ui.row().classes("w-full justify-end gap-2 mt-1"):
                             ui.button("返回修改", on_click=confirm_dlg.close).props("flat")
                             ui.button("确认创建", icon="rocket_launch",
@@ -2551,7 +2550,7 @@ def mount() -> None:
                     ui.notify(f"数据集 {prefill} 不存在或不可训练", type="warning")
 
         _page_frame("训练", "训练任务", actions, body,
-                    subtitle="提交训练、排队 GPU、实时曲线与结果对比；Agent 任务每轮暂停等你放行")
+                    subtitle="单飞队列 · 实时监控 · Agent 调参")
 
     # ================================================================ 数据集页
     @ui.page("/datasets")
@@ -2803,8 +2802,8 @@ def mount() -> None:
                     with ui.row().classes("w-full items-center gap-2 q-pa-sm rounded").style(
                             "background:rgba(245,158,11,.12)"):
                         ui.icon("warning").classes("text-amber-400")
-                        ui.label(f"转换丢弃了 {n_drop} 条标注且未确认——明细见上方问题清单「标注被转换丢弃」；"
-                                 "确认接受后方可提交训练").classes("text-xs flex-1 min-w-0")
+                        ui.label(f"丢弃 {n_drop} 条标注待确认——明细见上方问题清单，确认后方可训练"
+                                 ).classes("text-xs flex-1 min-w-0")
                         ui.button("确认接受丢弃", icon="done_all",
                                   on_click=lambda: _ack_drops(meta["name"])).props(
                             "dense unelevated color=warning")
@@ -2827,8 +2826,9 @@ def mount() -> None:
                     with ui.row().classes("w-full gap-2 items-start"):
                         ui.label("排除清单").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
                         with ui.column().classes("flex-1 min-w-0 gap-0"):
-                            ui.label(f"已从切分清单排除 {len(excluded)} 个文件（标注真源未动；重切以排除后文件集为基线）"
-                                     ).classes("text-[11px] opacity-60")
+                            ui.label(f"已排除 {len(excluded)} 个文件").classes(
+                                "text-[11px] opacity-60").tooltip(
+                                "仅移出切分清单、标注真源未动；重切以排除后文件集为基线")
                             with ui.expansion("查看明细", icon="visibility_off").classes("text-xs"):
                                 for e in excluded:
                                     ui.label(f"{Path(e['file']).name} · {_fmt_ts(e['at'])} · {e.get('reason', '')}"
@@ -2852,7 +2852,7 @@ def mount() -> None:
                 # 快捷键帮助浮层（maskflow-ui-study §5.1「按钮即文档」配套：? 呼出、键位与按钮互文）
                 with ui.dialog() as help_dlg, ui.card().classes("gap-2 max-w-md w-full"):
                     ui.label("审查快捷键").classes("text-base font-bold")
-                    ui.label("沉浸键盘流：判定即写回标注 JSON 并自动前进；以下均在当前过滤子集内生效"
+                    ui.label("判定即写回并自动前进（在当前过滤子集内）"
                              ).classes("text-[11px] opacity-55")
                     with ui.column().classes("w-full gap-1"):
                         for k, d in [
@@ -3048,8 +3048,7 @@ def mount() -> None:
                             ui.label(f"已修改 {c['modified']}").classes("text-[10px] text-purple-300")
                         ui.badge(f"上次判定 {rst['last_decide']}" if rst.get("last_decide") else "判定即写回"
                                  ).props("outline color=teal").style("font-size:10px").tooltip(
-                            "审查判定即时原子写回标注 JSON（白名单键 checked/vt_review，见 ADR 0003）——"
-                            "没有「未保存」态，X-AnyLabeling 里图标即时同步")
+                            "判定即时写回标注 JSON，X-AnyLabeling 图标即时同步——无「未保存」态")
                         ui.space()
                         ui.button("标注质检", icon="biotech").props("flat dense size=xs").tooltip(
                             "训前探针：yolo11n 快训 3 epoch → 全量低置信度推理 → 漏标/类错标/幽灵标三嫌疑榜单（约几分钟）"
@@ -3227,8 +3226,9 @@ def mount() -> None:
                                 f"train {s.get('train', 0)}", f"val {s.get('val', 0)}",
                                 f"负样本 {s.get('background', 0)}", f"清单 {payload.get('manifest_uid', '—')}"):
                         ui.chip(txt).props("dense outline square").classes("text-[11px]")
-                ui.label("类别分布/直方图点柱、热力图框选（右上角矩形工具）→ 筛出图片清单，可直达 X-AnyLabeling"
-                         ).classes("text-[11px] opacity-45")
+                _lbl = ui.label("点柱 / 框选可筛图").classes("text-[11px] opacity-45")
+                with _lbl:
+                    ui.tooltip("直方图点柱、热力图框选（右上角矩形工具）→ 筛出图片清单，可一键直达 X-AnyLabeling")
 
                 drill_box = ui.column().classes("w-full")
 
@@ -3467,8 +3467,11 @@ def mount() -> None:
                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                     ui.button("跑体检", icon="health_and_safety",
                               on_click=lambda: do_audit(name)).props("unelevated dense")
-                    ui.label("sha256 精确重复 · 感知哈希近似 · 跨切分泄漏 · 类别失衡——只报告，不动标注真源"
-                             ).classes("text-[11px] opacity-45 flex-1 min-w-40")
+                    _lbl = ui.label("四类体检 · 只报告不改真源").classes(
+                        "text-[11px] opacity-45 flex-1 min-w-40")
+                    with _lbl:
+                        ui.tooltip("sha256 精确重复 / 感知哈希近似重复 / 跨切分泄漏 / 类别失衡——"
+                                   "处置仅限「从切分清单排除」，标注真源永不改动")
                     bb = ui.button("排除所选（0）", icon="remove_circle_outline", color="negative",
                                    on_click=lambda: open_batch_exclude()).props("outline dense")
                     bb.set_enabled(False)
@@ -3511,7 +3514,7 @@ def mount() -> None:
                         ui.label(f"{_fmt_ts(audit.get('checked_at'))} · 体检范围 {audit.get('files', 0)} 张（活跃清单成员）"
                                  ).classes("text-[11px] opacity-50")
                     if audit.get("skipped_undecodable"):
-                        ui.label(f"{audit['skipped_undecodable']} 张图无法解码，已跳过近似重复检测（对应校验规则「图片不可读」）"
+                        ui.label(f"{audit['skipped_undecodable']} 张不可解码已跳过（见校验规则）"
                                  ).classes("text-[11px] text-orange-700")
                     for leak in audit.get("leaks") or []:
                         with ui.card().classes("w-full gap-1 q-pa-sm").style("background:rgba(245,158,11,.08)"):
@@ -3550,7 +3553,7 @@ def mount() -> None:
                                     "text-[11px] " + ("text-red-500 font-semibold" if bad else "opacity-60"))
                     excluded = meta.get("excluded") or []
                     if excluded:
-                        ui.label(f"已排除 {len(excluded)} 个文件（见概览页签的排除清单；重新切分以排除后文件集为基线）"
+                        ui.label(f"已排除 {len(excluded)} 个文件（明细见概览页签）"
                                  ).classes("text-[11px] opacity-50")
 
             async def do_audit(name: str) -> None:
@@ -3622,8 +3625,7 @@ def mount() -> None:
 
             with ui.dialog() as exclude_dialog, ui.card().classes("w-[26rem] gap-2"):
                 ex_title = ui.label("从切分清单排除").classes("font-bold")
-                ui.label("只从清单移除该文件，不改图片与标注；剩余文件的 train/val 归属保持不变；"
-                         "旧清单与派生结构保留可查。").classes("text-xs opacity-60")
+                ui.label("仅移出切分清单；图片与标注不动，旧清单保留可切回。").classes("text-xs opacity-60")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=exclude_dialog.close).props("flat")
                     ui.button("排除", color="negative", icon="remove_circle_outline",
@@ -3631,8 +3633,8 @@ def mount() -> None:
 
             with ui.dialog() as batch_dialog, ui.card().classes("w-[28rem] gap-2"):
                 bx_title = ui.label("批量从切分清单排除").classes("font-bold")
-                ui.label("只从清单移除所选文件（不删图片与标注）；剩余文件的 train/val 归属保持不变；"
-                         "train 与 val 各须至少保留 1 张，否则拒绝。").classes("text-xs opacity-60")
+                ui.label("仅移出切分清单；图片与标注不动。train / val 各须至少保留 1 张。"
+                         ).classes("text-xs opacity-60")
                 bx_names = ui.label("").classes("text-[11px] font-mono break-all q-pa-sm rounded").style(
                     "background:rgba(148,163,184,.12); max-height:8rem; overflow-y:auto")
                 with ui.row().classes("w-full justify-end"):
@@ -3774,7 +3776,7 @@ def mount() -> None:
                 with ui.row().classes("w-full"):
                     i_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05).classes("flex-1")
                     i_seed = ui.number("随机种子", value=42, precision=0).classes("flex-1")
-                i_strat = ui.checkbox("按类别分层")
+                i_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
                 i_progress = {"phase": "", "cur": 0, "total": 0, "active": False}
                 prog_label = ui.label("").classes("text-xs opacity-70").set_visibility(False)
                 prog_bar = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
@@ -3880,13 +3882,13 @@ def mount() -> None:
             # ── 重切分（打开时快照标题与现值，修复旧标题残留 bug）
             with ui.dialog() as resplit_dialog, ui.card().classes("w-96 gap-2"):
                 r_title = ui.label("重新切分").classes("font-bold")
-                ui.label("基于既有文件清单生成新 manifest 并切换活跃版本；同任务各轮共用同一份 val 集。"
-                         ).classes("text-xs opacity-60")
+                ui.label("生成新清单版本并切换活跃；各轮 val 恒定可比。").classes("text-xs opacity-60")
                 r_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05)
                 r_seed = ui.number("随机种子", value=42, precision=0)
-                r_strat = ui.checkbox("按类别分层")
+                r_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
                 # M9 03「只训已审」：数据集级开关的落点（默认关；重切生成只含通过图的新清单）
-                r_appr = ui.checkbox("只训已审：仅含「通过」图（负样本保留；未审/驳回/跳过不入，旧清单保留可切回）")
+                r_appr = ui.checkbox("只训已审（仅含通过图）").tooltip(
+                    "仅「通过」图入清单（负样本保留；待审/驳回/跳过不入）；旧清单保留可切回")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=resplit_dialog.close).props("flat")
                     r_ok = ui.button("重切", icon="call_split", on_click=lambda: do_resplit2()).props("unelevated")
@@ -3919,7 +3921,7 @@ def mount() -> None:
             refresh()
 
         _page_frame("数据集", "数据集", actions, body,
-                    subtitle="导入转换、校验体检、标注审查与切分管理——标注 JSON 为唯一真源")
+                    subtitle="导入 · 校验 · 审查 · 切分")
 
     # ================================================================ 结果页
     @ui.page("/results")
@@ -4185,11 +4187,10 @@ def mount() -> None:
                         ui.echart(_mem_overlay_options(data["gpu_curves"])).classes("w-full h-56")
                     imp = data.get("param_importance")
                     if imp and imp.get("keys"):
-                        with ui.expansion(f"参数重要性（{imp['note']}）", icon="insights").classes("w-full"):
+                        with ui.expansion(f"参数重要性（{imp['note']}）", icon="insights",
+                                          caption="相关非因果，样本少时弱参考 · 已注入 Agent 上下文"
+                                          ).classes("w-full"):
                             ui.echart(_importance_options(imp)).classes("w-full h-56")
-                            ui.label("同数据集 + 基模型历史 Run 的 Spearman 统计；相关非因果，样本少时弱参考。"
-                                     "该证据同时注入 Agent 调参 LLM 上下文并随决策归档。"
-                                     ).classes("text-[11px] opacity-45")
                     with ui.row().classes("w-full flex-wrap gap-1"):
                         ui.label("任务级超参：").classes("text-xs opacity-50")
                         for k, v in (data["train_args"] or {}).items():
@@ -4393,7 +4394,7 @@ def mount() -> None:
 
             with ui.dialog() as purge_dialog, ui.card().classes("w-96 gap-2"):
                 ui.label("删除模型目录？").classes("font-bold")
-                ui.label("将删除磁盘目录与对应部署记录；桌面端已加载的模型不受影响（下次不再出现在下拉）。"
+                ui.label("删除磁盘目录与部署记录；桌面端已加载模型不受影响。"
                          ).classes("text-xs opacity-60")
                 purge_name = ui.label("").classes("text-xs font-mono break-all")
                 with ui.row().classes("w-full justify-end"):
@@ -4414,7 +4415,7 @@ def mount() -> None:
                     do_cross()
 
         _page_frame("结果", "结果复盘", None, body,
-                    subtitle="跨 Run 指标对比、错误分析与复盘报告——病根与价值可见")
+                    subtitle="对比 · 错误分析 · 复盘")
 
     # ================================================================ Agent 页
     @ui.page("/agent")
@@ -4924,7 +4925,7 @@ def mount() -> None:
             refresh()
 
         _page_frame("Agent", "Agent 调参", actions, body,
-                    subtitle="LLM 多模态读曲线自主调参——白名单 clamp + 审批门，不静默烧卡")
+                    subtitle="LLM 自主调参 · 审批门")
 
     # ================================================================ 设置页
     @ui.page("/settings")
@@ -5074,8 +5075,7 @@ def mount() -> None:
 
             with ui.card().classes("w-full gap-2"):
                 ui.label("通知与 Agent 安全网").classes("font-semibold")
-                ui.label("桌面通知即时生效；烂轮早停阈值对新建 Agent 任务生效（任务内可在新建对话框单独关闭）。"
-                         ).classes("text-xs opacity-50")
+                ui.label("通知即时生效；早停阈值仅对新任务生效。").classes("text-xs opacity-50")
                 n_desktop = ui.switch("桌面通知（完成 / 失败 / 审批请求 / 剪枝 → notify-send）",
                                       value=bool(cfg.get("notifications", {}).get("desktop", True)))
                 a_prune = ui.switch("烂轮早停全局开关（新轮显著劣化 → 优雅终止记 pruned）",
@@ -5126,4 +5126,4 @@ def mount() -> None:
                 _kv("占用检测", "空闲，可接受训练" if not reason else f"被占用：{reason}")
 
         _page_frame("设置", "设置", actions, body,
-                    subtitle="Agent LLM、训练与目录、服务参数——保存即校验写入，密钥只存本地")
+                    subtitle="LLM · 训练目录 · 服务")
