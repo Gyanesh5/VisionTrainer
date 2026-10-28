@@ -29,7 +29,8 @@ def iou(a: list[float], b: list[float]) -> float:
 
 
 def greedy_match(gts: list[dict], preds: list[dict], iou_th: float = IOU_TH) -> list[dict]:
-    """GT/Pred 框列表 → 逐框记录。每条：{kind: tp|fp|fn|confusion, cls_gt, cls_pred, conf, iou, gt, pred}。"""
+    """GT/Pred 框列表 → 逐框记录。每条：{kind: tp|fp|fn|confusion, cls_gt, cls_pred, conf, iou,
+    gt, pred, gt_poly?, pred_poly?}。匹配按 xyxy 外接矩形 IoU；poly（归一化多边形）仅供绘制。"""
     pairs = []
     for gi, g in enumerate(gts):
         for pi, p in enumerate(preds):
@@ -50,15 +51,18 @@ def greedy_match(gts: list[dict], preds: list[dict], iou_th: float = IOU_TH) -> 
             "kind": "tp" if g["cls"] == p["cls"] else "confusion",
             "cls_gt": g["cls"], "cls_pred": p["cls"], "conf": p.get("conf"),
             "iou": round(v, 4), "gt": g["xyxy"], "pred": p["xyxy"],
+            "gt_poly": g.get("poly"), "pred_poly": p.get("poly"),
         })
     for gi, g in enumerate(gts):
         if gi not in used_g:
             records.append({"kind": "fn", "cls_gt": g["cls"], "cls_pred": None, "conf": None,
-                            "iou": 0.0, "gt": g["xyxy"], "pred": None})
+                            "iou": 0.0, "gt": g["xyxy"], "pred": None,
+                            "gt_poly": g.get("poly"), "pred_poly": None})
     for pi, p in enumerate(preds):
         if pi not in used_p:
             records.append({"kind": "fp", "cls_gt": None, "cls_pred": p["cls"], "conf": p.get("conf"),
-                            "iou": 0.0, "gt": None, "pred": p["xyxy"]})
+                            "iou": 0.0, "gt": None, "pred": p["xyxy"],
+                            "gt_poly": None, "pred_poly": p.get("poly")})
     return records
 
 
@@ -141,11 +145,14 @@ def _overlay_scales(w: int, h: int) -> tuple[int, int, int]:
 
 def render_overlay(image_path: str, records: list[dict], out_path: Path) -> Path:
     """GT 绿 / Pred 红 叠加大图（PIL 画框，平台零 cv2 依赖）。
-    线宽与标注字号按图像尺寸动态缩放；标注文字带黑描边（任意底色可读）。"""
+    记录带归一化 poly（segment/obb）时绘多边形本体，否则退外接矩形；
+    线宽与标注字号按图像尺寸动态缩放；标注文字带黑描边（任意底色可读）；
+    标签锚点始终用 xyxy（GT 上缘上方 / Pred 下缘下方）。"""
     from PIL import Image, ImageDraw, ImageFont
 
     im = Image.open(image_path).convert("RGB")
     d = ImageDraw.Draw(im)
+    w, h = im.size
     lw_gt, lw_pred, fsize = _overlay_scales(*im.size)
     font = ImageFont.load_default(size=fsize)
     stroke = max(1, round(fsize / 14))
@@ -154,16 +161,24 @@ def render_overlay(image_path: str, records: list[dict], out_path: Path) -> Path
     def _label(xy, text: str, fill) -> None:
         d.text(xy, text, fill=fill, font=font, stroke_width=stroke, stroke_fill=(0, 0, 0))
 
+    def _draw(xyxy: list[float], poly: list[float] | None, color, lw: int) -> None:
+        if poly and len(poly) >= 6:
+            pts = [(poly[i] * w, poly[i + 1] * h) for i in range(0, len(poly), 2)]
+            d.line(pts + [pts[0]], fill=color, width=lw, joint="curve")
+        else:
+            x0, y0, x1, y1 = xyxy
+            d.rectangle([x0, y0, x1, y1], outline=color, width=lw)
+
     for r in records:
         if r.get("gt"):
-            x0, y0, x1, y1 = r["gt"]
-            d.rectangle([x0, y0, x1, y1], outline=(34, 197, 94), width=lw_gt)
+            _draw(r["gt"], r.get("gt_poly"), (34, 197, 94), lw_gt)
+            x0, y0, _, _ = r["gt"]
             _label((x0 + off, max(y0 - fsize - off, 0)), f"GT {r['cls_gt']}", (34, 197, 94))
         if r.get("pred"):
-            x0, y0, x1, y1 = r["pred"]
+            _draw(r["pred"], r.get("pred_poly"), (239, 68, 68), lw_pred)
+            _, _, _, y1 = r["pred"]
             conf = f" {r['conf']:.2f}" if r.get("conf") is not None else ""
-            d.rectangle([x0, y0, x1, y1], outline=(239, 68, 68), width=lw_pred)
-            _label((x0 + off, y1 + off), f"P {r['cls_pred']}{conf}", (239, 68, 68))
+            _label((r["pred"][0] + off, y1 + off), f"P {r['cls_pred']}{conf}", (239, 68, 68))
     out_path.parent.mkdir(parents=True, exist_ok=True)
     im.save(out_path, quality=88)
     return out_path

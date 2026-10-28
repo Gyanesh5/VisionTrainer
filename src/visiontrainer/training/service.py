@@ -565,7 +565,8 @@ def run_error_analysis(manager, uid: str, progress=None) -> dict:
         for r in all_records:
             s.add(RunSampleError(run_id=rid, image=r["image"], kind=r["kind"], cls_gt=r["cls_gt"],
                                  cls_pred=r["cls_pred"], conf=r["conf"], iou=r["iou"],
-                                 box={"gt": r["gt"], "pred": r["pred"]}))
+                                 box={"gt": r["gt"], "pred": r["pred"],
+                                      "gt_poly": r.get("gt_poly"), "pred_poly": r.get("pred_poly")}))
         s.commit()
     summary = summarize(all_records, payload["classes"], gt_areas)
     sweep = sweep_thresholds(all_records)

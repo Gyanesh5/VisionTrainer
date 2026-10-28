@@ -61,7 +61,7 @@ v1.2 同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/valid
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/runs/{uid}/analysis` | 错误分析读（M8 01/02）：`{summary(P/R/F1/计数/Top混淆/小目标), sweep(阈值曲线+建议conf), worst[最差样本榜+overlay], matrix(axis+cells 含背景)}`；未分析返回 null |
-| POST | `/api/v1/runs/{uid}/analysis` | 跑错误分析（长操作）：训练 venv 推理 + IoU 贪心匹配入 run_sample_errors；仅 done Run；重复触发覆盖 |
+| POST | `/api/v1/runs/{uid}/analysis` | 跑错误分析（长操作）：训练 venv 推理 + IoU 贪心匹配入 run_sample_errors；仅 done Run；重复触发覆盖。segment/obb 任务 GT 与预测另采归一化 `poly`（预测取 masks.xyn）——匹配仍按外接矩形 IoU，叠加图与 `box` 字段绘/存多边形本体 |
 | GET | `/api/v1/runs/{uid}/analysis/cell?gt=&pred=` | 混淆矩阵点格下钻：该 (GT,Pred) 格逐框记录 |
 | POST | `/api/v1/runs/{uid}/analysis/export` | 导出 FN/FP 改标清单 markdown 至 Run 目录 |
 | POST | `/api/v1/runs/{uid}/test-infer` | 训后试跑（M8 05）：body `{image, conf?, iou?}`；image 支持单图/图片目录（递归取前 30 张，响应附 `dir_total` 供截断提示）/视频（抽帧）；按需导出 ONNX 缓存 + 叠框图 |

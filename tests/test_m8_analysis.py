@@ -291,13 +291,18 @@ class _StubBoxes:
 
 
 class _StubRes:
-    def __init__(self, boxes=None, obb=None):
-        self.boxes, self.obb = boxes, obb
+    def __init__(self, boxes=None, obb=None, masks=None):
+        self.boxes, self.obb, self.masks = boxes, obb, masks
+
+
+class _StubMasks:
+    def __init__(self, xyn):
+        self.xyn = xyn
 
 
 def test_read_gt_detect_obb_segment_formats(tmp_path):
     """回归（2026-09-21）：GT 解析此前只认 detect 5 token——obb 8 角点/segment 多边形
-    被当 cx,cy,w,h 误算成错框。现按 token 数分流，多边形取 min/max 外接矩形。"""
+    被当 cx,cy,w,h 误算成错框。现按 token 数分流，多边形取 min/max 外接矩形 + 保留 poly。"""
     from visiontrainer.training.analysis_entry import _read_gt
 
     lbl = tmp_path / "a.txt"
@@ -310,10 +315,14 @@ def test_read_gt_detect_obb_segment_formats(tmp_path):
     gt = _read_gt(lbl, 640, 480, ["car", "plate"])
     assert len(gt) == 3
     assert gt[0]["xyxy"] == [256.0, 180.0, 384.0, 300.0]
+    assert "poly" not in gt[0], "detect 行无多边形"
     assert gt[1]["xyxy"] == [round(0.543281 * 640, 1), round(0.094666 * 480, 1),
                              round(0.736241 * 640, 1), round(0.257264 * 480, 1)]
     assert gt[1]["cls"] == "plate"
+    assert gt[1]["poly"] == [0.732518, 0.257264, 0.736241, 0.10508,
+                             0.547004, 0.094666, 0.543281, 0.24685]
     assert gt[2]["xyxy"] == [64.0, 48.0, 192.0, 144.0]
+    assert gt[2]["poly"] == [0.1, 0.1, 0.3, 0.1, 0.3, 0.3, 0.1, 0.3]
     assert _read_gt(tmp_path / "missing.txt", 640, 480, ["car"]) == []
 
 
@@ -329,3 +338,57 @@ def test_extract_pred_obb_and_detect():
     obb = _StubBoxes([[100.0, 50.0, 300.0, 200.0]], [0.8], [1])
     assert _extract_pred(_StubRes(obb=obb), ["car", "plate"]) == [
         {"cls": "plate", "conf": 0.8, "xyxy": [100.0, 50.0, 300.0, 200.0]}]
+
+
+def test_extract_pred_segment_masks():
+    """segment 预测侧采集 masks.xyn（归一化轮廓按索引配对附 poly）；无 masks 不带 poly。"""
+    from visiontrainer.training.analysis_entry import _extract_pred
+
+    boxes = _StubBoxes([[10.0, 20.0, 60.0, 80.0], [100.0, 50.0, 300.0, 200.0]], [0.9, 0.4], [0, 1])
+    masks = _StubMasks([[[0.1, 0.2], [0.3, 0.2], [0.3, 0.5], [0.1, 0.5]], []])
+    out = _extract_pred(_StubRes(boxes=boxes, masks=masks), ["car", "plate"])
+    assert out[0]["poly"] == [0.1, 0.2, 0.3, 0.2, 0.3, 0.5, 0.1, 0.5]
+    assert "poly" not in out[1], "空轮廓（<3 点）不附 poly"
+    assert "poly" not in _extract_pred(_StubRes(boxes=boxes), ["car", "plate"])[0], \
+        "detect/obb 无 masks 不附 poly"
+
+
+def test_overlay_renders_polygon_when_poly_present(tmp_path: Path):
+    """poly 存在 → 画多边形本体；poly 缺失 → 退矩形（2026-10-27 segment 显示矩形修复）。"""
+    from PIL import Image
+
+    src = tmp_path / "p.png"
+    Image.new("RGB", (100, 100), (255, 255, 255)).save(src)
+
+    # 匹配透传：tp 记录带双方 poly
+    recs = ea.greedy_match(
+        [{"cls": "product", "xyxy": [10.0, 10.0, 90.0, 90.0], "poly": [0.1, 0.1, 0.9, 0.1, 0.5, 0.9]}],
+        [{"cls": "product", "conf": 0.9, "xyxy": [10.0, 10.0, 90.0, 90.0],
+          "poly": [0.11, 0.11, 0.89, 0.11, 0.5, 0.89]}])
+    tp = recs[0]
+    assert tp["gt_poly"] == [0.1, 0.1, 0.9, 0.1, 0.5, 0.9]
+    assert tp["pred_poly"] == [0.11, 0.11, 0.89, 0.11, 0.5, 0.89]
+
+    # 渲染用 FN 记录（仅 GT，无红框叠色干扰）；多边形下移避开左上标签文字区
+    fn = ea.greedy_match(
+        [{"cls": "product", "xyxy": [10.0, 30.0, 90.0, 90.0],
+          "poly": [0.1, 0.3, 0.9, 0.3, 0.5, 0.9]}], [])[0]
+    assert fn["kind"] == "fn" and fn["gt_poly"] == [0.1, 0.3, 0.9, 0.3, 0.5, 0.9]
+
+    out = tmp_path / "ov.jpg"
+    ea.render_overlay(str(src), [fn], out)
+    im = Image.open(out).convert("RGB")
+
+    def greenish(px) -> bool:  # GT 绿 (34,197,94)：G 通道显著高于 R/B
+        return px[1] > px[0] + 40 and px[1] > px[2] + 40
+
+    assert greenish(im.getpixel((10, 30))), "三角形顶点 (10,30) 应描绿"
+    assert greenish(im.getpixel((50, 30))), "三角形上边中点应描绿"
+    assert greenish(im.getpixel((50, 90))), "三角形底点应描绿"
+    assert not greenish(im.getpixel((90, 90))), "矩形角 (90,90) 不在三角形边上——不应画矩形"
+
+    # 无 poly 回退矩形：角点 (90,90) 应描绿
+    out2 = tmp_path / "ov_rect.jpg"
+    ea.render_overlay(str(src), [{**fn, "gt_poly": None}], out2)
+    assert greenish(Image.open(out2).convert("RGB").getpixel((90, 90))), \
+        "无 poly 应回退画外接矩形"

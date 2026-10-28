@@ -145,7 +145,8 @@ class GPUSample(Base):
 class RunSampleError(Base):
     """逐框错误记录（M8 01 号票）：错误分析的最细粒度数据，矩阵下钻/清单导出/阈值扫描共用。
 
-    kind ∈ tp|fp|fn|confusion；box = {gt: xyxy|None, pred: xyxy|None}；conf 为 Pred 置信度（FN 为空）。
+    kind ∈ tp|fp|fn|confusion；box = {gt: xyxy|None, pred: xyxy|None,
+    gt_poly/pred_poly: 归一化多边形|None（segment/obb 有，detect 无）}；conf 为 Pred 置信度（FN 为空）。
     TP 也入库：混淆矩阵对角与全阈值扫描都依赖逐框 conf。
     """
 

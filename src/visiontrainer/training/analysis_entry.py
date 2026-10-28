@@ -20,10 +20,10 @@ from pathlib import Path
 
 
 def _read_gt(label_txt: Path, w: int, h: int, classes: list[str]) -> list[dict]:
-    """YOLO 归一化标签 → 像素 xyxy。文件缺失 = 负样本（gt 空）。
+    """YOLO 归一化标签 → [{cls, xyxy, poly?}]。文件缺失 = 负样本（gt 空）。
 
     行格式分流：5 token = detect（cx cy w h）；坐标偶数个且 ≥6 = obb 角点 / segment 多边形，
-    取 min/max 外接矩形（错误分析按外接近似匹配，与预测侧 OBB xyxy 口径一致）。"""
+    取 min/max 外接矩形（匹配按外接近似）并保留归一化 poly（叠加图绘多边形本体）。"""
     if not label_txt.is_file():
         return []
     out = []
@@ -41,25 +41,39 @@ def _read_gt(label_txt: Path, w: int, h: int, classes: list[str]) -> list[dict]:
         if len(parts) == 5:
             cx, cy, bw, bh = coords
             xs, ys = (cx - bw / 2, cx + bw / 2), (cy - bh / 2, cy + bh / 2)
+            poly = None
         elif len(coords) >= 6 and len(coords) % 2 == 0:
             xs, ys = coords[0::2], coords[1::2]
+            poly = [round(v, 6) for v in coords]
         else:
             continue
-        out.append({"cls": classes[cid],
-                    "xyxy": [round(min(xs) * w, 1), round(min(ys) * h, 1),
-                             round(max(xs) * w, 1), round(max(ys) * h, 1)]})
+        entry = {"cls": classes[cid],
+                 "xyxy": [round(min(xs) * w, 1), round(min(ys) * h, 1),
+                          round(max(xs) * w, 1), round(max(ys) * h, 1)]}
+        if poly:
+            entry["poly"] = poly
+        out.append(entry)
     return out
 
 
 def _extract_pred(res, classes: list[str]) -> list[dict]:
-    """推理结果 → [{cls, conf, xyxy}]。OBB 任务的框在 res.obb（res.boxes 为 None），
-    OBB 的 xyxy 即外接矩形；detect 零检出时 res.boxes 是空对象而非 None，故用显式判空。"""
+    """推理结果 → [{cls, conf, xyxy, poly?}]。OBB 任务的框在 res.obb（res.boxes 为 None），
+    OBB 的 xyxy 即外接矩形；detect 零检出时 res.boxes 是空对象而非 None，故用显式判空。
+    segment 任务 mask 与 box 同序（res.masks.xyn 归一化轮廓），按索引配对附 poly。"""
     boxes = res.boxes if res.boxes is not None else getattr(res, "obb", None)
-    return [{"cls": classes[int(c)] if 0 <= int(c) < len(classes) else str(int(c)),
-             "conf": round(float(cf), 4),
-             "xyxy": [round(float(v), 1) for v in box]}
-            for box, cf, c in zip(boxes.xyxy.tolist(), boxes.conf.tolist(),
-                                  boxes.cls.tolist())]
+    masks = getattr(res, "masks", None)
+    polys = [ [round(float(v), 6) for x, y in poly for v in (x, y)]
+              for poly in (masks.xyn if masks is not None else []) ]
+    out = []
+    for i, (box, cf, c) in enumerate(zip(boxes.xyxy.tolist(), boxes.conf.tolist(),
+                                         boxes.cls.tolist())):
+        entry = {"cls": classes[int(c)] if 0 <= int(c) < len(classes) else str(int(c)),
+                 "conf": round(float(cf), 4),
+                 "xyxy": [round(float(v), 1) for v in box]}
+        if i < len(polys) and len(polys[i]) >= 6:
+            entry["poly"] = polys[i]
+        out.append(entry)
+    return out
 
 
 def main() -> None:
