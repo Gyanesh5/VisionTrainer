@@ -96,8 +96,11 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         # （质量审计数百卡缩略图回填）会卡住浏览器主线程 >2s 发不出 PONG → 服务端
         # 断连 → 实例删除 → 重连被拒 → 整页 reload（2026-09-21 断连事故同病灶）。
         # 放宽后 ping 8s/超时 4s/重连宽限 10s，渲染尖峰不再误杀连接。
+        # favicon 必须传包内绝对路径：NiceGUI 按 Path 判存在后自动挂 /favicon.ico 路由，
+        # 相对路径按进程 CWD 解析，服务从其他目录启动会静默回落默认图标。
         ui.run_with(app, title="VisionTrainer", storage_secret="visiontrainer-dev-secret",
-                    language="zh-CN", reconnect_timeout=10.0)
+                    language="zh-CN", reconnect_timeout=10.0,
+                    favicon=str(Path(__file__).parent / "ui" / "static" / "favicon.ico"))
     return app
 
 
