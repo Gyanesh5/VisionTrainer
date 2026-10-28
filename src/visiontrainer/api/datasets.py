@@ -49,6 +49,14 @@ class ExcludeBody(BaseModel):
     reason: str = ""
 
 
+class RestoreBody(BaseModel):
+    files: list[str]
+
+
+class SwitchManifestBody(BaseModel):
+    uid: str
+
+
 class RelabelRefreshBody(BaseModel):
     image: str | None = None  # 省略 = 全清单按 mtime 增量
     force: bool = False       # 跳过增量判断全量重转换（转换器规则变更后的恢复通道）
@@ -154,6 +162,28 @@ def exclude_files(name: str, body: ExcludeBody):
         m = svc.exclude_files(name, body.files, body.reason)
         return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"]),
                 "excluded": len(m.get("excluded") or [])}
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/restore")
+def restore_files(name: str, body: RestoreBody):
+    """排除恢复：按最近一次 train/val 归属重新纳入活跃清单（exclude 的对偶）。"""
+    try:
+        m = svc.restore_files(name, body.files)
+        left = len(svc.get_dataset(name).get("excluded") or [])
+        return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"]),
+                "restored": len(m.get("restored") or []), "excluded_left": left}
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/switch-manifest")
+def switch_manifest(name: str, body: SwitchManifestBody):
+    """切回历史清单版本：活跃指回旧 uid，按当前标注重建派生并全量重算画像。"""
+    try:
+        m = svc.switch_manifest(name, body.uid)
+        return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"])}
     except DatasetError as exc:
         return _error_response(exc)
 

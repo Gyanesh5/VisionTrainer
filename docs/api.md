@@ -35,6 +35,8 @@
 | GET | `/api/v1/datasets/{id}/audit` | 体检报告缓存读（M6 03）；未体检过返回 `null` |
 | POST | `/api/v1/datasets/{id}/audit` | 跑体检（长操作，指纹命中缓存秒回）。报告：`exact_groups`（sha256）/ `near_groups`（phash≤8 并查集）/ `leaks`（跨切分泄漏对）/ `imbalance`（失衡判定+规则文案）/ `skipped_undecodable`；`from_cache` 标记 |
 | POST | `/api/v1/datasets/{id}/exclude` | 从切分清单排除（M6 04，质量审计唯一处置）。body: `{files: [绝对路径], reason?}`；只删清单不洗牌（剩余文件 train/val 归属不变），生成新 manifest 并切 active，旧清单保留；排空 train/val → 409 |
+| POST | `/api/v1/datasets/{id}/restore` | 排除恢复（exclude 的对偶）。body: `{files}`；沿 prev_uid 链回溯各文件最近一次 train/val 归属并回原位（既有文件不动），生成新清单切 active、重建派生、清出排除日志、画像全量重算；全量恢复时文件集回到原版 uid 天然复现；文件已在清单内或未被排除过 → 400 |
+| POST | `/api/v1/datasets/{id}/switch-manifest` | 切回历史清单版本（整批恢复通道）。body: `{uid}`；文件集回到该版本（排除文件随之回归），按当前标注重建派生、重算健康报告、排除日志清出已回清单条目；uid 即当前活跃 → 409，不存在 → 404 |
 
 ### 数据集域 v1.2 增补（标注审查 / 标注质检 / 规则扩充，2026-09-22）
 

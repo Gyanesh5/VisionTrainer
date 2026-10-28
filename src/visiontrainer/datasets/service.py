@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .audit import compute_audit, fingerprint_of, load_cached, save_cached
 from .convert import TASK_SHAPES, json_to_yolo_lines, write_label
-from .split import build_manifest, excluded_manifest, save_manifest
+from .split import build_manifest, excluded_manifest, restored_manifest, save_manifest
 from .stats import build_stats, get_stats, recompose, save_stats
 from .validate import scan_entries, validate_dataset
 
@@ -343,15 +343,107 @@ def exclude_files(name: str, files: list[str], reason: str = "", root: Path | No
         raise DatasetError("state_conflict", "排除后 train 或 val 将为空，拒绝执行（各须至少保留 1 张）")
     _derive(ds_dir, manifest, meta["task_type"], meta["classes"])
     save_manifest(ds_dir, manifest)
-    if manifest["uid"] != meta["active_manifest"]:
+    if manifest["uid"] != meta["active_manifest"] and \
+            not any(b["uid"] == manifest["uid"] for b in meta["manifests"]):
         meta["manifests"].append(_manifest_brief(manifest))
-        meta["active_manifest"] = manifest["uid"]
+    meta["active_manifest"] = manifest["uid"]
     excluded_log = list(meta.get("excluded") or [])
     excluded_log.extend({"file": f, "at": datetime.now().isoformat(timespec="seconds"),
                          "reason": reason or "质量审计处置"} for f in sorted(files))
     meta["excluded"] = excluded_log
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     _refresh_stats_recompose(name, meta, prev, manifest)
+    return manifest
+
+
+def _history_entry(ds_dir: Path, manifest: dict, image: str) -> dict:
+    """沿 prev_uid 链回溯文件最近一次的清单条目与 train/val 归属（链断默认回 train）。"""
+    seen: set[str] = set()
+    cur = manifest
+    while cur.get("uid") and cur["uid"] not in seen:
+        seen.add(cur["uid"])
+        entry = next((f for f in cur.get("files") or [] if f["image"] == image), None)
+        if entry is not None:
+            return {**entry, "split": "val" if image in set(cur.get("val") or []) else "train"}
+        nxt = cur.get("prev_uid")
+        path = ds_dir / "derived" / str(nxt) / "split_manifest.json"
+        if not nxt or not path.is_file():
+            break
+        cur = _read_json(str(path))
+    # 孤儿兜底（排除日志在而历史链断——理论不可达）：labelme 同名 JSON 惯例回 train
+    return {"image": image, "label": str(Path(image).with_suffix(".json")),
+            "primary_label": None, "split": "train"}
+
+
+def _refresh_stats_full(name: str, meta: dict, manifest: dict) -> None:
+    """恢复/切回后画像全量重算（recompose 只删行不增行，回加文件必须重扫一次盘）。"""
+    src = Path(meta["source_dir"])
+    scan = scan_entries(src, meta["task_type"], meta["classes"])
+    save_stats(name, build_stats(scan["entries"], manifest, meta["task_type"], meta["classes"], name))
+
+
+def restore_files(name: str, files: list[str], root: Path | None = None) -> dict:
+    """排除恢复（单图/多图）：按该文件最近一次 train/val 归属重新纳入活跃清单。
+
+    exclude_files 的对偶：沿 prev_uid 链回溯归属（归属稳定——既有文件不动，恢复文件
+    回原位）、生成新清单并重建派生切换活跃、从排除日志清出、画像全量重算
+    （全量恢复时文件集回到原版，uid 天然复现原版本号）。
+    """
+    if not files:
+        raise DatasetError("invalid_args", "恢复清单为空")
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不在平台处置范围")
+    ds_dir = _ds_dir(name, root)
+    active = _read_json(str(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json"))
+    present = {f["image"] for f in active.get("files") or []}
+    in_active = [f for f in files if f in present]
+    if in_active:
+        raise DatasetError("invalid_args",
+                           f"已在当前清单内：{Path(in_active[0]).name} 等共 {len(in_active)} 个")
+    excluded_log = {e["file"] for e in (meta.get("excluded") or [])}
+    unknown = [f for f in files if f not in excluded_log]
+    if unknown:
+        raise DatasetError("invalid_args",
+                           f"不在排除日志中（未被本平台排除过）：{Path(unknown[0]).name}")
+    entries = [_history_entry(ds_dir, active, f) for f in sorted(files)]
+    manifest = restored_manifest(active, entries)
+    _derive(ds_dir, manifest, meta["task_type"], meta["classes"])
+    save_manifest(ds_dir, manifest)
+    if manifest["uid"] != meta["active_manifest"] and \
+            not any(b["uid"] == manifest["uid"] for b in meta["manifests"]):
+        meta["manifests"].append(_manifest_brief(manifest))
+    meta["active_manifest"] = manifest["uid"]
+    meta["excluded"] = [e for e in (meta.get("excluded") or []) if e["file"] not in set(files)]
+    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    _refresh_stats_full(name, meta, manifest)
+    return manifest
+
+
+def switch_manifest(name: str, uid: str, root: Path | None = None) -> dict:
+    """切回历史清单版本：活跃指回旧 uid，按当前标注重建派生并全量重算画像。
+
+    切回语义：文件集回到该版本（排除过的文件随之回清单）；派生重建保证与当前
+    标注 JSON 一致；排除日志中已回到清单内的条目同步清出。
+    """
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不在平台处置范围")
+    if uid == meta.get("active_manifest"):
+        raise DatasetError("state_conflict", "该清单已是当前活跃版本")
+    ds_dir = _ds_dir(name, root)
+    path = ds_dir / "derived" / uid / "split_manifest.json"
+    if not any(b["uid"] == uid for b in meta.get("manifests") or []) or not path.is_file():
+        raise DatasetError("not_found", f"清单版本不存在：{uid}")
+    prev_active = _read_json(str(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json"))
+    manifest = _read_json(str(path))
+    _derive(ds_dir, manifest, meta["task_type"], meta["classes"])
+    save_manifest(ds_dir, manifest)
+    meta["active_manifest"] = uid
+    back = {f["image"] for f in manifest.get("files") or []}
+    meta["excluded"] = [e for e in (meta.get("excluded") or []) if e["file"] not in back]
+    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    _refresh_stats_full(name, meta, manifest)
     return manifest
 
 

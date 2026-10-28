@@ -105,3 +105,29 @@ def excluded_manifest(prev: dict, excluded: list[str]) -> dict:
         "prev_uid": prev["uid"],
         "excluded": sorted(ex),
     }
+
+
+def restored_manifest(prev: dict, entries: list[dict]) -> dict:
+    """排除恢复（M6 04 对偶）：把被排除文件重新纳入 prev 生成新清单。
+
+    归属稳定（对偶语义）：既有文件 train/val 不动；恢复文件的归属取 entries 携带
+    的 split 字段（service 沿 prev_uid 链回溯其最近一次归属填好）。uid 按
+    （seed, ratio, 文件集哈希）重算——全部恢复时天然回到原版本 uid。
+    """
+    files = sorted(prev["files"] + [{k: v for k, v in e.items() if k != "split"}
+                                    for e in entries], key=lambda f: f["image"])
+    train = sorted(set(prev["train"]) | {e["image"] for e in entries if e.get("split") == "train"})
+    val = sorted(set(prev["val"]) | {e["image"] for e in entries if e.get("split") == "val"})
+    files_hash = _file_label({f["image"]: f.get("primary_label") for f in files})
+    return {
+        "uid": _manifest_uid(prev["seed"], prev["ratio"], files_hash),
+        "seed": prev["seed"],
+        "ratio": prev["ratio"],
+        "stratify": prev["stratify"],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "files": files,
+        "train": train,
+        "val": val,
+        "prev_uid": prev["uid"],
+        "restored": sorted(e["image"] for e in entries),
+    }
