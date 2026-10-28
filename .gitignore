@@ -12,3 +12,7 @@ dist/
 *.pt
 .nicegui/
 .playwright-mcp/
+
+# 本地工作区目录（规划/验收证据、agent 规范 symlink）——单机不入库
+.scratch
+.agents
