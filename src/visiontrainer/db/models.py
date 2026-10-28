@@ -1,7 +1,7 @@
 """SQLAlchemy 2.0 模型（10 号票六表）。
 
 约定：id 为自增整数；uid 为 8 位 hex，用于路径与对外展示。
-Task.status 为聚合冗余（由 Run 事件更新）；队列单元是 Run。
+Task.status 为聚合冗余（由 Run 事件/启动重算更新，口径=最新一轮终态）；队列单元是 Run。
 """
 
 from __future__ import annotations

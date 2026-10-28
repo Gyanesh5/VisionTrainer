@@ -45,7 +45,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **单飞 FIFO**：同一时刻一个 Run 在跑，完成自动取下一个；pynvml 外部占用检测，占用则队首留 queued 并提示原因。显存感知并行、CPU 兜底**不做**；`device` 字符串透传，零 DDP。
 - **执行内核**：平台自研 Runner（搬运 trainer.py 进程树管理），指标采集 = worker 内 `add_callback("on_fit_epoch_end")` 直推 + `results.csv` 轮询兜底，不做 stdout 解析。
 - **生命周期**：训练子进程 `start_new_session` 脱离；平台重启**孤儿收养**（pid + csv 恢复监控）；停止链 SIGTERM → `trainer.stop` → 超时 killpg SIGKILL。
-- **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余。
+- **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态——续训成功不被历史失败轮压成 failed）。
 - **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供"续训"（新 Run）。
 - **运行快照** [M6]：Run 启动冻结全量训练输入（切分清单 + classes.txt 哈希 + 增强参数 + 基础权重标识）入 Run manifest；历史 Run 可复现、跨 Run diff 完整。
 - **失败 Retry** [M7]：Failed/Cancelled Run 一键以相同参数重开 Task。

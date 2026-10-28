@@ -108,6 +108,87 @@ def test_resume_after_done(training_client):
     assert run["round_no"] == 2
 
 
+def test_task_status_latest_round_wins(tmp_path, datasets_root, detect_source):
+    """聚合口径=最新一轮终态（用户实测回归）：轮 1 failed(-9) + 续训轮 2 done → Task 应显示 done，
+    不被历史失败轮永久压成 failed。"""
+    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+                        "check_occupancy": False}}
+    app = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app) as c:
+        task_uid = _create_task(c, epochs=2, name="failed-then-resume")
+        task = _wait_task(c, task_uid, {"done"})
+        task_id, old_uid = task["id"], task["runs"][0]["uid"]
+
+        import sqlite3
+
+        conn = sqlite3.connect(tmp_path / "db.sqlite")
+        # 复现实测形态：轮 1 被记 failed（退出码 -9）、任务聚合卡 failed
+        conn.execute("UPDATE runs SET status='failed', error='训练进程退出码 -9（详见 training.log）' WHERE uid=?",
+                     (old_uid,))
+        conn.execute("UPDATE tasks SET status='failed' WHERE id=?", (task_id,))
+        conn.commit()
+        conn.close()
+
+        new_uid = c.post(f"/api/v1/runs/{old_uid}/resume").json()["new_run_uid"]
+        run = _wait_status(c, new_uid, {"done"})
+        assert run["round_no"] == 2
+        task = _wait_task(c, task_uid, {"done"})
+        assert task["status"] == "done", "续训成功后任务不应仍显示 failed"
+
+
+def test_task_status_cancelled_round_not_sticky(training_client):
+    """取消轮同样不粘住任务状态：停止 → 续训 done → Task 显示 done（全真实链路，无 DB 改写）。"""
+    c = training_client
+    task_uid = _create_task(c, epochs=8, name="stop-then-resume")
+    task = _wait_task(c, task_uid, {"running"})
+    old_uid = task["runs"][0]["uid"]
+    assert c.post(f"/api/v1/runs/{old_uid}/stop").status_code == 200
+    _wait_status(c, old_uid, {"cancelled"})
+    new_uid = c.post(f"/api/v1/runs/{old_uid}/resume").json()["new_run_uid"]
+    _wait_status(c, new_uid, {"done"})
+    task = _wait_task(c, task_uid, {"done"})
+    assert task["status"] == "done"
+
+
+def test_restart_reaggregates_stale_task_status(tmp_path, datasets_root, detect_source):
+    """启动自愈：聚合字段遗留错态（runs 已 failed+done 但 tasks.status 卡 failed）重启即重算。"""
+    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+                        "check_occupancy": False}}
+    app1 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app1) as c1:
+        task_uid = _create_task(c1, epochs=2, name="stale-agg")
+        task = _wait_task(c1, task_uid, {"done"})
+        task_id = task["id"]
+        old_uid = task["runs"][0]["uid"]
+        new_uid = c1.post(f"/api/v1/runs/{old_uid}/resume").json()["new_run_uid"]
+        _wait_status(c1, new_uid, {"done"})
+        assert c1.get(f"/api/v1/tasks/{task_id}").json()["status"] == "done"
+
+        import sqlite3
+
+        conn = sqlite3.connect(tmp_path / "db.sqlite")
+        # 人工腐蚀聚合字段，模拟旧口径下的遗留错态（用户 8600 实库形态）
+        conn.execute("UPDATE runs SET status='failed' WHERE uid=?", (old_uid,))
+        conn.execute("UPDATE tasks SET status='failed' WHERE id=?", (task_id,))
+        conn.commit()
+        conn.close()
+
+    app2 = create_app(cfg=cfg, with_ui=False)
+    with TestClient(app2) as c2:
+        deadline = time.time() + 10
+        status = None
+        while time.time() < deadline:
+            status = c2.get(f"/api/v1/tasks/{task_id}").json()["status"]
+            if status == "done":
+                break
+            time.sleep(0.2)
+        assert status == "done", f"启动重算应自愈遗留错态，实际 {status}"
+
+
 def test_event_bus_stream(training_client):
     """WS 契约的总线级验证：真实 watchdog 发布 → 订阅者收到 metrics 与终态。"""
     from visiontrainer import ws as wsmod

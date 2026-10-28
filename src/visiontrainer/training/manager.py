@@ -169,6 +169,10 @@ class TrainingManager:
         threading.Thread(target=self.adopt, daemon=True, name="adopter").start()
         t = threading.Thread(target=self._queue_loop, daemon=True, name="queue-loop")
         t.start()
+        # 自愈：重算全部 Task 聚合（聚合口径变更/历史遗留错态的兜底，不依赖新事件触发）
+        with self.Session() as s:
+            for task_id in [row.id for row in s.query(Task.id).all()]:
+                self._aggregate(s, task_id)
 
     def adopt(self) -> None:
         """平台重启后：running/stopping 且 pid 存活 → 重新挂 watchdog 继续监控
@@ -586,19 +590,17 @@ class TrainingManager:
     # ------------------------------------------------------------ 聚合与广播
 
     def _aggregate(self, s, task_id: int) -> None:
-        """Task.status = Run 集合的聚合冗余（仅供列表展示）。"""
+        """Task.status = Run 集合的聚合冗余（仅供列表展示）。
+        在跑/排队优先；全部结束后以最新一轮终态为准——续训救回的任务显示 done，
+        不被历史失败/取消轮永久压成 failed/cancelled。"""
         runs = s.query(Run).filter(Run.task_id == task_id).all()
         states = {r.status for r in runs}
         if states & RUNNING_STATES:
             agg = "running"
         elif "queued" in states:
             agg = "queued"
-        elif "failed" in states:
-            agg = "failed"
-        elif "cancelled" in states:
-            agg = "cancelled"
-        elif states == {"done"}:
-            agg = "done"
+        elif runs:
+            agg = max(runs, key=lambda r: (r.round_no, r.id)).status
         else:
             agg = "queued"
         task = s.get(Task, task_id)
