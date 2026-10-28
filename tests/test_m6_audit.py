@@ -241,34 +241,33 @@ def test_fingerprint_changes_with_label_edit(tmp_path):
     assert fingerprint_of(m) != fp1
 
 
-def test_thumb_src_roundtrip(tmp_path):
-    """缩略图助手（2026-09-21 网格改版）：真图 → data URL；坏图 → None；mtime 缓存命中。"""
+def test_thumb_bytes_roundtrip(tmp_path):
+    """缩略图字节生成（2026-10-24 HTTP 管线改版）：真图 → JPEG 字节；坏图/缺文件 → None；mtime 缓存命中。"""
     from PIL import Image
 
-    from visiontrainer.ui.pages import _thumb_cache_reset, _thumb_src
+    from visiontrainer import thumbs
 
-    _thumb_cache_reset()
+    thumbs.reset_cache()
     p = tmp_path / "ok.png"
     Image.new("RGB", (800, 600), (10, 120, 200)).save(p)
-    url = _thumb_src(str(p))
-    assert url and url.startswith("data:image/jpeg;base64,")
-    assert _thumb_src(str(p)) == url  # 缓存命中
+    data = thumbs.thumb_bytes(str(p))
+    assert data and data[:2] == b"\xff\xd8"  # JPEG magic
+    assert thumbs.thumb_bytes(str(p)) == data  # 缓存命中
     bad = tmp_path / "bad.png"
     bad.write_bytes(b"\x89PNG\r\n\x1a\nbroken")
-    assert _thumb_src(str(bad)) is None
-    assert _thumb_src(str(tmp_path / "missing.png")) is None
+    assert thumbs.thumb_bytes(str(bad)) is None
+    assert thumbs.thumb_bytes(str(tmp_path / "missing.png")) is None
 
 
 def test_thumb_cache_lru_eviction(tmp_path):
-    """缩略图缓存 LRU 淘汰（2026-09-21 断连事故）：原 300 上限全清——390 张的
-    plate-579-580 审计集每次访问都全冷重解码。改为逐条淘汰 + 刚访问的保留。"""
+    """缩略图缓存 LRU 逐条淘汰：刚访问的保留、最旧未访问的出局、不清全部（大审计集防全冷）。"""
     from PIL import Image
 
-    from visiontrainer.ui import pages as pg
+    from visiontrainer import thumbs
 
-    pg._thumb_cache_reset()
-    old_max = pg._THUMB_CACHE_MAX
-    pg._THUMB_CACHE_MAX = 4
+    thumbs.reset_cache()
+    old_max = thumbs._CACHE_MAX
+    thumbs._CACHE_MAX = 4
     try:
         paths = []
         for i in range(6):
@@ -276,17 +275,35 @@ def test_thumb_cache_lru_eviction(tmp_path):
             Image.new("RGB", (32, 32), (i * 40, 0, 0)).save(p)
             paths.append(str(p))
         for p in paths[:4]:
-            assert pg._thumb_src(p)
-        first = pg._thumb_src(paths[0])  # 提升到 LRU 最新
-        for p in paths[4:]:              # 淘汰应从最旧开始：t1/t2 出局，t0 因刚访问保留
-            pg._thumb_src(p)
-        assert pg._thumb_cache_get(paths[0]) == first, "刚访问的条目应保留"
-        assert pg._thumb_cache_get(paths[1]) is None, "最旧未访问的应被逐条淘汰"
-        assert pg._thumb_cache_get(paths[5]) is not None
-        assert 0 < len(pg._THUMB_CACHE) <= 4, "不应全清"
+            assert thumbs.thumb_bytes(p)
+        first = thumbs.thumb_bytes(paths[0])  # 提升到 LRU 最新
+        for p in paths[4:]:                    # 淘汰应从最旧开始：t1/t2 出局，t0 因刚访问保留
+            thumbs.thumb_bytes(p)
+        assert thumbs.cache_get(paths[0]) == first, "刚访问的条目应保留"
+        assert thumbs.cache_get(paths[1]) is None, "最旧未访问的应被逐条淘汰"
+        assert thumbs.cache_get(paths[5]) is not None
+        assert 0 < len(thumbs._CACHE) <= 4, "不应全清"
     finally:
-        pg._THUMB_CACHE_MAX = old_max
-        pg._thumb_cache_reset()
+        thumbs._CACHE_MAX = old_max
+        thumbs.reset_cache()
+
+
+def test_thumb_sign_and_url():
+    """签名 URL：自签自验通过；篡改路径/过期/坏 token 拒绝（路径安全全靠这层）。"""
+    import time
+
+    from visiontrainer import thumbs
+
+    tok = thumbs.sign("/a/b.png", 96)
+    assert thumbs.verify("/a/b.png", 96, tok)
+    assert not thumbs.verify("/etc/passwd", 96, tok), "路径被篡改必须拒绝"
+    assert not thumbs.verify("/a/b.png", 260, tok), "尺寸被篡改必须拒绝"
+    expired = thumbs.sign("/a/b.png", 96, exp=int(time.time()) - 1)
+    assert not thumbs.verify("/a/b.png", 96, expired)
+    assert not thumbs.verify("/a/b.png", 96, "garbage")
+    url = thumbs.thumb_url("/a/b c.png", 72)
+    assert url.startswith(thumbs.ROUTE + "?p="), "路径必须 URL 编码进查询串"
+    assert "%20" in url or "%2F" in url
 
 
 def test_exclude_files_batch_multi(tmp_path, datasets_root, tmp_db, detect_source):

@@ -38,6 +38,12 @@
 | POST | `/api/v1/datasets/{id}/restore` | 排除恢复（exclude 的对偶）。body: `{files}`；沿 prev_uid 链回溯各文件最近一次 train/val 归属并回原位（既有文件不动），生成新清单切 active、重建派生、清出排除日志、画像全量重算；全量恢复时文件集回到原版 uid 天然复现；文件已在清单内或未被排除过 → 400 |
 | POST | `/api/v1/datasets/{id}/switch-manifest` | 切回历史清单版本（整批恢复通道）。body: `{uid}`；文件集回到该版本（排除文件随之回归），按当前标注重建派生、重算健康报告、排除日志清出已回清单条目；uid 即当前活跃 → 409，不存在 → 404 |
 
+### 媒体端点（缩略图 HTTP 管线，2026-10-24）
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/thumb?p=&box=&t=` | 图片直出（PIL 缩略图或原图）。`box` 白名单 0/72/96/260/512（0=原图不缩放，大图查看器用）。`t` 为 HMAC 签名（UI 经 `thumbs.thumb_url` 签发，24h 有效）——无签名/篡改路径 → 403；缺文件/坏图 → 404；box 越界 → 400。响应带 ETag（绑 size+mtime+box）与 `Cache-Control: max-age=86400`，`If-None-Match` 命中回 304。缩略图档服务端 (path, mtime, box) LRU 缓存字节 |
+
 ### 数据集域 v1.2 增补（标注审查 / 标注质检 / 规则扩充，2026-09-22）
 
 | 方法 | 路径 | 说明 |

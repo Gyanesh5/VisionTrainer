@@ -10,13 +10,13 @@
 import asyncio
 import json
 from base64 import b64encode
-from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
 from fastapi import Request
 from nicegui import app, ui
 
+from .. import thumbs
 from ..config import load_config, update_config
 from ..datasets import service as ds
 from ..training.params import GROUPS as PARAM_GROUPS
@@ -519,6 +519,60 @@ def _open_in_xal(image: str) -> None:
         ui.notify(f"调起失败：{exc}（训练 python 须指向 X-AnyLabeling 环境，见设置页）", type="negative")
 
 
+def _open_dir(path: str) -> None:
+    """在系统文件管理器中打开目录（单机本机部署，服务端 xdg-open 直开）。"""
+    import subprocess
+
+    try:
+        subprocess.Popen(["xdg-open", path], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
+        ui.notify(f"已在文件管理器打开 {Path(path).name}", type="positive")
+    except OSError as exc:  # noqa: BLE001
+        ui.notify(f"打开失败：{exc}", type="negative")
+
+
+# ultralytics 产物图的中文标题与展示序（按文件名特征匹配；未知文件名回退 stem）
+_ART_ORDER = ["confusion_matrix_normalized", "confusion_matrix", "results", "pr_curve", "f1_curve",
+              "p_curve", "r_curve", "labels", "train_batch", "val_batch"]
+
+
+def _artifact_order(name: str) -> tuple[int, str]:
+    n = name.lower()
+    for i, k in enumerate(_ART_ORDER):
+        if k in n:
+            return (i, n)
+    return (len(_ART_ORDER), n)
+
+
+def _artifact_title(name: str) -> str:
+    import re
+
+    n = Path(name).stem.lower()
+    m = re.search(r"\d+", n)
+    no = m.group(0) if m else ""
+    if "confusion_matrix_normalized" in n:
+        return "混淆矩阵（归一化）"
+    if "confusion_matrix" in n:
+        return "混淆矩阵"
+    if n == "results":
+        return "训练曲线总览"
+    if "pr_curve" in n:
+        return "PR 曲线"
+    if "f1_curve" in n:
+        return "F1 曲线"
+    if "p_curve" in n:
+        return "P 曲线"
+    if "r_curve" in n:
+        return "R 曲线"
+    if n.startswith("labels"):
+        return "标签分布"
+    if "train_batch" in n:
+        return f"训练批 {no}（含增强）"
+    if "val_batch" in n:
+        return f"验证批 {no} · {'预测' if 'pred' in n else 'GT'}"
+    return Path(name).stem
+
+
 _REVIEW_PALETTE = ["#4fc3f7", "#ffb74d", "#81c784", "#e57373", "#ba68c8", "#fff176", "#4dd0e1"]
 _REVIEW_IMG_CACHE: dict[str, str] = {}
 
@@ -613,61 +667,7 @@ def _review_overlay_svg(label_path: str | None) -> str:
             + "".join(parts) + "</svg>")
 
 
-_THUMB_CACHE: OrderedDict = OrderedDict()  # (path, mtime, box) -> data URL，LRU
-_THUMB_CACHE_MAX = 2000
-
-
-def _thumb_cache_reset() -> None:
-    """清空缩略图缓存（测试隔离用）。"""
-    _THUMB_CACHE.clear()
-
-
-def _thumb_cache_get(path: str, box: int = 260) -> str | None:
-    """热缓存直取（命中提升 LRU 位）；未命中返回 None，调用方再走线程生成。"""
-    try:
-        mtime = Path(path).stat().st_mtime
-    except OSError:
-        return None
-    key = (path, mtime, box)
-    src = _THUMB_CACHE.get(key)
-    if src is not None:
-        _THUMB_CACHE.move_to_end(key)
-    return src
-
-
-def _thumb_src(path: str, box: int = 260) -> str | None:
-    """缩略图 data URL：PIL 服务端生成（约 box×box 内接），按 (路径, mtime) LRU 缓存。
-
-    解码失败返回 None（对应校验规则「图片不可读」，网格里落坏图占位）。
-    注意：全尺寸解码单张数十 ms，事件循环内批量调用会冻结页面——UI 侧应经
-    _thumb_cache_get 判热 + 线程池回填（_audit_grid，2026-09-21 断连事故）。
-    """
-    p = Path(path)
-    try:
-        mtime = p.stat().st_mtime
-    except OSError:
-        return None
-    key = (path, mtime, box)
-    if key in _THUMB_CACHE:
-        _THUMB_CACHE.move_to_end(key)
-        return _THUMB_CACHE[key]
-    import io
-
-    from PIL import Image
-
-    try:
-        with Image.open(p) as im:
-            im = im.convert("RGB")
-            im.thumbnail((box, box))
-            buf = io.BytesIO()
-            im.save(buf, format="JPEG", quality=82)
-        data = "data:image/jpeg;base64," + b64encode(buf.getvalue()).decode()
-    except Exception:  # noqa: BLE001 — 坏图/格式不支持：占位而不是炸页面
-        return None
-    while len(_THUMB_CACHE) >= _THUMB_CACHE_MAX:  # LRU 逐条淘汰（原全清会让大审计集每次访问全冷）
-        _THUMB_CACHE.popitem(last=False)
-    _THUMB_CACHE[key] = data
-    return data
+_THUMB_CACHE_MAX = thumbs._CACHE_MAX  # 兼容旧测试引用；真实缓存与生成在 thumbs 模块
 
 
 # ---------------------------------------------------------------- 通用工具
@@ -690,43 +690,90 @@ def _local_image(path: str, width: str = "100%"):
     return ui.image(f"data:image/{mime};base64,{b64encode(data).decode()}").style(f"width:{width}")
 
 
-def _zoomable_image_dialog(path: str, title: str, on_open=None, hint: str | None = None) -> None:
-    """可缩放大图查看：默认 100% 适应窗口宽，滚轮 / ±按钮 / 「适应」缩放（50–400%），
-    放大后滚动区平移。产物图与错误分析叠加图共用（2026-09-21 用户反馈）。"""
-    st: dict = {"pct": 100, "img": None}
-    with ui.dialog() as dlg, ui.card().classes("w-[92vw] max-w-[1700px] gap-1"):
-        with ui.row().classes("w-full items-center gap-1"):
-            ui.label(title).classes("font-bold flex-1 min-w-0 truncate")
-            pct_lab = ui.label("100%").classes("text-xs opacity-60 w-11 text-right shrink-0")
+_VT: dict = {}  # 大图查看器单例槽（holder 元素 + Viewer 实例 id），重开即换
 
-            def _apply(pct: int) -> None:
-                st["pct"] = max(50, min(400, pct))
-                pct_lab.set_text(f"{st['pct']}%")
-                if st["img"] is not None:
-                    st["img"].style(f"width:{st['pct']}%")
 
-            for icon, delta in (("remove", -25), ("add", 25)):
-                zb = ui.button(icon=icon, on_click=lambda d=delta: _apply(st["pct"] + d)).props(
-                    "flat dense round size=sm color=grey")
-                with zb:
-                    ui.tooltip("缩小" if delta < 0 else "放大")
-            ui.button("适应", on_click=lambda: _apply(100)).props("flat dense size=sm color=grey")
-            if on_open is not None:
-                ob = ui.button(icon="open_in_new", on_click=on_open).props(
-                    "flat dense round size=sm color=blue")
-                with ob:
-                    ui.tooltip("在 X-AnyLabeling 中打开")
-            ui.button("关闭", icon="close", on_click=dlg.close).props("flat dense")
-        with ui.scroll_area().classes("w-full h-[75vh]"):
-            with ui.column().classes("w-full items-center"):
-                st["img"] = _local_image(path)
-                if st["img"] is not None:  # 滚轮缩放（上=放大）；放大后靠滚动条/拖动平移
-                    st["img"].on("wheel", lambda e: _apply(
-                        st["pct"] + (-25 if (e.args or {}).get("deltaY", 0) > 0 else 25)),
-                        ["deltaY"])
-        if hint:
-            ui.label(hint).classes("text-[11px] opacity-50")
-    dlg.open()
+def _zoomable_image_dialog(path: str, title: str, on_open=None, hint: str | None = None,
+                           overlay_svg: str | None = None) -> None:
+    """全站大图查看（Viewer.js，本地 vendor 的现成轮子）：按住拖动平移、滚轮以光标
+    为锚缩放、双击步进、键盘、全屏、旋转全内置；图片走签名原图路由（box=0），
+    浏览器缓存 + 304 再验证。on_open（XAL 修复）经事件桥接成工具栏「✏」自定义按钮。
+    overlay_svg（审查标注层）：客户端把 SVG 画进原图再交给 Viewer——标注成为图像
+    的一部分，放大/平移/旋转下天然对齐，零同步代码；SVG 以 Blob 加载须带 xmlns。
+    生命周期用库的自然形态：全局单例，开新图先 destroy 旧实例（彼时已隐藏，安全），
+    关闭交给 Viewer 自己 hide——不挂 hidden/destroy 钩子（其动画状态机在本页环境
+    下 close 路径 transitionend 不可靠，钩子式清理实测会卡容器，2026-10-24）。"""
+    old = _VT.pop("holder", None)
+    if old is not None and not getattr(old, "is_deleted", False):
+        old.delete()  # 旧隐藏 img（其 Viewer 容器由 JS 侧单例 destroy 收走）
+    url = thumbs.thumb_url(path, 0)
+    holder = ui.element("img").props(f'src="{url}"').style("display:none")
+    _VT["holder"] = holder
+    if on_open is not None:
+        holder.on("vtxal", lambda _e: on_open())
+    t = title + (f"　·　{hint}" if hint else "")
+    xal_btn = (
+        "vtxal:{show:true,click:function(){el.dispatchEvent(new CustomEvent('vtxal'));}},"
+        if on_open is not None else "")
+    if overlay_svg:
+        if "xmlns" not in overlay_svg:
+            overlay_svg = overlay_svg.replace(
+                "<svg ", '<svg xmlns="http://www.w3.org/2000/svg" ', 1)
+        compose = (
+            "const bi=new Image();"
+            "bi.onload=()=>{"
+            "const ov=new Image();"
+            "ov.onload=()=>{"
+            "const cv=document.createElement('canvas');"
+            "cv.width=bi.naturalWidth;cv.height=bi.naturalHeight;"
+            "const cx=cv.getContext('2d');"
+            "cx.drawImage(bi,0,0);cx.drawImage(ov,0,0,cv.width,cv.height);"
+            "el.src=cv.toDataURL('image/jpeg',0.92);initV();};"
+            "ov.onerror=()=>initV();"
+            "ov.src=URL.createObjectURL(new Blob([" + json.dumps(overlay_svg) + "],"
+            "{type:'image/svg+xml'}));};"
+            "bi.onerror=()=>initV();"
+            "bi.src=el.src;")
+    else:
+        compose = "initV();"
+    ui.run_javascript(
+        "(function init(){"
+        f"const el=document.getElementById('c{holder.id}');"
+        "if(!el)return;"
+        "if(!window.Viewer){setTimeout(init,150);return;}"  # 页面刚载完脚本未就绪的重试
+        "function initV(){"
+        "if(window.__vtV){try{window.__vtV.destroy();}catch(e){}window.__vtV=null;}"  # 单例换图
+        "window.__vtV=new Viewer(el,{"
+        "navbar:false,button:false,"  # 右上角原生 X 也走坏链路，一并换自定义
+        "title:[1,function(){return " + json.dumps(t) + ";}],"
+        "toolbar:{zoomIn:1,zoomOut:1,oneToOne:1,reset:1," + xal_btn +
+        "rotateLeft:1,rotateRight:1,fullscreen:1,"
+        "vtclose:{show:true,click:function(){window.__vtV&&window.__vtV.hide(true);}}"
+        "}});"  # vtclose 与 toolbar 两层闭合 + Viewer 调用收尾
+        "window.__vtV.show(true);}"
+        + compose +
+        "})();")
+
+
+def _img_name_link(path: str, text: str | None = None, cls: str = "",
+                   overlay_label: str | None = None) -> None:
+    """图像文件名 → 点击查看大图（全站惯例：出现图像文件名即可点，滚轮缩放）。
+    overlay_label：labelme JSON 路径——弹层把标注合成进原图（读不到自动退化纯原图）。"""
+    label = text or Path(path).name
+    el = ui.label(label).classes(f"cursor-pointer hover:underline {cls or 'text-[11px] opacity-70'}")
+    el.on("click", lambda _e: _zoomable_image_dialog(
+        path, label,
+        overlay_svg=_review_overlay_svg(overlay_label) if overlay_label else None))
+    with el:
+        ui.tooltip("点击查看大图")
+
+
+def _dir_open_btn(path: str) -> None:
+    """目录旁的打开按钮（全站惯例：出现目录路径即可在文件管理器打开）。"""
+    b = ui.button(icon="folder_open", on_click=lambda: _open_dir(path)).props(
+        "flat dense round size=xs color=primary")
+    with b:
+        ui.tooltip("在文件管理器中打开")
 
 
 def _win_explorer_pick(start: str = "") -> str:
@@ -1033,19 +1080,31 @@ def _progress_cell() -> str:
             "{{ props.row.progress || props.row.block_reason || '—' }}</div></div></q-td>")
 
 
-def _on_row_click(table, select) -> None:
-    """行点击即选中（e.args = [事件, 行数据, 行号]，Quasar 多参 emit）。"""
+def _on_row_click(table, select, after=None) -> None:
+    """行点击即选中（e.args = [事件, 行数据, 行号]，Quasar 多参 emit）。
+
+    after（滚动跟随）在行点击路径无条件执行：select() 的防重入守卫在详情
+    已渲染时直接返回，若跟随挂在 select 里，用户点同一行想回看详情永远不滚。
+    程序化 select（加载自动聚焦/导入后跳转）不走这里，不受影响。
+    """
     def handler(e) -> None:
         args = e.args
         row = args[1] if isinstance(args, (list, tuple)) and len(args) > 1 else args
         if isinstance(row, dict):
             select(row)
+            if after is not None:
+                after()
     table.on("rowClick", handler)
 
 
 def _scroll_to(el) -> None:
+    # element.id 是整数，渲染到 DOM 带 c 前缀（'c123'）——裸 id 查不到元素，
+    # 该助手曾因此静默失效（行点击滚详情从未生效）；与审计网格校准 JS 同口径。
+    # block 必须用 start：Chromium 的 nearest 是「露出最近的隐藏边」——元素高于
+    # 视口且顶边可见时会向下滚去对齐底边、整段盖住视口时干脆不动，跟随聚焦
+    # 对象（详情卡/下钻列表）反而滚错方向
     ui.run_javascript(
-        f"document.getElementById('{el.id}')?.scrollIntoView({{behavior:'smooth', block:'nearest'}})")
+        f"document.getElementById('c{el.id}')?.scrollIntoView({{behavior:'smooth', block:'start'}})")
 
 
 def _model_task(model: str) -> str | None:
@@ -1532,6 +1591,117 @@ def _page_frame(active: str, title: str, actions=None, body=None, subtitle: str 
 # ---------------------------------------------------------------- 页面
 
 def mount() -> None:
+    # Viewer.js（本地 vendor，MIT）：全站大图查看的现成轮子——拖拽平移/滚轮缩放/
+    # 双击/键盘/全屏全内置（2026-10-24 用户裁决：不自研交互、不借地图引擎）
+    app.add_static_files("/vendor", str(Path(__file__).parent / "vendor"))
+    # shared=True：mount() 在页面上下文之外运行，非 shared 版只作用于当时的 client
+    ui.add_head_html('<link rel="stylesheet" href="/vendor/viewer.min.css">', shared=True)
+    ui.add_body_html('<script src="/vendor/viewer.min.js"></script>', shared=True)
+    ui.add_head_html("""<style>
+/* 自定义工具栏按钮（vtxal/vtclose）拿不到库的精灵图——按内置按钮同款机制
+   自配白描边 SVG 背景（li 24×24，::before 经通用 margin:2px 成 20×20 内容盒） */
+.viewer-toolbar li.viewer-vtclose:before{content:"";display:block;width:20px;height:20px;background:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' d='M4.5 4.5l11 11m0-11l-11 11'/%3E%3C/svg%3E") center/contain no-repeat}
+.viewer-toolbar li.viewer-vtxal:before{content:"";display:block;width:20px;height:20px;background:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/%3E%3C/svg%3E") center/contain no-repeat}
+</style>""", shared=True)
+    # 内置 close 按钮/Esc 在本页环境走 Viewer 动画版 hide（transitionend 不触发、
+    # 永不关闭，实测）；统一改道 hide(true) immediate 路径（已验证可靠）
+    ui.add_body_html(
+        "<script>window.addEventListener('keydown',function(e){"
+        "if(e.key==='Escape'&&document.querySelector('.viewer-container.viewer-in')"
+        "&&window.__vtV){try{window.__vtV.hide(true);}catch(_){}}},true);</script>", shared=True)
+    # 审查画布适应模块：contain 居中显示全图（初始/切图/窗口尺寸变化自动回适应），
+    # 单击画布由 NiceGUI 原生 click 事件桥回 Python 开 Viewer.js 大图弹层（细节
+    # 交互全在弹层：滚轮缩放/拖拽/1:1/旋转/全屏）
+    # 自举：MutationObserver 盯新出现的 .vt-pz 自动 mk——refreshable 重建路径里
+    # run_javascript 不可靠（实测不达），DOM 出现即初始化
+    ui.add_body_html("""
+<script>window.VTPZ = (function(){
+  function mk(el){
+    const stage = el.querySelector('.vt-pz-stage');
+    if(!stage) return null;
+    function fit(){
+      const r = el.getBoundingClientRect();
+      const w = stage.offsetWidth;
+      if(!w || !r.width || !r.height) return;
+      const img = stage.querySelector('img');
+      if(!img || !img.naturalWidth) return;
+      // 布局高由 natural 比值推导，不读包装层 offsetHeight——QImg 的高度在
+      // img load 后还差一拍才落定（实测竞态），等它不如绕开它
+      const h = w * img.naturalHeight / img.naturalWidth;
+      const s = Math.min(1, r.width / w, r.height / h);
+      stage.style.transform = 'translate(' + (r.width - w * s) / 2 + 'px,'
+                            + (r.height - h * s) / 2 + 'px) scale(' + s + ')';
+      stage.style.opacity = '1';
+    }
+    // img 可能在 mk 之后才由 QImg 挂载（MO 引导时 querySelector('img') 可为 null，
+    // 实测竞态）——stage 捕获阶段接 load/error（不冒泡、捕获可达），晚到也触发
+    stage.addEventListener('load', fit, true);
+    stage.addEventListener('error', function(){ stage.style.opacity = '1'; }, true);
+    if(window.ResizeObserver) new ResizeObserver(fit).observe(el);
+    stage.style.opacity = '0';
+    fit();
+    return { fit: fit };
+  }
+  function boot(root){
+    (root || document).querySelectorAll('.vt-pz:not([data-vtpz])').forEach(function(el){
+      el.dataset.vtpz = '1';
+      el.__vtPz = mk(el);
+    });
+  }
+  const mo = new MutationObserver(function(muts){
+    for(const m of muts){ for(const n of m.addedNodes){ if(n.nodeType===1){ if(n.classList && n.classList.contains('vt-pz')) boot(n.parentElement||n); else if(n.querySelectorAll) boot(n); } } }
+  });
+  document.addEventListener('DOMContentLoaded', function(){ boot(); mo.observe(document.body, {childList: true, subtree: true}); });
+  return { mk: mk, boot: boot };
+})();</script>""", shared=True)
+    # 审查缩略条带滚动自保持 + 当前图跟随（全局单例）：_view.refresh 重建条带致
+    # 滚动归零——scroll 捕获监听实时存 scrollTop（scroll 不冒泡、捕获可达，VTPZ
+    # 同款技巧），MutationObserver 在新条带挂载后恢复（重试，等 Quasar 初始化完）。
+    # 恢复的基线是用户滚动位置；当前图（.vt-cur）落在该位置的可见窗外时改为跟随
+    # 当前图——键盘/判定前进、过滤切换重置 i=0、质检「审查此图」跳转均由此覆盖。
+    # 不依赖 Python 消息顺序：run_javascript 夹缝方案实测 save 晚于 patch 执行，弃。
+    ui.add_head_html("""
+<script>window.__vtStripTop = 0;
+document.addEventListener('scroll', function(e){
+  const t = e.target;
+  if (t && t.classList && t.classList.contains('q-scrollarea__container') &&
+      t.closest && t.closest('.vt-review-strip')) window.__vtStripTop = t.scrollTop;
+}, true);
+(function(){
+  if (window.__vtStripObs) return;
+  window.__vtStripObs = new MutationObserver(function(muts){
+    muts.forEach(function(m){
+      m.addedNodes.forEach(function(n){
+        if (n.nodeType !== 1 || !n.matches) return;
+        const strip = n.matches('.vt-review-strip') ? n
+          : (n.querySelector ? n.querySelector('.vt-review-strip') : null);
+        if (!strip || strip.__vtRestored) return;
+        strip.__vtRestored = true;
+        let tries = 0;
+        (function set(){
+          const c = strip.querySelector('.q-scrollarea__container');
+          if (c){
+            let target = window.__vtStripTop;
+            const cur = strip.querySelector('.vt-cur');
+            if (cur){
+              const top = cur.offsetTop, bot = top + cur.offsetHeight;
+              if (top < target || bot > target + c.clientHeight)
+                target = Math.max(0, Math.min(top - 6, c.scrollHeight - c.clientHeight));
+            }
+            c.scrollTop = target;
+            if (++tries < 12 && Math.abs(c.scrollTop - target) > 2) setTimeout(set, 60);
+          } else if (++tries < 12) setTimeout(set, 60);
+        })();
+      });
+    });
+  });
+  const bootObs = function(){ if (document.body) window.__vtStripObs.observe(document.body, {childList: true, subtree: true}); };
+  if (document.body) bootObs(); else document.addEventListener('DOMContentLoaded', bootObs);
+})();</script>""", shared=True)
+    ui.add_head_html(
+        "<style>.vt-pz{cursor:zoom-in;touch-action:none;overflow:hidden;position:relative}"
+        ".vt-pz-stage{transform-origin:0 0}</style>", shared=True)
+
     # 处理函数异常默认只进日志（用户无感）——统一转成页面通知
     def _on_exception(exc: Exception) -> None:
         import traceback
@@ -1695,8 +1865,8 @@ def mount() -> None:
                     with ui.expansion("产物与日志", icon="folder").classes("w-full"):
                         art = run.get("artifacts") or {}
 
-                        def _artifact_row(label: str, path: str | None) -> None:
-                            """产物行：名称 + 存在徽章 + 完整路径（悬停看全） + 一键复制。"""
+                        def _artifact_row(label: str, path: str | None, open_dir: bool = False) -> None:
+                            """产物行：名称 + 存在徽章 + 完整路径（悬停看全）+ 打开目录/复制。"""
                             exists = bool(path) and Path(path).exists()
                             with ui.row().classes("w-full items-center gap-2"):
                                 ui.label(label).classes("text-xs font-semibold shrink-0")
@@ -1706,18 +1876,24 @@ def mount() -> None:
                                     p_label = ui.label(path).classes("text-[11px] opacity-60 break-all flex-1 min-w-0")
                                     with p_label:
                                         ui.tooltip(path)
+                                    if open_dir and exists:
+                                        od_btn = ui.button(icon="folder_open",
+                                                           on_click=lambda p=path: _open_dir(p)).props(
+                                            "flat dense round size=xs color=primary")
+                                        with od_btn:
+                                            ui.tooltip("在文件管理器中打开")
+                                    else:
+                                        def _copy(p=path):
+                                            ui.clipboard.write(p)
+                                            ui.notify("路径已复制", type="info")
 
-                                    def _copy(p=path):
-                                        ui.clipboard.write(p)
-                                        ui.notify("路径已复制", type="info")
-
-                                    cp_btn = ui.button(icon="content_copy", on_click=_copy).props(
-                                        "flat dense round size=xs color=grey")
-                                    with cp_btn:
-                                        ui.tooltip(f"复制完整路径：{path}")
+                                        cp_btn = ui.button(icon="content_copy", on_click=_copy).props(
+                                            "flat dense round size=xs color=grey")
+                                        with cp_btn:
+                                            ui.tooltip(f"复制完整路径：{path}")
 
                         with ui.column().classes("w-full gap-1"):
-                            _artifact_row("运行目录", run.get("run_dir"))
+                            _artifact_row("运行目录", run.get("run_dir"), open_dir=True)
                             _artifact_row("best.pt", art.get("best_pt"))
                             _artifact_row("last.pt", art.get("last_pt"))
                             _artifact_row("results.csv", art.get("results_csv"))
@@ -1734,9 +1910,9 @@ def mount() -> None:
                         else:
                             ui.label("Run 尚未启动（排队/被外部占用阻塞），暂无日志").classes(
                                 "text-xs opacity-40")
-                    with ui.expansion("产物图（训练结束后由 ultralytics 生成）", icon="image").classes("w-full"):
+                    with ui.expansion("产物图", icon="image").classes("w-full"):
                         _artifact_gallery(run.get("run_dir"))
-                    with ui.expansion("运行快照（启动时冻结的训练输入）", icon="ac_unit").classes("w-full"):
+                    with ui.expansion("运行快照", icon="ac_unit").classes("w-full"):
                         snap = run.get("snapshot")
                         if not snap:
                             ui.label("（本 Run 早于快照功能，或尚未实际启动）").classes("text-xs opacity-40")
@@ -1767,7 +1943,7 @@ def mount() -> None:
 
                     # ── M8 01/02/04：错误分析区（val 逐框对错归因）
                     if run["status"] == "done":
-                        with ui.expansion("错误分析（val 逐框对错归因）", icon="biotech").classes("w-full"):
+                        with ui.expansion("错误分析", icon="biotech").classes("w-full"):
                             try:
                                 analysis = tsvc.get_error_analysis(get_manager(), uid)
                             except Exception:  # noqa: BLE001
@@ -1790,17 +1966,18 @@ def mount() -> None:
                                     ui.notify(f"清单已导出：{r['path']}（{len(r['entries'])} 项）", type="positive")
                                     ex_list.clear()
                                     with ex_list:
-                                        ui.label("改标清单（前 30 项，逐项可直达 X-AnyLabeling）"
-                                                 ).classes("text-xs font-semibold mt-1")
+                                        ui.label("改标清单（前 30 项）").classes("text-xs font-semibold mt-1")
                                         for e in r["entries"][:30]:
                                             with ui.row().classes("w-full items-center gap-2"):
                                                 kind_color = {"fn": "orange", "fp": "red",
                                                               "confusion": "purple"}.get(e["kind"], "grey")
                                                 ui.badge(e["kind"].upper()).props(
                                                     f"color={kind_color} square").style("font-size:9px")
-                                                ui.label(f"{Path(e['image']).name} · {e['cls']}"
-                                                         + (f" · conf {e['conf']:.2f}" if e.get("conf") is not None else "")
-                                                         ).classes("text-[11px] flex-1 min-w-0 truncate")
+                                                _img_name_link(
+                                                    e["image"],
+                                                    f"{Path(e['image']).name} · {e['cls']}"
+                                                    + (f" · conf {e['conf']:.2f}" if e.get("conf") is not None else ""),
+                                                    "text-[11px] flex-1 min-w-0 truncate")
                                                 ob = ui.button(icon="open_in_new",
                                                                on_click=lambda p=e["image"]: _open_in_xal(p)).props(
                                                     "flat dense round size=xs color=blue")
@@ -1853,16 +2030,17 @@ def mount() -> None:
                                             ).props("dense square outline color=purple").classes("text-[11px]")
                                 with ui.row().classes("w-full gap-4 items-start flex-wrap"):
                                     with ui.column().classes("flex-1 min-w-[18rem]"):
-                                        ui.label("阈值探索（P/R/F1 vs conf，后验扫描）").classes(
-                                            "text-xs font-semibold opacity-70")
+                                        with ui.label("阈值探索").classes("text-xs font-semibold opacity-70"):
+                                            ui.tooltip("P/R/F1 随 conf 变化 · 后验扫描口径")
                                         ui.echart(_threshold_options(sw)).classes("w-full h-52")
                                     with ui.column().classes("flex-1 min-w-[18rem]"):
-                                        ui.label("混淆矩阵（行 GT × 列 Pred，含背景；点格下钻）").classes(
-                                            "text-xs font-semibold opacity-70")
+                                        with ui.label("混淆矩阵").classes("text-xs font-semibold opacity-70"):
+                                            ui.tooltip("行=GT · 列=Pred · 含背景；点格下钻样本")
                                         cm_axis = (analysis.get("matrix") or {}).get("axis") or []
-                                        cell_box = ui.column().classes("w-full")
                                         cm_chart = ui.echart(_confusion_options(analysis.get("matrix") or {})
                                                              ).classes("w-full h-56")
+                                        # 下钻样本列表在图下方（点格填入；空 column 无高度不占位）
+                                        cell_box = ui.column().classes("w-full")
 
                                         def _on_cm_cell(e, _axis=cm_axis, _uid=uid) -> None:
                                             v = getattr(e, "value", None)
@@ -1896,11 +2074,13 @@ def mount() -> None:
                                                 if len(entries) > 15:
                                                     ui.label(f"… 其余 {len(entries) - 15} 条见导出清单"
                                                              ).classes("text-[11px] opacity-40")
+                                            # 下钻列表在图下方：滚动跟随到列表头，点格即见结果
+                                            _scroll_to(cell_box)
 
                                         cm_chart.on_point_click(_on_cm_cell)
                                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                    ui.label("最差样本榜（错框数降序，点「查看」看叠加图）").classes(
-                                        "text-xs font-semibold")
+                                    with ui.label("最差样本榜").classes("text-xs font-semibold"):
+                                        ui.tooltip("错框数降序；点「查看」看叠加图")
                                     exb = ui.button("导出 FN/FP 改标清单", icon="fact_check",
                                                     on_click=lambda: do_export_list(uid))
                                     exb.props("outline dense")
@@ -1936,7 +2116,7 @@ def mount() -> None:
 
                     # ── M8 05：试跑（ONNX 叠框）
                     if run["status"] == "done":
-                        with ui.expansion("试跑（ONNX 叠框 · 部署前人工验收）", icon="science").classes("w-full"):
+                        with ui.expansion("试跑", icon="science").classes("w-full"):
                             ti_path = ui.input("本地图片/目录/视频绝对路径",
                                                value=state.get("ti_path", ""),
                                                placeholder="/path/to/img.jpg · 目录（递归取前 30 张）· 视频（抽帧）"
@@ -1985,7 +2165,7 @@ def mount() -> None:
                                     except Exception as exc:  # noqa: BLE001
                                         ui.notify(f"试跑失败：{exc}", type="negative")
 
-                    with ui.expansion("System（GPU 利用率 / 显存 / 温度）", icon="monitor").classes("w-full"):
+                    with ui.expansion("System", icon="monitor").classes("w-full"):
                         gpu_box = ui.column().classes("w-full")
 
                         def _render_gpu() -> None:
@@ -2041,7 +2221,7 @@ def mount() -> None:
 
             select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail),
                                        sync_selected=False)
-            _on_row_click(table, select)
+            _on_row_click(table, select, lambda: _scroll_to(detail))
 
             # ── 批量删除（勾选归批量，行点击归详情；运行中的任务会被服务层拒绝并逐个汇报）
             def sync_bulk_btn() -> None:
@@ -2094,27 +2274,31 @@ def mount() -> None:
             def _artifact_gallery(run_dir) -> None:
                 if not run_dir:
                     return
-                names = ["confusion_matrix_normalized.png", "confusion_matrix.png", "results.png",
-                         "BoxPR_curve.png", "BoxF1_curve.png", "labels.jpg", "train_batch0.jpg"]
-                found = [Path(run_dir) / n for n in names if (Path(run_dir) / n).exists()]
-                if not found:
-                    ui.label("（暂无产物图）").classes("text-xs opacity-40")
+                charts = sorted((*Path(run_dir).glob("*.png"), *Path(run_dir).glob("*.jpg")),
+                                key=lambda p: _artifact_order(p.name))
+                if not charts:
+                    ui.label("暂无产物图").classes("text-xs opacity-40")
                     return
 
                 def _view(p: Path) -> None:
                     """缩略图点击 → 可缩放大图（默认适应窗口，滚轮/±缩放）。"""
                     _zoomable_image_dialog(str(p), p.name)
 
-                with ui.row().classes("w-full flex-wrap gap-2"):
-                    for p in found:  # 全量展示（此前仅取前 4 张）
-                        with ui.column().classes("w-[48%] min-w-72"):
-                            ui.label(p.name).classes("text-[10px] opacity-50")
-                            img = _local_image(str(p))
-                            if img is not None:
-                                img.classes("cursor-zoom-in").on(
-                                    "click", lambda _e, _p=p: _view(_p))
-                                with img:
-                                    ui.tooltip("点击查看大图")
+                with ui.element("div").classes("grid grid-cols-2 xl:grid-cols-3 gap-3 w-full"):
+                    for p in charts:
+                        with ui.card().classes("w-full gap-1 q-pa-sm items-stretch"):
+                            with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                                ui.label(_artifact_title(p.name)).classes(
+                                    "text-xs font-semibold opacity-75 flex-1 min-w-0 truncate")
+                                _img_name_link(str(p), p.name, "text-[9px] opacity-35 shrink-0 max-w-32 truncate")
+                            # 签名 HTTP 缩略图（512 档）+ 原生 img：QImg 批量 data URL 会卡
+                            # loading（与审计网格同病），且全量 base64 挤 websocket（20 图 ~4MB）
+                            img = ui.element("img").props(
+                                f'src="{thumbs.thumb_url(str(p), 512)}" decoding="async"'
+                            ).classes("cursor-zoom-in w-full rounded-lg")
+                            img.on("click", lambda _e, _p=p: _view(_p))
+                            with img:
+                                ui.tooltip("点击查看大图")
 
             def do_stop(uid: str) -> None:
                 tsvc.stop_run(get_manager(), uid)
@@ -2655,6 +2839,8 @@ def mount() -> None:
                             ui.label("来源目录").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
                             ui.label(meta.get("source_dir", "—")).classes(
                                 "text-xs opacity-70 break-all flex-1 min-w-0")
+                            if meta.get("source_dir"):
+                                _dir_open_btn(meta["source_dir"])
                         with ui.row().classes("w-full gap-2 items-start"):
                             ui.label("类别").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
                             with ui.row().classes("flex-wrap gap-1 flex-1 min-w-0"):
@@ -2707,6 +2893,45 @@ def mount() -> None:
                             def _on_ds_tab(e) -> None:
                                 state["ds_tab"] = e.value
                                 _ensure_audit_panel(e.value)
+                                # 滚动跟随切换：从长页签深处（如审计网格）切走时，主滚动停在
+                                # 换面板后钳制的任意深度——归位到页签行，新面板从顶可见。
+                                # 懒构建面板短内容阶段会钳制 scrollTop、后续渐进物化还会长
+                                # 高（轮询窗口实测两头都追不上），改事件驱动：ResizeObserver
+                                # 盯内容高度，每次变化即对齐一次，高度安静 1.2s 收工；用户
+                                # 滚轮/指针/按键立即让路；30s 总上限兜底
+                                ui.run_javascript(f"""
+                                  (function(){{
+                                    const t=document.getElementById('c{dtabs.id}');if(!t)return;
+                                    const m=t.closest('.ai-main');if(!m)return;
+                                    const content=m.firstElementChild||m;
+                                    let stop=false, settle=null, cap=null, ro=null;
+                                    const done=function(){{
+                                      stop=true;
+                                      if(ro)ro.disconnect();
+                                      if(settle)clearTimeout(settle);
+                                      if(cap)clearTimeout(cap);
+                                    }};
+                                    ['wheel','pointerdown','keydown'].forEach(ev=>
+                                      document.addEventListener(ev, done,
+                                        {{capture:true, once:true, passive:true}}));
+                                    const align=function(){{
+                                      if(stop)return;
+                                      const d=t.getBoundingClientRect().top-m.getBoundingClientRect().top-4;
+                                      if(Math.abs(d)>2)m.scrollTop+=d;
+                                    }};
+                                    align();
+                                    if(window.ResizeObserver){{
+                                      ro=new ResizeObserver(function(){{
+                                        if(stop)return;
+                                        align();
+                                        if(settle)clearTimeout(settle);
+                                        settle=setTimeout(done,1200);
+                                      }});
+                                      ro.observe(content);
+                                    }}
+                                    settle=setTimeout(done,1200);
+                                    cap=setTimeout(done,30000);
+                                  }})()""")
 
                             dpanels.on_value_change(_on_ds_tab)
                             _ensure_audit_panel(state.get("ds_tab") or "overview")
@@ -2732,7 +2957,7 @@ def mount() -> None:
                 grouped: dict[str, list[dict]] = {}
                 for p in problems:
                     grouped.setdefault(p["code"], []).append(p)
-                with ui.expansion(f"问题明细（{len(problems)} 条）——含修复指引",
+                with ui.expansion(f"问题明细（{len(problems)} 条）",
                                   icon="build").classes("w-full text-xs"):
                     for code, items in grouped.items():
                         g = GUIDANCE.get(code) or {}
@@ -2758,8 +2983,9 @@ def mount() -> None:
                                     else:
                                         det = f"（{p['detail']}）"
                                 with ui.row().classes("w-full items-center gap-1"):
-                                    ui.label(Path(p["image"]).name + det).classes(
-                                        "text-[11px] opacity-70 break-all flex-1 min-w-0")
+                                    _img_name_link(p["image"], Path(p["image"]).name + det,
+                                                   "text-[11px] opacity-70 break-all flex-1 min-w-0",
+                                                   overlay_label=str(Path(p["image"]).with_suffix(".json")))
                                     cp = ui.button(icon="content_copy",
                                                    on_click=lambda img=p["image"]: _copy_path(img)).props(
                                         "flat dense round size=xs color=grey")
@@ -2813,16 +3039,34 @@ def mount() -> None:
                         ui.label("切分历史").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
                         with ui.row().classes("flex-wrap gap-1 flex-1 min-w-0"):
                             for m in meta["manifests"]:
+                                is_active = m["uid"] == meta.get("active_manifest")
                                 chip = ui.chip(f"{m['uid']} · {m['ratio']} · seed {m['seed']}"
                                                + (" · 只训已审" if m.get("approved_only") else ""))
-                                chip.props("dense outline square" + (" color=blue" if m["uid"] == meta.get("active_manifest") else ""))
+                                chip.props("dense outline square clickable" if not is_active
+                                           else "dense outline square"
+                                           + (" color=blue" if is_active else ""))
                                 chip.classes("text-[10px]")
                                 with chip:
-                                    ui.tooltip(("当前活跃清单 · " if m["uid"] == meta.get("active_manifest") else "历史清单（派生结构保留）· ")
+                                    ui.tooltip(("当前活跃清单 · " if is_active else
+                                                "点击切回该版本（派生按当前标注重建）· ")
                                                + _fmt_ts(m.get("created_at"))
                                                + (" · 只训已审清单" if m.get("approved_only") else ""))
+                                if not is_active:
+                                    chip.on("click", lambda u=m["uid"]: open_switch(u))
                 excluded = meta.get("excluded") or []
                 if excluded:
+                    excl_sel: set[str] = set()
+
+                    def _toggle_excl(file: str, ev) -> None:
+                        if ev.value:
+                            excl_sel.add(file)
+                        else:
+                            excl_sel.discard(file)
+                        btn = excl_sel_holder.get("btn")
+                        if btn is not None:
+                            btn.set_text(f"恢复选中（{len(excl_sel)}）")
+                            btn.set_enabled(bool(excl_sel))
+
                     with ui.row().classes("w-full gap-2 items-start"):
                         ui.label("排除清单").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
                         with ui.column().classes("flex-1 min-w-0 gap-0"):
@@ -2830,14 +3074,39 @@ def mount() -> None:
                                 "text-[11px] opacity-60").tooltip(
                                 "仅移出切分清单、标注真源未动；重切以排除后文件集为基线")
                             with ui.expansion("查看明细", icon="visibility_off").classes("text-xs"):
+                                excl_sel_holder: dict = {"btn": None}
+                                with ui.row().classes("items-center gap-2"):
+                                    rb_sel = ui.button(
+                                        "恢复选中（0）", icon="restore", color="primary",
+                                        on_click=lambda: do_restore(sorted(excl_sel))).props(
+                                        "outline dense size=sm").set_enabled(False)
+                                    excl_sel_holder["btn"] = rb_sel
+                                    with rb_sel:
+                                        ui.tooltip("勾选的文件按最近一次 train/val 归属批量重新纳入，"
+                                                   "生成新清单并重建派生")
+                                    rb_all = ui.button("恢复全部", icon="restore",
+                                                       on_click=lambda: do_restore(
+                                                           [e["file"] for e in excluded])).props(
+                                        "outline dense size=sm color=primary")
+                                    with rb_all:
+                                        ui.tooltip("全部按最近一次归属重新纳入，生成新清单并重建派生")
                                 for e in excluded:
-                                    ui.label(f"{Path(e['file']).name} · {_fmt_ts(e['at'])} · {e.get('reason', '')}"
-                                             ).classes("text-[11px] opacity-60 break-all")
+                                    with ui.row().classes("w-full items-center gap-1"):
+                                        ui.checkbox("", value=False,
+                                                    on_change=lambda ev, f=e["file"]: _toggle_excl(f, ev)
+                                                    ).props("dense")
+                                        _img_name_link(e["file"], Path(e["file"]).name,
+                                                       "text-[11px] opacity-60 break-all flex-1 min-w-0")
+                                        ui.label(f"{_fmt_ts(e['at'])} · {e.get('reason', '')}"
+                                                 ).classes("text-[10px] opacity-40 shrink-0")
+                                        rb = ui.button(icon="restore",
+                                                       on_click=lambda f=e["file"]: do_restore([f])).props(
+                                            "flat dense round size=xs color=primary")
+                                        with rb:
+                                            ui.tooltip("恢复此图（回最近一次 train/val 归属）")
 
             # ── 标注审查页签（M9 02 号票）：键盘流判定 + 可疑度排序胶片条（ADR 0003 状态寄生 JSON）
             def _render_review(meta: dict) -> None:
-                from concurrent.futures import ThreadPoolExecutor
-
                 from ..datasets.review import REVIEW_REASONS
 
                 try:
@@ -2845,8 +3114,7 @@ def mount() -> None:
                 except Exception as exc:  # noqa: BLE001
                     ui.label(f"审查队列加载失败：{exc}").classes("text-rose-400 text-xs")
                     return
-                rst = {"items": queue["items"], "filter": "pending", "i": 0, "reject_open": False,
-                       "pct": 100}
+                rst = {"items": queue["items"], "filter": "pending", "i": 0, "reject_open": False}
                 zh_state = {"pending": "待审", "approved": "通过", "rejected": "驳回", "skipped": "跳过"}
 
                 # 快捷键帮助浮层（maskflow-ui-study §5.1「按钮即文档」配套：? 呼出、键位与按钮互文）
@@ -2861,8 +3129,7 @@ def mount() -> None:
                                   + " / ".join(f"{k_}={r}" for k_, r in enumerate(REVIEW_REASONS, 1)) + "）"),
                             ("s", "跳过（计入完成度，不算通过；「只训已审」开关不收录）"),
                             ("← / →", "上一张 / 下一张（在当前过滤子集内循环）"),
-                            ("滚轮 / ±", "画布缩放 50–400%（放大后滚动平移）"),
-                            ("适应", "回 100% 适应画布（切图自动回适应）"),
+                            ("单击图片", "弹出大图查看器——滚轮缩放 / 拖拽平移 / 1:1 / 旋转 / 全屏（Esc 退出）"),
                             ("点缩略图", "胶片条直达指定图"),
                         ]:
                             with ui.row().classes("items-start gap-3 w-full"):
@@ -2871,14 +3138,6 @@ def mount() -> None:
                                 ui.label(d).classes("text-[11px] opacity-75 flex-1")
                     with ui.row().classes("w-full justify-end"):
                         ui.button("关闭", on_click=help_dlg.close).props("flat dense")
-
-                def _apply_pct(pct: int) -> None:
-                    """画布缩放（50–400%，与全站可缩放大图查看同一档位/步长）；直改样式不重建画布。"""
-                    rst["pct"] = max(50, min(400, pct))
-                    if rst.get("pct_label") is not None:
-                        rst["pct_label"].set_text(f"{rst['pct']}%")
-                    if rst.get("stage") is not None:
-                        rst["stage"].style(f"width:{rst['pct']}%")
 
                 def _fl() -> list[dict]:
                     if rst["filter"] == "all":
@@ -2890,7 +3149,11 @@ def mount() -> None:
                 def _go(d: int) -> None:
                     rst["i"] = (rst["i"] + d) % max(len(_fl()), 1)
                     rst["reject_open"] = False
-                    rst["pct"] = 100  # 切图回适应画布
+                    # 切图回适应画布（VTPZ 画布重建即 contain 居中适应，无需 Python 侧状态）
+                    # 缩略条带的滚动位置由 mount() 注入的全局钩子自动保持：
+                    # _view.refresh 会重建条带（滚动归零），scroll 捕获监听实时存
+                    # scrollTop、MutationObserver 在新条带挂载后恢复——不依赖
+                    # Python 消息顺序（run_javascript 夹缝方案实测 save 晚于 patch 执行，弃）
 
                 async def _decide(state_: str, reason: str = "") -> None:
                     fl = _fl()
@@ -2904,9 +3167,11 @@ def mount() -> None:
                         return
                     cur.update(state=r["state"], effective=r["effective"],
                                reason=r["reason"], modified=False)
-                    rst["last_decide"] = datetime.now().strftime("%H:%M")
-                    ui.notify(f"{Path(cur['image']).name} → {zh_state.get(r['effective'], r['effective'])}"
-                              + (f"（{reason}）" if reason else ""), type="positive")
+                    # 确认不弹 toast 收进「上次判定」pill：键盘流连续判定时
+                    # notify 堆叠会盖住画布与判定按钮（结果随胶片条/状态章同步可见）
+                    rst["last_decide"] = (datetime.now().strftime("%H:%M") + " "
+                                          + zh_state.get(r["effective"], r["effective"])
+                                          + (f"（{reason}）" if reason else ""))
                     rst["reject_open"] = False
                     _go(1)
                     _view.refresh()
@@ -2987,7 +3252,7 @@ def mount() -> None:
                         items = rep.get(k) or []
                         if not items:
                             continue
-                        with ui.expansion(f"{zh[k]}（前 15 / 共 {len(items)}）——逐项可直达 XAL 修改",
+                        with ui.expansion(f"{zh[k]}（前 15 / 共 {len(items)}）",
                                           icon="rule").classes("w-full text-xs"):
                             for it in items[:15]:
                                 with ui.row().classes("w-full items-center gap-2"):
@@ -2995,12 +3260,14 @@ def mount() -> None:
                                               if k == "misclass" else
                                               f"conf {it.get('conf'):.2f} · {it.get('cls')}" if k == "missing"
                                               else f"{it.get('cls')}（无任何重叠预测）")
-                                    src = _thumb_src(it["image"], box=96)
-                                    if src:
-                                        ui.image(src).classes("w-14 h-9 object-cover rounded-sm shrink-0")
+                                    # 不加 loading=lazy：QScrollArea 的变换层让原生懒加载判定
+                                    # 过保守（视口内也不拉，实测 80 张只出 6 张），榜单小区域直载
+                                    ui.element("img").props(
+                                        f'src="{thumbs.thumb_url(it["image"], 96)}" decoding="async"'
+                                    ).classes("w-14 h-9 object-cover rounded-sm shrink-0")
                                     ui.label(detail).classes("text-[10px] opacity-60 w-48 shrink-0")
-                                    ui.label(Path(it["image"]).name).classes(
-                                        "text-[11px] truncate flex-1 min-w-0")
+                                    _img_name_link(it["image"], Path(it["image"]).name,
+                                                   "text-[11px] truncate flex-1 min-w-0")
 
                                     def _jump(img=it["image"]) -> None:
                                         rst["filter"] = "all"
@@ -3079,29 +3346,24 @@ def mount() -> None:
                         with ui.column().classes("grow min-w-0 items-center gap-1 w-full"):
                             url = _review_img_url(cur["image"])
                             if url:
-                                # 画布工具行：缩放百分比 + ±/适应（滚轮在画布上等效）
-                                with ui.row().classes("w-full items-center justify-end gap-1"):
-                                    rst["pct_label"] = ui.label(f"{rst['pct']}%").classes(
-                                        "text-[10px] opacity-60 w-9 text-right")
-                                    for icon, delta in (("remove", -25), ("add", 25)):
-                                        ui.button(icon=icon, on_click=lambda d=delta: _apply_pct(
-                                            rst["pct"] + d)).props("flat dense round size=xs color=grey")
-                                    ui.button("适应", on_click=lambda: _apply_pct(100)).props(
-                                        "flat dense size=xs color=grey")
-                                # 画布：图像默认 100% 适应画布宽；放大后滚动区平移；
-                                # SVG 叠加按百分比坐标随画布同步缩放（线宽/字号按图缩放）
-                                canvas = ui.scroll_area().classes(
-                                    "w-full h-[62vh] rounded border border-white/10")
-                                with canvas, ui.column().classes("w-full items-center"):
-                                    rst["stage"] = ui.element("div").classes("relative").style(
-                                        f"width:{rst['pct']}%")
-                                    with rst["stage"]:
+                                # 画布：VTPZ 只管 contain 居中适应全图（初始/切图/窗口
+                                # 变化自动回适应）——SVG 叠加在 stage 内百分比坐标随
+                                # transform 整体缩放；缩放/平移细节交互全在大图弹层
+                                canvas = ui.element("div").classes(
+                                    "vt-pz w-full h-[62vh] rounded border border-white/10")
+                                # 单击画布 → 弹 Viewer.js 大图（原生 click 事件桥，全站惯例）；
+                                # 标注 SVG 一并传入，弹层内画进原图，放大看细节时框同步可见
+                                canvas.on("click", lambda: _zoomable_image_dialog(
+                                    cur["image"], Path(cur["image"]).name,
+                                    hint="滚轮缩放 · 按住拖拽平移 · 1:1 看像素 · 旋转 / 全屏 · Esc 退出",
+                                    overlay_svg=_review_overlay_svg(cur["label"])))
+                                with canvas:
+                                    stage = ui.element("div").classes(
+                                        "vt-pz-stage relative w-full")
+                                    with stage:
                                         ui.image(url).classes("w-full block")
                                         ui.html(_review_overlay_svg(cur["label"])).classes(
                                             "absolute inset-0")
-                                canvas.on("wheel", lambda e: _apply_pct(
-                                    rst["pct"] + (-25 if (e.args or {}).get("deltaY", 0) > 0 else 25)),
-                                    ["deltaY"])
                             with ui.row().classes("items-center gap-1 flex-wrap max-w-full"):
                                 eff = cur["effective"]
                                 ui.label(zh_state.get(eff, eff)).classes(
@@ -3160,25 +3422,24 @@ def mount() -> None:
                                         ui.button(f"{k} · {r}", on_click=lambda r=r: _decide("rejected", r)
                                                   ).props("dense color=negative")
                         with ui.column().classes("w-24 shrink-0"):
-                            with ui.scroll_area().classes("h-[62vh]"):
+                            with ui.scroll_area().classes("h-[62vh] vt-review-strip"):
                                 for idx, it in enumerate(fl[:80]):
                                     hot = idx == rst["i"]
                                     with ui.element("div").classes(
                                             "cursor-pointer mb-1 rounded-sm border-2 "
-                                            + ("border-primary" if hot else "border-transparent")
+                                            + ("border-primary vt-cur" if hot else "border-transparent")
                                             ).on("click", lambda i=idx: [rst.__setitem__("i", i),
                                                                          _view.refresh()]):
-                                        src = _thumb_src(it["image"], box=72)
-                                        if src:
-                                            ui.image(src).classes("w-full h-12 object-cover")
+                                        # 不加 loading=lazy：QScrollArea 变换层内懒加载判定失效
+                                        # （实测 80 张只出 6 张）；窄条区域小，直载
+                                        ui.element("img").props(
+                                            f'src="{thumbs.thumb_url(it["image"], 72)}" decoding="async"'
+                                        ).classes("w-full h-12 object-cover")
                                         ui.label(zh_state.get(it["effective"], "?")[:2]
                                                  + ("改" if it["modified"] else "")
                                                  ).classes("text-[9px] text-center opacity-60")
                             if len(fl) > 80:
                                 ui.label(f"前 80 / {len(fl)}").classes("text-[9px] opacity-40")
-                # 首屏胶片条缩略图并行预热（M6 断连教训：不在线程外批量解码）
-                with ThreadPoolExecutor(max_workers=8) as pool:
-                    list(pool.map(lambda it: _thumb_src(it["image"], box=72), rst["items"][:80]))
                 _view()
 
                 async def _on_key(e) -> None:
@@ -3186,24 +3447,29 @@ def mount() -> None:
                         return
                     if not e.action.keydown or e.action.repeat:
                         return
-                    k = str(e.key)
-                    if k == "ArrowRight":
+                    # 用物理键 code 匹配而非 str(e.key)：中文输入法激活时浏览器把
+                    # 字母键的 key 上报成 "Process"，按 key 名匹配会整组失灵；
+                    # code 是键盘扫描码，IME 不可见
+                    code = getattr(e.key, "code", None) or str(e.key)
+                    if code == "ArrowRight":
                         _go(1)
                         _view.refresh()
-                    elif k == "ArrowLeft":
+                    elif code == "ArrowLeft":
                         _go(-1)
                         _view.refresh()
-                    elif k == "n":
+                    elif code == "KeyN":
                         await _decide("approved")
-                    elif k == "s":
+                    elif code == "KeyS":
                         await _decide("skipped")
-                    elif k == "b" and not rst["reject_open"]:
+                    elif code == "KeyB" and not rst["reject_open"]:
                         rst["reject_open"] = True
                         _view.refresh()
-                    elif k in ("1", "2", "3", "4") and rst["reject_open"]:
-                        await _decide("rejected", REVIEW_REASONS[int(k) - 1])
+                    elif code in ("Digit1", "Digit2", "Digit3", "Digit4") and rst["reject_open"]:
+                        await _decide("rejected", REVIEW_REASONS[int(code[-1]) - 1])
 
-                ui.keyboard(on_key=_on_key)
+                # ignore 同时去掉默认的 button/select：焦点驻留按钮时（如 Tab 导航后）
+                # 按键被吞；input/textarea 保留——输入框打字不得触发判定
+                ui.keyboard(on_key=_on_key, ignore=["input", "textarea"])
 
             # ── 健康报告页签：四图 + 下钻筛图 + 在 X-AnyLabeling 中打开（01/02 号票）
             def _render_health(name: str, meta: dict) -> None:
@@ -3235,13 +3501,19 @@ def mount() -> None:
                 def rerender_drill() -> None:
                     _render_drill_list(payload, drill_box)
 
+                # 点柱/点格/框选筛图后统一滚动跟随到筛图结果（drill 列表在图
+                # 区上/下方皆可能出视口，nearest 只补最小滚动量；列表在视口内则不动）
+                def _drill_and_follow() -> None:
+                    rerender_drill()
+                    _scroll_to(drill_box)
+
                 def _on_class(e) -> None:
                     if not e.name:
                         return
                     d = state["drill"]
                     cur = (e.name, e.series_name)
                     d["class"] = None if d.get("class") == cur else cur
-                    rerender_drill()
+                    _drill_and_follow()
 
                 def _on_bucket(e) -> None:
                     try:
@@ -3250,7 +3522,7 @@ def mount() -> None:
                         return
                     d = state["drill"]
                     d["bucket"] = None if d.get("bucket") == b else b
-                    rerender_drill()
+                    _drill_and_follow()
 
                 def _on_brush(e) -> None:
                     areas = e.args.get("areas") if isinstance(e.args, dict) else None
@@ -3259,7 +3531,7 @@ def mount() -> None:
                     if rect is not None:
                         rect = [v / HEAT_GRID for v in rect]
                     state["drill"]["rect"] = rect
-                    rerender_drill()
+                    _drill_and_follow()
 
                 def _on_heat_cell(e) -> None:
                     """点热力图格 = 选该格区域（框选的轻量替代，交互更易发现）。"""
@@ -3270,16 +3542,18 @@ def mount() -> None:
                     rect = [j / HEAT_GRID, (j + 1) / HEAT_GRID, i / HEAT_GRID, (i + 1) / HEAT_GRID]
                     d = state["drill"]
                     d["rect"] = None if d.get("rect") == rect else rect
-                    rerender_drill()
+                    _drill_and_follow()
 
                 with ui.row().classes("w-full gap-4 items-start flex-wrap"):
                     with ui.column().classes("flex-1 min-w-[17rem]"):
-                        ui.label("类别分布（逐切分，点柱筛选）").classes("text-xs font-semibold opacity-70")
+                        with ui.label("类别分布").classes("text-xs font-semibold opacity-70"):
+                            ui.tooltip("逐切分统计；点柱筛选图片清单")
                         ch_cls = ui.echart(_class_dist_options(payload)).classes("w-full h-56")
                         ch_cls.on_point_click(_on_class)
                     if boxable:
                         with ui.column().classes("flex-1 min-w-[17rem]"):
-                            ui.label("每图目标数直方图（点柱筛选）").classes("text-xs font-semibold opacity-70")
+                            with ui.label("每图目标数直方图").classes("text-xs font-semibold opacity-70"):
+                                ui.tooltip("点柱筛选图片清单")
                             ch_hist = ui.echart(_obj_hist_options(payload)).classes("w-full h-56")
                             ch_hist.on_point_click(_on_bucket)
                 if boxable:
@@ -3288,8 +3562,8 @@ def mount() -> None:
                             ui.label("图像尺寸散点").classes("text-xs font-semibold opacity-70")
                             ui.echart(_size_scatter_options(payload)).classes("w-full h-56")
                         with ui.column().classes("flex-1 min-w-[17rem]"):
-                            ui.label("标注中心热力图（点格或右上角矩形工具框选）").classes(
-                                "text-xs font-semibold opacity-70")
+                            with ui.label("标注中心热力图").classes("text-xs font-semibold opacity-70"):
+                                ui.tooltip("点格或右上角矩形工具框选，筛出图片清单")
                             # SVG 渲染器：heatmap 在 canvas 渲染器下受渐进分层影响会出现
                             # 空层置顶（图空白且点击不达 series）；SVG 无此分层怪癖
                             ch_heat = ui.echart(_center_heat_options(payload), renderer="svg").classes("w-full h-56")
@@ -3300,7 +3574,8 @@ def mount() -> None:
                     if osz:
                         with ui.row().classes("w-full items-center gap-2 flex-wrap text-[11px]"):
                             ui.icon("straighten").classes("text-[14px] opacity-50")
-                            ui.label("目标尺寸（COCO 口径 32²/96² px）").classes("opacity-60")
+                            with ui.label("目标尺寸").classes("opacity-60"):
+                                ui.tooltip("COCO 口径：小 <32² · 中 32²–96² · 大 >96² px")
                             for k, zh, c in (("small", "小", "amber"), ("medium", "中", "blue"),
                                              ("large", "大", "green")):
                                 ui.badge(f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
@@ -3336,7 +3611,7 @@ def mount() -> None:
                     with ui.card().classes("w-full q-pa-sm gap-1"):
                         for r, why in rows[:60]:
                             with ui.row().classes("w-full items-center gap-2"):
-                                ui.label(r["name"]).classes("text-xs flex-1 min-w-0 truncate")
+                                _img_name_link(r["image"], r["name"], "text-xs flex-1 min-w-0 truncate")
                                 ui.badge(r["split"]).props("outline square").style("font-size:9px")
                                 if why:
                                     ui.label("·".join(why)).classes("text-[10px] opacity-50 max-w-40 truncate")
@@ -3392,76 +3667,147 @@ def mount() -> None:
                 dlg.open()
 
             def _audit_grid(name: str, items: list[dict]) -> None:
-                """审计发现成员 → 缩略图网格：卡片分块渲染 + 缩略图线程池回填。
+                """审计发现成员 → 缩略图网格：窗口化批次物化（成本与报告规模解耦）。
 
-                2026-09-21 两起事故：同步批量生成 390 张缩略图把事件循环冻结 20s+（心跳
-                超时断连）；异步化后一次性创建 390 张占位卡（约 3000 元素）的消息风暴仍会
-                打断 websocket——首块同步渲染保立即可见，其余分块补建、逐块回填。"""
-                CHUNK = 40
+                每批（42 张）常驻骨架仅 3 个元素：wrap（观察锚点，带批张数 class）+
+                spacer（JS 按容器列数测高的空占位）+ slot（空容器）。滚近 1000px
+                物化真实卡片，滚远 2500px 自动卸载回占位——勾选状态在 state，
+                重物化零丢失。缩略图 img.src 直接指向签名 HTTP URL（thumbs 模块），
+                浏览器原生懒加载+缓存，无 Python 解码回填步骤。DOM 与服务端元素数
+                只随视口窗口走：500 张与 5 万张嫌疑图常驻成本相同。此前「占位卡
+                全量预建」在千张级即产出数万元素（服务端 Python 对象 + 客户端节点
+                双爆），是规模瓶颈的根。"""
+                VIEW_BATCH = 42
                 row_el = ui.row().classes("w-full flex-wrap gap-2 q-mt-xs")
 
-                def _build_cards(chunk: list[dict]) -> list[tuple[str, object]]:
-                    jobs = []
-                    with row_el:
-                        for item in chunk:
-                            p = item["image"]
-                            with ui.card().classes("p-1 gap-0 w-[10.5rem]").style("border-radius:10px"):
-                                ph = ui.element("div").classes(
-                                    "w-full h-28 flex column items-center justify-center gap-1 cursor-pointer"
-                                ).style("border-radius:6px;background:rgba(148,163,184,.12)")
-                                ph.on("click", lambda _e, it=item, n=name: _view_audit_img(n, it))
-                                with ph:
-                                    ui.tooltip("点击查看原图")
-                                    ui.spinner(size="18px").classes("opacity-30")
-                                with ui.row().classes("w-full items-center gap-1 no-wrap q-px-xs"):
-                                    ui.checkbox(value=p in (state.get("audit_sel") or set()),
-                                                on_change=lambda e, f=p: _toggle_sel(f, e.value)
-                                                ).props("dense size=sm").classes("q-mt-none")
-                                    nm = ui.label(item["name"]).classes(
-                                        "text-[10px] flex-1 min-w-0 truncate cursor-pointer")
-                                    nm.on("click", lambda it=item, n=name: _view_audit_img(n, it))
-                                    ui.badge(item.get("split", "?")).props("outline square").style(
-                                        "font-size:8px")
-                            jobs.append((p, ph))
-                    return jobs
+                def _build_cards(chunk: list[dict]) -> None:
+                    """占位/回填二合一：img.src 直接指向签名缩略图 URL（HTTP 管线），
+                    浏览器原生懒加载+缓存；解码与送达都在路由侧，无 Python 回填步骤。"""
+                    for item in chunk:
+                        p = item["image"]
+                        with ui.card().classes("p-1 gap-0 w-[10.5rem]").style("border-radius:10px"):
+                            ph = ui.element("div").classes(
+                                "w-full h-28 flex column items-center justify-center gap-1 cursor-pointer"
+                            ).style("border-radius:6px;background:rgba(148,163,184,.12)")
+                            ph.on("click", lambda _e, it=item, n=name: _view_audit_img(n, it))
+                            with ph:
+                                ui.tooltip("点击查看原图")
+                                # 原生 img 而非 ui.image(QImg)：QImg 的加载状态机在大批量
+                                # 元素churn/断连重发下会卡在 loading（src 有效也不触发
+                                # load），原生 img 无此状态机
+                                ui.element("img").props(
+                                    f'src="{thumbs.thumb_url(p)}" loading="lazy" decoding="async"'
+                                ).classes("w-full h-28 object-cover").style("border-radius:6px")
+                            with ui.row().classes("w-full items-center gap-1 no-wrap q-px-xs"):
+                                ui.checkbox(value=p in (state.get("audit_sel") or set()),
+                                            on_change=lambda e, f=p: _toggle_sel(f, e.value)
+                                            ).props("dense size=sm").classes("q-mt-none")
+                                nm = ui.label(item["name"]).classes(
+                                    "text-[10px] flex-1 min-w-0 truncate cursor-pointer")
+                                nm.on("click", lambda it=item, n=name: _view_audit_img(n, it))
+                                ui.badge(item.get("split", "?")).props("outline square").style(
+                                    "font-size:8px")
 
-                jobs: list[tuple[str, object]] = []  # 全部异步分块建卡：页签激活 handler 里不做重活
+                n_batches = (len(items) + VIEW_BATCH - 1) // VIEW_BATCH
+                # 批次登记表：jobs=None 即未物化（DOM 里只有 spacer 占位）
+                batches: list[dict] = [{"wrap": None, "spacer": None, "slot": None,
+                                        "jobs": None, "building": False}
+                                       for _ in range(n_batches)]
 
-                async def _render_and_fill() -> None:
-                    from nicegui import run
+                async def _materialize(bi: int, prefetch_next: bool = True) -> None:
+                    b = batches[bi]
+                    wrap = b["wrap"]
+                    if (not b["building"] and b["jobs"] is None and wrap is not None
+                            and not getattr(wrap, "is_deleted", False)):
+                        b["building"] = True
+                        try:
+                            b["spacer"].classes("hidden")
+                            b["slot"].clear()
+                            chunk = items[bi * VIEW_BATCH:(bi + 1) * VIEW_BATCH]
+                            with b["slot"]:
+                                with ui.row().classes("w-full flex-wrap gap-2"):
+                                    for j in range(0, len(chunk), 21):  # 半批一让：分帧挂载
+                                        _build_cards(chunk[j:j + 21])
+                                        await asyncio.sleep(0.03)
+                            b["jobs"] = True
+                        finally:
+                            b["building"] = False
+                    if prefetch_next and bi + 1 < n_batches:  # 预物化一批：滚动不断档
+                        asyncio.get_running_loop().create_task(
+                            _materialize(bi + 1, prefetch_next=False))
 
-                    for i in range(0, len(items), CHUNK):  # 分块建卡（含首块）
+                def _dematerialize(bi: int) -> None:
+                    b = batches[bi]
+                    if b["jobs"] is None or b["building"]:
+                        return
+                    b["jobs"] = None
+                    if not getattr(b["slot"], "is_deleted", False):
+                        b["slot"].clear()
+                    if not getattr(b["spacer"], "is_deleted", False):
+                        b["spacer"].classes(remove="hidden")
+
+                def _on_seen(bi: int, near: bool) -> None:
+                    if near:
+                        asyncio.get_running_loop().create_task(_materialize(bi))
+                    else:
+                        _dematerialize(bi)
+
+                async def _render_lazy() -> None:
+                    wrap_ids: list[str] = []
+                    for i in range(0, len(items), VIEW_BATCH):
                         if getattr(row_el, "is_deleted", False):
                             return  # 页面已离开/重建
-                        jobs.extend(_build_cards(items[i:i + CHUNK]))  # extend 而非 +=（重绑定会把 jobs 变协程局部）
-                        await asyncio.sleep(0)  # 消息分批出队，websocket 不被风暴打断
-
-                    async def _one(path: str) -> str | None:
-                        src = _thumb_cache_get(path)  # 热缓存直取（二次访问免线程跳）
-                        return src if src is not None else await run.io_bound(_thumb_src, path)
-
-                    BATCH = 8
-                    for i in range(0, len(jobs), BATCH):
-                        batch = jobs[i:i + BATCH]
-                        results = await asyncio.gather(*[_one(p) for p, _ in batch])
-                        for (_path, holder), src in zip(batch, results):
-                            if getattr(holder, "is_deleted", False):
-                                return  # 页面已离开/重建：剩余回填作废
-                            holder.clear()
-                            with holder:
-                                if src:
-                                    ui.image(src).classes("w-full h-28 object-cover").style(
-                                        "border-radius:6px")
-                                else:
-                                    with ui.element("div").classes(
-                                            "w-full h-28 flex column items-center justify-center gap-1"
-                                    ).style("border-radius:6px"):
-                                        ui.icon("broken_image", size="22px").classes("opacity-40")
-                                        ui.label("无法解码").classes("text-[9px] opacity-40")
-                        await asyncio.sleep(0)  # 让出循环：心跳与交互不受影响
+                        bi = i // VIEW_BATCH
+                        n = min(VIEW_BATCH, len(items) - i)
+                        with row_el:
+                            wrap = ui.element("div").classes(f"w-full vt-bn-{n}")  # 批张数走 class（props 的 data-* 不落 DOM）
+                            wrap.on("vtvisnear", lambda _e, b=bi: _on_seen(b, True))
+                            wrap.on("vtvisfar", lambda _e, b=bi: _on_seen(b, False))
+                            with wrap:
+                                spacer = ui.element("div").classes(
+                                    "w-full vt-batch-spacer").style("height:600px")  # JS 随后按列数校准
+                                with spacer:
+                                    ui.label(f"{n} 张 · 滚近加载").classes(
+                                        "text-[10px] opacity-25 text-center pt-2")
+                                slot = ui.element("div").classes("w-full")
+                        batches[bi].update(wrap=wrap, spacer=spacer, slot=slot)
+                        wrap_ids.append(f"c{wrap.id}")
+                        await asyncio.sleep(0.01)
+                    # JS 三件事：① 按容器列数校准各 spacer 高度（卡 168+gap 8=176、
+                    # 卡高 139，实测；列宽取所有网格容器最大 clientWidth——折叠组
+                    # 容器为 0 会被忽略，避免列数算成 1 占位高度爆炸）② 近观察
+                    # 1000px → vtvisnear 物化 ③ 远观察 2500px → vtvisfar 卸载
+                    # （迟滞带 1500px 防抖）。方向语义走事件名而非 detail 参数——
+                    # NiceGUI 自定义事件的 args 序列化不含 detail（实测恒空），
+                    # 解析参数不可靠。
+                    # 注意：后台任务里 slot 栈为空，run_javascript 必须在容器槽位内
+                    # 调用，否则解析不到 client 直接抛 RuntimeError（NiceGUI 3.16 实测）。
+                    with row_el:
+                        ui.run_javascript(
+                            "const ids=" + json.dumps(wrap_ids) + ";"
+                            "let W=0;ids.forEach(i=>{const w=document.getElementById(i);"
+                            "if(w)W=Math.max(W,w.parentElement.clientWidth);});"
+                            "if(!W){const m=document.querySelector('.ai-main');W=m?m.clientWidth-56:650;}"
+                            "const cols=Math.max(1,Math.floor((W+8)/176));"
+                            "ids.forEach(i=>{const w=document.getElementById(i);if(!w)return;"
+                            "const m=w.className.match(/vt-bn-(\\d+)/);const n=m?+m[1]:42;"
+                            "const rows=Math.ceil(n/cols);"
+                            "const sp=w.querySelector('.vt-batch-spacer');"
+                            "if(sp)sp.style.height=(rows*139+(rows-1)*8)+'px';});"
+                            "const ioIn=new IntersectionObserver(es=>es.forEach(x=>{if(x.isIntersecting)"
+                            "x.target.dispatchEvent(new CustomEvent('vtvisnear'));}),"
+                            "{rootMargin:'1000px'});"
+                            "const ioOut=new IntersectionObserver(es=>es.forEach(x=>{if(!x.isIntersecting)"
+                            "x.target.dispatchEvent(new CustomEvent('vtvisfar'));}),"
+                            "{rootMargin:'2500px'});"
+                            "ids.forEach(i=>{const el=document.getElementById(i);if(el){"
+                            "ioIn.observe(el);ioOut.observe(el);}});")
+                    # 不做显式 bootstrap：observe() 注册时对当前相交元素即发初始条目，
+                    # 视口内批次自然物化、折叠/远屏组不物化——显式 _materialize(0) 会给
+                    # 每个网格强建首批（40 组×84 张实测击穿窗口化），故移除。
 
                 if items:
-                    asyncio.get_running_loop().create_task(_render_and_fill())
+                    asyncio.get_running_loop().create_task(_render_lazy())
 
             def _render_audit(name: str, meta: dict) -> None:
                 with ui.row().classes("w-full items-center gap-2 flex-wrap"):
@@ -3571,6 +3917,42 @@ def mount() -> None:
                     state["audit_prog"] = {"active": False, "cur": 0, "total": 0}
                 render_detail()
 
+            async def do_restore(files: list[str]) -> None:
+                """排除恢复（单图/多图）：回最近一次归属，重建派生与画像后刷新页面。"""
+                try:
+                    m = await _io(ds.restore_files, state["selected"], files)
+                    ui.notify(f"已恢复 {len(files)} 个文件 → 清单 {m['uid']}", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"恢复失败：{exc}", type="negative")
+                refresh()
+                render_detail()
+
+            # 切回历史清单（确认门：带后果文案，确认后按当前标注重建派生）
+            with ui.dialog() as switch_dlg, ui.card().classes("w-96 gap-2"):
+                sw_title = ui.label("切回历史清单").classes("font-bold")
+                ui.label("文件集回到该版本；按当前标注重建派生并重算健康报告。"
+                         ).classes("text-xs opacity-60")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=switch_dlg.close).props("flat")
+
+                    async def _do_switch() -> None:
+                        switch_dlg.close()
+                        try:
+                            m = await _io(ds.switch_manifest, state["selected"], state["switch_uid"])
+                            ui.notify(f"已切回清单 {m['uid']}（train {len(m['train'])} / val {len(m['val'])}）",
+                                      type="positive")
+                        except Exception as exc:  # noqa: BLE001
+                            ui.notify(f"切回失败：{exc}", type="negative")
+                        refresh()
+                        render_detail()
+
+                    ui.button("切回", icon="history", on_click=_do_switch).props("unelevated")
+
+            def open_switch(uid: str) -> None:
+                state["switch_uid"] = uid
+                sw_title.set_text(f"切回清单 {uid}")
+                switch_dlg.open()
+
             def _audit_prog(cur: int, total: int) -> None:
                 state["audit_prog"].update(cur=cur, total=total)
 
@@ -3663,7 +4045,7 @@ def mount() -> None:
 
             select = _select_with_sync(table, state, "name", render_detail, lambda: _scroll_to(detail),
                                        sync_selected=False)
-            _on_row_click(table, select)
+            _on_row_click(table, select, lambda: _scroll_to(detail))
 
             # ── 批量删除（勾选归批量，行点击归详情；托管/外部混合也可，标注源目录永不触碰）
             def sync_bulk_btn() -> None:
@@ -3887,7 +4269,7 @@ def mount() -> None:
                 r_seed = ui.number("随机种子", value=42, precision=0)
                 r_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
                 # M9 03「只训已审」：数据集级开关的落点（默认关；重切生成只含通过图的新清单）
-                r_appr = ui.checkbox("只训已审（仅含通过图）").tooltip(
+                r_appr = ui.checkbox("只训已审").tooltip(
                     "仅「通过」图入清单（负样本保留；待审/驳回/跳过不入）；旧清单保留可切回")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=resplit_dialog.close).props("flat")
@@ -3991,7 +4373,8 @@ def mount() -> None:
                 items = data["tasks"]
                 cross_out.clear()
                 with cross_out, ui.card().classes("w-full gap-2"):
-                    ui.label("各任务最优 Run 主指标曲线（颜色与下文各表固定一致）").classes("text-sm font-semibold")
+                    with ui.label("各任务最优 Run 主指标曲线").classes("text-sm font-semibold"):
+                        ui.tooltip("曲线颜色与下文各任务表格固定一致")
                     curves = [(t["name"], t["curve"]) for t in items if t["curve"]]
                     if curves:
                         ui.echart(_overlay_options(curves)).classes("w-full h-64")
@@ -4059,8 +4442,8 @@ def mount() -> None:
                             popts = _parallel_options(items)
                             if len(popts["parallelAxis"]) >= 2:
                                 with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
-                                    ui.label("平行坐标（变化的数值超参 × 主指标，末轴；线色同上）"
-                                             ).classes("text-sm font-semibold")
+                                    with ui.label("平行坐标").classes("text-sm font-semibold"):
+                                        ui.tooltip("轴=变化的数值超参 × 主指标（末轴）；线色同上")
                                 ui.echart(popts).classes("w-full h-64")
                         except Exception:  # noqa: BLE001 — 数据不含数值超参时静默
                             pass
@@ -4187,7 +4570,7 @@ def mount() -> None:
                         ui.echart(_mem_overlay_options(data["gpu_curves"])).classes("w-full h-56")
                     imp = data.get("param_importance")
                     if imp and imp.get("keys"):
-                        with ui.expansion(f"参数重要性（{imp['note']}）", icon="insights",
+                        with ui.expansion("参数重要性", icon="insights",
                                           caption="相关非因果，样本少时弱参考 · 已注入 Agent 上下文"
                                           ).classes("w-full"):
                             ui.echart(_importance_options(imp)).classes("w-full h-56")
@@ -4300,17 +4683,24 @@ def mount() -> None:
                                          "run": d["run_uid"], "at": _fmt_ts(d.get("created_at")),
                                          "verif_label": label, "verif_color": color,
                                          "dir": d["model_lib_dir"]})
+                    def _dep_row_open(e) -> None:
+                        args = e.args
+                        row = args[1] if isinstance(args, (list, tuple)) and len(args) > 1 else args
+                        if isinstance(row, dict) and row.get("dir"):
+                            _open_dir(row["dir"])
+
                     dtable = ui.table(columns=[
                         {"name": "name", "label": "模型目录", "field": "name", "align": "left"},
                         {"name": "task", "label": "来源任务", "field": "task", "align": "left"},
                         {"name": "run", "label": "Run", "field": "run"},
                         {"name": "at", "label": "时间", "field": "at", "align": "left"},
                         {"name": "verif", "label": "导出验证", "field": "verif_label"},
-                    ], rows=dep_rows, row_key="name")
+                    ], rows=dep_rows, row_key="name").on("rowClick", _dep_row_open)
                     _style_table(dtable)
                     dtable.add_slot("body-cell-verif", _badge_cell("verif"))
                     dtable.add_slot("no-data", _no_data_cell(
                         "rocket_launch", "还没有部署记录——训练详情页点「部署到标注端」一键回注"))
+                    dtable.classes("cursor-pointer")
                     if dep_data.get("lru_hint"):
                         ui.label(f"⚠ {dep_data['lru_hint']}").classes("text-xs mt-1").style("color:#b45309")
                     newly = [d for d in dep_data["deployments"]
@@ -4354,7 +4744,27 @@ def mount() -> None:
                                       "verif": ("当前部署" if it.get("is_latest") else
                                                 ("已验证" if it.get("verified") else "—")),
                                       "verif_color": ("blue" if it.get("is_latest") else
-                                                      ("green" if it.get("verified") else "grey"))})
+                                                      ("green" if it.get("verified") else "grey")),
+                                      "path": it["path"]})
+
+                    def _lib_row_open(e) -> None:
+                        args = e.args
+                        row = args[1] if isinstance(args, (list, tuple)) and len(args) > 1 else args
+                        if isinstance(row, dict) and row.get("path"):
+                            _open_dir(row["path"])
+
+                    lib_bulk_btn = ui.button(
+                        "删除所选", icon="delete_sweep", color="negative",
+                        on_click=lambda: open_lib_bulk()).props("outline dense").set_enabled(False)
+                    with lib_bulk_btn:
+                        ui.tooltip("勾选多行后批量删除；逐个删目录并同步移除部署记录")
+
+                    def _sync_lib_bulk() -> None:
+                        sel = [r["name"] for r in (ltbl.selected or [])]
+                        state["lib_sel"] = sel
+                        lib_bulk_btn.set_text(f"删除所选（{len(sel)}）")
+                        lib_bulk_btn.set_enabled(bool(sel))
+
                     ltbl = ui.table(columns=[
                         {"name": "name", "label": "模型目录", "field": "name", "align": "left",
                          "style": "white-space:normal"},
@@ -4363,16 +4773,21 @@ def mount() -> None:
                         {"name": "run", "label": "来源 Run", "field": "run"},
                         {"name": "verif", "label": "状态", "field": "verif"},
                         {"name": "ops", "label": "操作", "field": "ops"},
-                    ], rows=lrows, row_key="name").classes("text-xs")
+                    ], rows=lrows, row_key="name", selection="multiple",
+                        on_select=lambda e: _sync_lib_bulk()
+                    ).classes("text-xs cursor-pointer").on("rowClick", _lib_row_open)
                     _style_table(ltbl)
                     ltbl.add_slot("body-cell-verif", _badge_cell("verif"))
                     ltbl.add_slot("no-data", _no_data_cell(
                         "folder_special", "模型库还是空的——训练详情页「部署到标注端」会在这里出现"))
                     ltbl.add_slot("body-cell-ops", (
                         '<q-td :props="props">'
+                        '<q-btn flat dense round size=xs color=primary icon="folder_open" '
+                        '@click.stop="() => $parent.$emit(\'libopen\', props.row)" />'
                         '<q-btn flat dense round size=xs color=negative icon="delete" '
-                        '@click="() => $parent.$emit(\'purge\', props.row)" />'
+                        '@click.stop="() => $parent.$emit(\'purge\', props.row)" />'
                         "</q-td>"))
+                    ltbl.on("libopen", lambda e: _open_dir(e.args["path"]))
                     ltbl.on("purge", lambda e: open_purge(e.args["name"]))
                     ui.label(f"库根目录：{lib_data['root']}").classes("text-[11px] opacity-45 break-all")
 
@@ -4401,6 +4816,44 @@ def mount() -> None:
                     ui.button("取消", on_click=purge_dialog.close).props("flat")
                     ui.button("删除", color="negative", icon="delete",
                               on_click=do_purge).props("unelevated")
+
+            # 模型库批量删除（确认门：列名与后果；逐个删并汇总结局，部分失败不中断）
+            with ui.dialog() as lib_bulk_dialog, ui.card().classes("w-96 gap-2"):
+                lb_title = ui.label("").classes("font-bold")
+                lb_names = ui.label("").classes("text-xs opacity-60 break-all")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=lib_bulk_dialog.close).props("flat")
+
+                    async def _do_lib_bulk() -> None:
+                        targets = list(state.get("lib_sel") or [])
+                        lib_bulk_dialog.close()
+                        ok, dep, fails = 0, 0, []
+                        for n in targets:
+                            try:
+                                r = await _io(tsvc.delete_model_dir, get_manager(), n)
+                                ok += 1
+                                dep += r["removed_deployments"]
+                            except Exception as exc:  # noqa: BLE001
+                                fails.append(f"{n}：{exc}")
+                        if ok:
+                            ui.notify(f"已删除 {ok} 个模型目录（同步移除 {dep} 条部署记录）",
+                                      type="positive")
+                        for f in fails:
+                            ui.notify(f"删除失败 {f}", type="negative")
+                        state["lib_sel"] = []
+                        render_library()
+                        render_deployments()
+
+                    ui.button("删除", color="negative", icon="delete_sweep", on_click=_do_lib_bulk
+                              ).props("unelevated")
+
+            def open_lib_bulk() -> None:
+                sel = state.get("lib_sel") or []
+                if not sel:
+                    return
+                lb_title.set_text(f"批量删除 {len(sel)} 个模型目录")
+                lb_names.set_text("；".join(sel))
+                lib_bulk_dialog.open()
 
             render_library()
 
@@ -4667,7 +5120,7 @@ def mount() -> None:
                         imp = cmp.get("param_importance")
                         if imp and imp.get("keys"):
                             with ui.row().classes("w-full items-center gap-2 q-mt-sm"):
-                                ui.label(f"本轮决策依据的参数重要性（{imp['note']}）").classes(
+                                ui.label("本轮决策依据的参数重要性").classes(
                                     "text-[11px] opacity-50")
                             for k in imp["keys"]:
                                 with ui.row().classes("w-full items-center gap-2"):
@@ -4736,7 +5189,7 @@ def mount() -> None:
 
             select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail),
                                        sync_selected=False)
-            _on_row_click(table, select)
+            _on_row_click(table, select, lambda: _scroll_to(detail))
 
             # ── 批量删除（勾选归批量，行点击归详情）
             def sync_bulk_btn() -> None:
@@ -4854,10 +5307,11 @@ def mount() -> None:
                         c_rounds = ui.number("最大轮数", value=5, precision=0, min=1).classes("flex-1")
                         c_approval = ui.select({"manual": "每轮人工审批", "auto": "自动直通"},
                                                value="manual", label="审批模式").classes("flex-1")
-                    c_prune = ui.switch("烂轮早停（显著劣化轮 1/2 epoch 剪枝，全局阈值见设置页）",
+                    c_prune = ui.switch("烂轮早停",
                                         value=bool(load_config().get("agent", {}).get("prune_enabled", True)))
                     with c_prune:
-                        ui.tooltip("新轮主指标低于历史同期中位数 − δ 时优雅终止并记 pruned；证据进入下一轮 LLM 决策")
+                        ui.tooltip("显著劣化轮 1/2 epoch 即触发：主指标低于历史同期中位数 − δ 时优雅终止"
+                                   "并记 pruned；阈值 δ 在设置页调整；证据进入下一轮 LLM 决策")
                     with ui.expansion("高级训练参数", icon="tune",
                                       caption="ultralytics 8.4.100 官方全量 · 留空走官方默认").classes("w-full"):
                         ui.label("首轮基线；后续轮次的调整由 Agent 在其白名单内决策"
@@ -5046,14 +5500,36 @@ def mount() -> None:
                 ui.label("保存后需重启平台生效（训练子进程与目录根在启动时装配）。").classes("text-xs opacity-50")
                 t_python = ui.input("训练 python（torch/ultralytics 所在环境）",
                                     value=str(training.get("python", ""))).classes("w-full")
+                def _dir_input_open(field) -> None:
+                    p = str(field.value or "").strip()
+                    if not p:
+                        ui.notify("目录为空，先填写再打开", type="warning")
+                        return
+                    _open_dir(str(Path(p).expanduser()))
+
                 t_ds = ui.input("数据集根目录 datasets_dir",
                                 value=str(training.get("datasets_dir", "~/visiontrainer/datasets"))).classes("w-full")
+                with t_ds.add_slot("append"):
+                    _b = ui.button(icon="folder_open", on_click=lambda: _dir_input_open(t_ds)).props(
+                        "flat dense round size=sm color=primary")
+                    with _b:
+                        ui.tooltip("在文件管理器中打开")
                 t_runs = ui.input("产物根目录 runs_dir",
                                   value=str(training.get("runs_dir", "~/visiontrainer/runs"))).classes("w-full")
+                with t_runs.add_slot("append"):
+                    _b = ui.button(icon="folder_open", on_click=lambda: _dir_input_open(t_runs)).props(
+                        "flat dense round size=sm color=primary")
+                    with _b:
+                        ui.tooltip("在文件管理器中打开")
                 t_lib = ui.input("模型库目录 model_lib_dir",
                                  value=str(training.get("model_lib_dir", "~/Documents/x-anylabeling-models"))).classes(
                     "w-full")
-                t_occ = ui.switch("启动前检测 GPU 外部占用（check_occupancy）",
+                with t_lib.add_slot("append"):
+                    _b = ui.button(icon="folder_open", on_click=lambda: _dir_input_open(t_lib)).props(
+                        "flat dense round size=sm color=primary")
+                    with _b:
+                        ui.tooltip("在文件管理器中打开")
+                t_occ = ui.switch("启动前检测 GPU 外部占用",
                                   value=bool(training.get("check_occupancy", True)))
                 train_btn = ui.button("保存", icon="save", on_click=lambda: do_save_training())
 
@@ -5076,10 +5552,14 @@ def mount() -> None:
             with ui.card().classes("w-full gap-2"):
                 ui.label("通知与 Agent 安全网").classes("font-semibold")
                 ui.label("通知即时生效；早停阈值仅对新任务生效。").classes("text-xs opacity-50")
-                n_desktop = ui.switch("桌面通知（完成 / 失败 / 审批请求 / 剪枝 → notify-send）",
+                n_desktop = ui.switch("桌面通知",
                                       value=bool(cfg.get("notifications", {}).get("desktop", True)))
-                a_prune = ui.switch("烂轮早停全局开关（新轮显著劣化 → 优雅终止记 pruned）",
+                with n_desktop:
+                    ui.tooltip("完成 / 失败 / 审批请求 / 剪枝时经系统通知弹出（notify-send）")
+                a_prune = ui.switch("烂轮早停",
                                     value=bool(cfg.get("agent", {}).get("prune_enabled", True)))
+                with a_prune:
+                    ui.tooltip("新轮主指标显著劣化时优雅终止并记 pruned（阈值 δ 见下方）")
                 a_delta = ui.number("剪枝阈值 δ（主指标低于历史同期中位数的差值）",
                                     value=float(cfg.get("agent", {}).get("prune_delta", 0.05)),
                                     min=0.001, max=1.0, step=0.005).classes("w-64")

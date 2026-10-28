@@ -92,7 +92,12 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     if with_ui:
         mount_ui()
         # language=zh-CN：Quasar 内置组件文案中文化（NiceGUI 自带 zh-CN 语言包）
-        ui.run_with(app, title="VisionTrainer", storage_secret="visiontrainer-dev-secret", language="zh-CN")
+        # reconnect_timeout=10：默认 3s 推导出心跳 ping 4s/超时 2s，大网格渲染风暴
+        # （质量审计数百卡缩略图回填）会卡住浏览器主线程 >2s 发不出 PONG → 服务端
+        # 断连 → 实例删除 → 重连被拒 → 整页 reload（2026-09-21 断连事故同病灶）。
+        # 放宽后 ping 8s/超时 4s/重连宽限 10s，渲染尖峰不再误杀连接。
+        ui.run_with(app, title="VisionTrainer", storage_secret="visiontrainer-dev-secret",
+                    language="zh-CN", reconnect_timeout=10.0)
     return app
 
 

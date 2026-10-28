@@ -9,6 +9,7 @@ from .config import router as config_router
 from .datasets import router as datasets_router
 from .system import router as system_router
 from .tasks import router as tasks_router
+from .thumbs import router as thumbs_router
 
 router = APIRouter()
 
@@ -17,6 +18,7 @@ v1.include_router(config_router)
 v1.include_router(datasets_router)
 v1.include_router(system_router)
 v1.include_router(tasks_router)
+v1.include_router(thumbs_router)
 router.include_router(v1)
 
 
