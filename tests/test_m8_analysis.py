@@ -166,6 +166,87 @@ def test_analysis_rejects_non_done(m8_client):
     assert r.status_code == 409
 
 
+def test_error_analysis_conf_filter_and_reuse(m8_client, monkeypatch):
+    """conf 分析口径（2026-10-29）：低于 conf 的预测框视同未检出；同 Run 已推理过则复用
+    predictions.jsonl 重算（不重跑推理子进程）；非法 conf 400；summary 记录口径。"""
+    c = m8_client
+    _tid, uid = _done_task(c, "ana-conf")
+    r = c.post(f"/api/v1/runs/{uid}/analysis")  # 默认 0.25
+    assert r.status_code == 200
+    assert r.json()["summary"]["conf"] == 0.25
+    assert r.json()["summary"]["counts"] == {"tp": 0, "fp": 1, "fn": 1, "confusion": 1}
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("应复用已推理结果，不应重跑推理子进程")
+
+    monkeypatch.setattr(ea, "run_analysis_subprocess", _boom)
+    r = c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": 0.5})
+    assert r.status_code == 200, r.text  # 走到 200 即证明未触发子进程
+    body = r.json()
+    assert body["summary"]["conf"] == 0.5
+    # stub 注入：FP conf 0.3 < 0.5 出局（FP 归零）；混淆 0.6 保留
+    assert body["summary"]["counts"] == {"tp": 0, "fp": 0, "fn": 1, "confusion": 1}
+    assert body["sweep"]["curve"], "阈值扫描始终基于全量匹配"
+    # 混淆 0.6 也出局 → 其 GT 落 FN
+    r = c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": 0.8})
+    assert r.json()["summary"]["counts"] == {"tp": 0, "fp": 0, "fn": 2, "confusion": 0}
+    assert c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": 1.5}).status_code == 400
+    assert c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": -0.5}).status_code == 400
+
+
+def test_analysis_cell_overlay_scoped_to_cell(m8_client):
+    """格内聚焦叠加（2026-10-29 用户反馈）：下钻看图只画该格记录——FP 格无 GT 绿框、
+    FN 格无 Pred 红框，同图其余格的标注不进图；空格 404。"""
+    from PIL import Image
+
+    from visiontrainer.training import service as tsvc
+    from visiontrainer.training.manager import get_manager
+    from visiontrainer.training.service import TaskError
+
+    c = m8_client
+    _tid, uid = _done_task(c, "ana-cell")
+    c.post(f"/api/v1/runs/{uid}/analysis")  # 默认 0.25：FN + FP(0.3) + 混淆(0.6)
+
+    def scan(overlay: str) -> tuple[bool, bool]:
+        data = Image.open(overlay).convert("RGB").tobytes()
+        has_red = has_green = False
+        for i in range(0, len(data), 3):
+            r, g, b = data[i], data[i + 1], data[i + 2]
+            # ±60 容差：夹具背景偏绿 (30,91,60)，红框边缘 JPEG 伪彩能过 ±40——真框色
+            # GT 绿 (34,197,94) / Pred 红 (239,68,68) 饱和度远高，60 分得开
+            has_red |= r > g + 60 and r > b + 60
+            has_green |= g > r + 60 and g > b + 60
+        return has_red, has_green
+
+    fp_entry = fn_entry = None
+    for cls in ("car", "person"):
+        entries = c.get(f"/api/v1/runs/{uid}/analysis/cell",
+                        params={"gt": "背景", "pred": cls}).json()["entries"]
+        if not fp_entry and entries:
+            fp_entry, fp_cls = entries[0], cls
+        entries = c.get(f"/api/v1/runs/{uid}/analysis/cell",
+                        params={"gt": cls, "pred": "背景"}).json()["entries"]
+        if not fn_entry and entries:
+            fn_entry, fn_cls = entries[0], cls
+    assert fp_entry and fn_entry, "stub 应注入 FP 与 FN 各一"
+
+    # FP 格（背景→误检类）：只有红框；该图同时存在的 FN 绿框（GT）不进图
+    ov = tsvc.analysis_cell_overlay(get_manager(), uid, "背景", fp_cls, fp_entry["image"])
+    assert Path(ov).exists()
+    has_red, has_green = scan(ov)
+    assert has_red, "FP 红框应在场"
+    assert not has_green, "本格无 GT——同图其余格的绿框不应画"
+
+    # FN 格（GT 类→背景）：只有绿框；同图 FP 的红框不进图
+    ov2 = tsvc.analysis_cell_overlay(get_manager(), uid, fn_cls, "背景", fn_entry["image"])
+    has_red2, has_green2 = scan(ov2)
+    assert has_green2, "FN 绿框应在场"
+    assert not has_red2, "本格无 Pred——同图其余格的红框不应画"
+
+    with pytest.raises(TaskError):
+        tsvc.analysis_cell_overlay(get_manager(), uid, "背景", "背景", fp_entry["image"])
+
+
 # ---------------------------------------------------------------- 03 复盘升级 + 04 部署阈值
 
 def test_report_includes_error_stats_and_next_steps(m8_client, monkeypatch):

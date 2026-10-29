@@ -160,9 +160,12 @@ def get_analysis(uid: str, request: Request):
 
 @router.post("/runs/{uid}/analysis")
 @_maps_errors
-def run_analysis(uid: str, request: Request):
-    """跑错误分析（M8 01，长操作）：best.pt 对 val 逐图推理 + IoU 贪心匹配入库。"""
-    return tsvc.run_error_analysis(_manager(request), uid)
+def run_analysis(uid: str, request: Request, body: dict | None = None):
+    """跑错误分析（M8 01）：训练 venv 低置信度全量推理 + IoU 贪心匹配入库；body `{conf?}`
+    设分析口径（低于该 conf 的预测框视同未检出；已推理过则复用结果只做平台侧重算）。"""
+    body = body or {}
+    return tsvc.run_error_analysis(_manager(request), uid,
+                                   conf=float(body.get("conf") or 0.25))
 
 
 @router.post("/runs/{uid}/analysis/export")

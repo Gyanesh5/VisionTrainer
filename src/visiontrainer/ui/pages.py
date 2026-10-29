@@ -1988,10 +1988,11 @@ document.addEventListener('scroll', function(e){
                             except Exception:  # noqa: BLE001
                                 analysis = None
 
-                            async def do_analysis(_uid: str) -> None:
-                                ui.notify("错误分析中：best.pt 对 val 逐图推理 + IoU 匹配（视 val 大小约数十秒）…")
+                            async def do_analysis(_uid: str, _conf: float) -> None:
+                                ui.notify(f"错误分析中（conf {_conf}）：best.pt 对 val 逐图推理 + IoU 匹配"
+                                          "（已推理过则复用，仅平台侧重算）…")
                                 try:
-                                    r = await _io(tsvc.run_error_analysis, get_manager(), _uid)
+                                    r = await _io(tsvc.run_error_analysis, get_manager(), _uid, _conf)
                                     c = (r.get("summary") or {}).get("counts") or {}
                                     ui.notify(f"分析完成：TP {c.get('tp', 0)} / FP {c.get('fp', 0)} / "
                                               f"FN {c.get('fn', 0)} / 混淆 {c.get('confusion', 0)}", type="positive")
@@ -2040,13 +2041,19 @@ document.addEventListener('scroll', function(e){
                                 with _lbl:
                                     ui.tooltip("低置信度全量采集 + IoU 贪心匹配；产出最差样本榜 / "
                                                "GT-Pred 叠加大图 / 混淆矩阵下钻 / FN·FP 改标清单")
-                                ui.button("运行错误分析", icon="biotech",
-                                          on_click=lambda: do_analysis(uid)).props("unelevated dense")
+                                with ui.row().classes("items-center gap-2"):
+                                    ea_conf = _labeled("conf", ui.number, w="w-36", label_w="w-10",
+                                                       value=0.25, min=0.01, max=1.0, step=0.05)
+                                    with ea_conf:
+                                        ui.tooltip("分析口径：低于该 conf 的预测框视同未检出")
+                                    ui.button("运行错误分析", icon="biotech",
+                                              on_click=lambda: do_analysis(uid, float(ea_conf.value or 0.25))
+                                              ).props("unelevated dense")
                             else:
                                 sm = analysis.get("summary") or {}
                                 c = sm.get("counts") or {}
                                 sw = analysis.get("sweep") or {}
-                                with ui.row().classes("w-full flex-wrap gap-1"):
+                                with ui.row().classes("w-full flex-wrap gap-1 items-center"):
                                     for txt, col in ((f"P {sm.get('precision', '—')}", "blue"),
                                                      (f"R {sm.get('recall', '—')}", "blue"),
                                                      (f"F1 {sm.get('f1', '—')}", "blue"),
@@ -2064,6 +2071,14 @@ document.addEventListener('scroll', function(e){
                                         ui.chip(f"小目标 GT 占比 {so['share']:.0%}"
                                                 f"（{so['count']}/{so['total']}）").props(
                                             "dense square outline color=grey").classes("text-[11px]")
+                                    ea_conf = _labeled("conf", ui.number, w="w-36", label_w="w-10",
+                                                       value=sm.get("conf") or 0.25,
+                                                       min=0.01, max=1.0, step=0.05)
+                                    with ea_conf:
+                                        ui.tooltip("分析口径：低于该 conf 的预测框视同未检出；重算复用已推理结果")
+                                    ui.button("重算", icon="refresh",
+                                              on_click=lambda: do_analysis(uid, float(ea_conf.value or 0.25))
+                                              ).props("outline dense")
                                 for tc in (sm.get("top_confusions") or [])[:4]:
                                     ui.chip(f"混淆 {tc['gt']}→{tc['pred']} ×{tc['count']}"
                                             ).props("dense square outline color=purple").classes("text-[11px]")
@@ -2090,6 +2105,24 @@ document.addEventListener('scroll', function(e){
                                             except (IndexError, TypeError):
                                                 return
                                             entries = tsvc.analysis_cell(get_manager(), _uid, gt, pred)
+
+                                            def _show_cell(en: dict, _gt: str = gt, _pred: str = pred,
+                                                           _uid2: str = _uid) -> None:
+                                                """只画本格记录的聚焦叠加——下钻看图若带全图全量
+                                                标注，本格错在哪反而被淹没（2026-10-29 用户反馈）。"""
+                                                try:
+                                                    ov = tsvc.analysis_cell_overlay(
+                                                        get_manager(), _uid2, _gt, _pred, en["image"])
+                                                except Exception as exc:  # noqa: BLE001
+                                                    ui.notify(f"叠加渲染失败：{exc}", type="negative")
+                                                    return
+                                                _zoomable_image_dialog(
+                                                    ov,
+                                                    f"{Path(en['image']).name} · {_gt}→{_pred}（仅本格）",
+                                                    on_open=lambda p=en["image"]: _open_in_xal(p),
+                                                    hint="只画本格记录：绿 = GT｜红 = Pred（类别 + 置信度），"
+                                                         "其余标注不显示 · 滚轮缩放，放大后拖动平移")
+
                                             cell_box.clear()
                                             with cell_box:
                                                 with ui.row().classes("w-full items-center gap-2 q-mt-xs"):
@@ -2105,6 +2138,11 @@ document.addEventListener('scroll', function(e){
                                                         if en.get("conf") is not None:
                                                             ui.label(f"conf {en['conf']:.2f}").classes(
                                                                 "text-[10px] opacity-50")
+                                                        vb = ui.button(icon="visibility",
+                                                                       on_click=lambda en=en: _show_cell(en)
+                                                                       ).props("flat dense round size=xs color=blue")
+                                                        with vb:
+                                                            ui.tooltip("只看本格标注的叠加大图")
                                                         ob = ui.button(icon="open_in_new",
                                                                        on_click=lambda p=en["image"]: _open_in_xal(p)
                                                                        ).props("flat dense round size=xs color=blue")

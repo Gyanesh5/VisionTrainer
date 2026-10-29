@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from datetime import datetime
@@ -518,10 +519,19 @@ def _analysis_payload(manager, run, task) -> dict:
             "conf_min": 0.01}  # 低置信度采集：阈值后验扫描（04 号票）依赖全量框
 
 
-def run_error_analysis(manager, uid: str, progress=None) -> dict:
-    """跑错误分析（M8 01 号票，长操作）：训练 venv 推理 → 平台贪心匹配入库 → 渲染叠加图 → 汇总。"""
+def run_error_analysis(manager, uid: str, conf: float = 0.25, progress=None) -> dict:
+    """跑错误分析（M8 01 号票）：训练 venv 低置信度全量推理 → 平台贪心匹配入库 → 叠加图 → 汇总。
+
+    conf：分析口径的置信度阈值（pred 低于阈值的框视同未检出，不参与匹配——低 conf 噪声
+    FP 不再淹没错误榜）。推理恒按 0.01 全量采集且落盘复用——同一 Run 内权重与 val 清单
+    不变，重算只做平台侧匹配/渲染（秒级），换 conf 不必重推理。阈值扫描（sweep）始终
+    用全量匹配：后验扫描的意义就是看任意 conf 下的 P/R/F1。"""
     from .error_analysis import greedy_match, render_overlay, run_analysis_subprocess, summarize, sweep_thresholds
     from visiontrainer.db.models import RunSampleError
+
+    conf = float(conf)
+    if not 0 < conf <= 1:
+        raise _http_err("invalid_args", f"conf 须在 (0,1]，收到 {conf}", 400)
 
     with manager.Session() as s:
         from visiontrainer.db.models import Run, Task
@@ -535,12 +545,14 @@ def run_error_analysis(manager, uid: str, progress=None) -> dict:
         payload = _analysis_payload(manager, run, task)
         rid = run.id
 
-    run_analysis_subprocess(manager.s.training_python, manager.s.analysis_entry, payload,
-                            Path(payload["run_dir"]) / "analysis" / "entry.log")
+    analysis_dir = Path(payload["run_dir"]) / "analysis"
+    if not ((analysis_dir / "predictions.jsonl").is_file() and (analysis_dir / "_done").is_file()):
+        run_analysis_subprocess(manager.s.training_python, manager.s.analysis_entry, payload,
+                                analysis_dir / "entry.log")
 
     # ingest：predictions.jsonl → 匹配 → 入库 + 叠加渲染 + 汇总
-    preds_path = Path(payload["run_dir"]) / "analysis" / "predictions.jsonl"
-    rows, overlays, all_records = [], [], []
+    preds_path = analysis_dir / "predictions.jsonl"
+    rows, overlays, all_records, full_records = [], [], [], []
     gt_areas: list[float] = []
     images = [ln for ln in preds_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     for i, line in enumerate(images):
@@ -549,7 +561,10 @@ def run_error_analysis(manager, uid: str, progress=None) -> dict:
         rec = json.loads(line)
         if "progress" in rec or rec.get("error"):
             continue
-        records = greedy_match(rec["gt"], rec["pred"])
+        full_records.extend({"image": rec["image"], **r}
+                            for r in greedy_match(rec["gt"], rec["pred"]))
+        kept = [p for p in rec["pred"] if (p.get("conf") or 0) >= conf]
+        records = greedy_match(rec["gt"], kept)
         all_records.extend({"image": rec["image"], **r} for r in records)
         for g in rec["gt"]:
             x0, y0, x1, y1 = g["xyxy"]
@@ -557,7 +572,7 @@ def run_error_analysis(manager, uid: str, progress=None) -> dict:
         try:
             overlays.append((rec["image"], str(render_overlay(
                 rec["image"], records,
-                Path(payload["run_dir"]) / "analysis" / "overlays" / f"{Path(rec['image']).stem}.jpg"))))
+                analysis_dir / "overlays" / f"{Path(rec['image']).stem}.jpg"))))
         except OSError:
             pass
     with manager.Session() as s:
@@ -569,10 +584,23 @@ def run_error_analysis(manager, uid: str, progress=None) -> dict:
                                       "gt_poly": r.get("gt_poly"), "pred_poly": r.get("pred_poly")}))
         s.commit()
     summary = summarize(all_records, payload["classes"], gt_areas)
-    sweep = sweep_thresholds(all_records)
-    (Path(payload["run_dir"]) / "analysis" / "summary.json").write_text(
+    summary["conf"] = conf
+    sweep = sweep_thresholds(full_records)
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+    (analysis_dir / "summary.json").write_text(
         json.dumps({"summary": summary, "sweep": sweep}, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 格内聚焦叠加缓存随 conf 口径失效（其内容依赖被过滤的记录集）
+    cells_cache = analysis_dir / "overlays_cells"
+    if cells_cache.is_dir():
+        shutil.rmtree(cells_cache)
     return get_error_analysis(manager, uid)
+
+
+def _cm_coord(r) -> tuple[str, str]:
+    """逐框记录 → 混淆矩阵坐标 (GT 类, Pred 类)：无 GT 记背景行、无 Pred 记背景列。"""
+    g = r.cls_gt if r.kind in ("tp", "confusion", "fn") else "背景"
+    p = r.cls_pred if r.kind in ("tp", "confusion", "fp") else "背景"
+    return g, p
 
 
 def get_error_analysis(manager, uid: str) -> dict | None:
@@ -608,8 +636,7 @@ def get_error_analysis(manager, uid: str) -> dict | None:
     idx = {c: i for i, c in enumerate(axis)}
     matrix = [[0] * len(axis) for _ in axis]
     for r in rows:
-        g = r.cls_gt if r.kind in ("tp", "confusion", "fn") else "背景"
-        p = r.cls_pred if r.kind in ("tp", "confusion", "fp") else "背景"
+        g, p = _cm_coord(r)
         if g in idx and p in idx:
             matrix[idx[g]][idx[p]] += 1
     return {"run_uid": uid, "summary": data.get("summary"), "sweep": data.get("sweep"),
@@ -627,19 +654,49 @@ def analysis_cell(manager, uid: str, gt_cls: str, pred_cls: str) -> list[dict]:
             raise _http_err("not_found", f"Run 不存在：{uid}", 404)
         rows = s.query(RunSampleError).filter(RunSampleError.run_id == run.id).all()
 
-    def in_cell(r) -> bool:
-        g = r.cls_gt if r.kind in ("tp", "confusion", "fn") else "背景"
-        p = r.cls_pred if r.kind in ("tp", "confusion", "fp") else "背景"
-        return g == gt_cls and p == pred_cls
-
     out = []
     for r in rows:
-        if not in_cell(r):
+        if _cm_coord(r) != (gt_cls, pred_cls):
             continue
         out.append({"image": r.image, "kind": r.kind, "cls_gt": r.cls_gt, "cls_pred": r.cls_pred,
                     "conf": r.conf, "iou": r.iou, "box": r.box})
     out.sort(key=lambda e: (e["image"], -(e.get("conf") or 0)))
     return out
+
+
+def _path_slug(text: str) -> str:
+    """类名 → 安全路径段（类别名来自 data.yaml，可能含路径分隔符等字符）。"""
+    return "".join(c if c.isalnum() or c in ".-" else "_" for c in text)
+
+
+def analysis_cell_overlay(manager, uid: str, gt_cls: str, pred_cls: str, image: str) -> str:
+    """混淆矩阵格内单图聚焦叠加：只画该格在该图的记录，其余标注一律不画
+    （2026-10-29 用户反馈：下钻看图被全图全量标注淹没，看不出本格错在哪）。
+    产物按格缓存于 analysis/overlays_cells/<gt>__<pred>/，重算分析时整体失效。"""
+    from .error_analysis import render_overlay
+    from visiontrainer.db.models import Run, RunSampleError
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        rows = (s.query(RunSampleError)
+                .filter(RunSampleError.run_id == run.id, RunSampleError.image == image).all())
+        run_dir = run.run_dir
+    records = []
+    for r in rows:
+        if _cm_coord(r) != (gt_cls, pred_cls):
+            continue
+        box = r.box or {}
+        records.append({"kind": r.kind, "cls_gt": r.cls_gt, "cls_pred": r.cls_pred,
+                        "conf": r.conf, "gt": box.get("gt"), "pred": box.get("pred"),
+                        "gt_poly": box.get("gt_poly"), "pred_poly": box.get("pred_poly")})
+    if not records:
+        raise _http_err("not_found", f"图 {Path(image).name} 在格 [{gt_cls}→{pred_cls}] 无记录", 404)
+    if not run_dir:
+        raise _http_err("state_conflict", "Run 无运行目录", 409)
+    out_dir = Path(run_dir) / "analysis" / "overlays_cells" / f"{_path_slug(gt_cls)}__{_path_slug(pred_cls)}"
+    return str(render_overlay(image, records, out_dir / f"{Path(image).stem}.jpg"))
 
 
 def export_relabel_list(manager, uid: str) -> dict:

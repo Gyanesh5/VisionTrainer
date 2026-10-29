@@ -62,7 +62,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 - Run 归档：全量 args、逐 epoch 指标（**入库，单一数据源**）、results.csv、training.log、ultralytics 全套产物图（混淆矩阵/PR/F1/P/R 曲线不自绘）、best/last.pt、Agent 轮 LLM 决策记录（输入摘要/输出/clamp）。
 - 复盘报告：一键生成 markdown（复用 Agent 多模态管线）存 Run 目录；PDF 不做。
-- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——最差样本榜（fp+fn 降序）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格下钻（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。
+- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——最差样本榜（fp+fn 降序）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格下钻（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误榜；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；混淆矩阵下钻支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。
 - **复盘升级** [M8]：结构化错误统计（Top 混淆类对/缺数据类/FP-FN 失衡/小目标占比）作 LLM 输入 schema；报告固定加「**下一步实验推荐**」章节（超参改动+理由+预期收益，与审批门共享输出结构）。
 - **对比页六件套** [M8]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键。
 
