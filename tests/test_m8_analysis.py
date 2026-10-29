@@ -277,6 +277,61 @@ def test_test_infer_directory(m8_client, m8_src):
     assert r2.status_code == 400, "空目录应 invalid_args 拒绝"
 
 
+def test_test_infer_entry_locates_exported_onnx(tmp_path: Path):
+    """回归（2026-10-29）：ultralytics 8.4.x export 恒落源 pt 旁（project/name 不改 onnx
+    落点），入口曾 glob out_dir/export/*.onnx 扑空 → 试跑退出码 1。真入口子进程 + shim
+    ultralytics/cv2（平台 venv 无两者），锁死「以 export() 返回值为产物路径」。"""
+    import subprocess
+
+    shim = tmp_path / "shim"
+    shim.mkdir()
+    (shim / "ultralytics.py").write_text(
+        "from pathlib import Path\n"
+        "\n"
+        "class _T(list):\n"
+        "    def tolist(self): return list(self)\n"
+        "class YOLO:\n"
+        "    def __init__(self, p): self.p = str(p)\n"
+        "    def export(self, format=None, imgsz=None, opset=None, simplify=None, **kw):\n"
+        "        out = Path(self.p).with_suffix('.onnx')  # 模拟 8.4.x：恒落源文件旁\n"
+        "        out.write_bytes(b'fake-onnx')\n"
+        "        return str(out)\n"
+        "    def predict(self, image, **kw):\n"
+        "        class R:\n"
+        "            names = {0: 'stubcls'}\n"
+        "            boxes = type('B', (), {'xyxy': _T([[1.0, 2.0, 30.0, 40.0]]),\n"
+        "                                   'conf': _T([0.9]), 'cls': _T([0])})()\n"
+        "            def plot(self): return b'img'\n"
+        "        return [R()]\n", encoding="utf-8")
+    (shim / "cv2.py").write_text(
+        "from pathlib import Path\n"
+        "def imwrite(p, arr):\n"
+        "    Path(p).write_bytes(b'jpg'); return True\n", encoding="utf-8")
+
+    weights = tmp_path / "weights"
+    weights.mkdir()
+    (weights / "best.pt").write_bytes(b"pt")
+    img = tmp_path / "x.png"
+    img.write_bytes(b"png")
+    out_dir = tmp_path / "test_infer"
+    pf = tmp_path / "payload.json"
+    pf.write_text(json.dumps({"pt": str(weights / "best.pt"), "onnx": None,
+                              "out_dir": str(out_dir), "images": [str(img)],
+                              "imgsz": 640, "conf": 0.25, "iou": 0.45}), encoding="utf-8")
+
+    from visiontrainer.training import test_infer_entry as ti
+
+    env = {**__import__("os").environ, "PYTHONPATH": str(shim)}
+    proc = subprocess.run([sys.executable, ti.__file__, str(pf)], env=env,
+                          capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stderr
+    assert (out_dir / "model.onnx").exists(), "导出产物应挪成 out_dir/model.onnx 缓存名"
+    assert not (weights / "best.onnx").exists(), "产物应移走，不在源 pt 旁残留"
+    result = json.loads((out_dir / "result.json").read_text(encoding="utf-8"))
+    assert result["onnx"] == str(out_dir / "model.onnx")
+    assert result["images"][0]["boxes"][0]["cls"] == "stubcls"
+
+
 # ---------------------------------------------------------------- 2026-09-21 OBB/segment 修复回归
 
 

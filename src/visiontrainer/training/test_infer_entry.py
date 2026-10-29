@@ -56,12 +56,10 @@ def main() -> None:
     onnx = payload.get("onnx")
     if not onnx or not Path(onnx).exists():
         onnx_path = Path(onnx) if onnx else out_dir / "model.onnx"
-        YOLO(payload["pt"]).export(format="onnx", imgsz=imgsz, opset=13, simplify=True,
-                                   project=str(out_dir), name="export", exist_ok=True)
-        # export 产物落在 out_dir/export/<ptstem>.onnx；统一挪成 model.onnx 缓存名
-        produced = next(iter(sorted(out_dir.glob("export/*.onnx"))), None)
-        if produced is None:
-            raise RuntimeError("ONNX 导出未产出文件")
+        # ultralytics 8.4.x 导出产物恒落源 pt 旁（export 的 project/name 不影响 onnx
+        # 落点），以 export() 返回值为产物路径，挪成缓存名
+        produced = Path(YOLO(payload["pt"]).export(format="onnx", imgsz=imgsz,
+                                                   opset=13, simplify=True))
         if onnx_path.exists():
             onnx_path.unlink()
         produced.replace(onnx_path)
