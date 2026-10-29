@@ -131,10 +131,10 @@ def test_error_analysis_e2e(m8_client):
     # stub 注入语义：val 2 图、每图 1 GT → TP 0、FN 1、FP 1、混淆 1
     assert cnt == {"tp": 0, "fp": 1, "fn": 1, "confusion": 1}, cnt
     assert a["sweep"]["recommended_conf"] is not None
-    # 最差榜与叠加图
-    worst = a["worst"]
-    assert worst and worst[0]["score"] >= 1
-    assert Path(worst[0]["overlay"]).exists()
+    # 逐图明细（全量）与叠加图：stub val 2 图——图0 FN+FP 错框 2，图1 混淆错框 1
+    per_image = a["per_image"]
+    assert [w["score"] for w in per_image] == [2, 1]
+    assert Path(per_image[0]["overlay"]).exists()
     # 混淆矩阵：FP → 背景×pred；FN → gt×背景；混淆 → gt×pred
     axis = a["matrix"]["axis"]
     cells = a["matrix"]["cells"]
@@ -192,6 +192,30 @@ def test_error_analysis_conf_filter_and_reuse(m8_client, monkeypatch):
     assert r.json()["summary"]["counts"] == {"tp": 0, "fp": 0, "fn": 2, "confusion": 0}
     assert c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": 1.5}).status_code == 400
     assert c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": -0.5}).status_code == 400
+
+
+def test_per_image_full_list_not_truncated(m8_client):
+    """逐图错误明细全量返回（2026-10-29 用户反馈：最差样本榜改全量，不再截断 Top10）。"""
+    c = m8_client
+    _tid, uid = _done_task(c, "ana-full")
+    c.post(f"/api/v1/runs/{uid}/analysis")
+    from visiontrainer.db.models import Run, RunSampleError
+    from visiontrainer.training.manager import get_manager
+
+    with get_manager().Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one()
+        for i in range(12):
+            for _ in range(2):  # 12 张合成图 × 2 FP，加 stub val 2 图共 14 张 > 旧 Top10 上限
+                s.add(RunSampleError(run_id=run.id, image=f"synthetic_{i:02d}.jpg", kind="fp",
+                                     cls_gt=None, cls_pred="car", conf=0.8, iou=0.0,
+                                     box={"pred": [0, 0, 10, 10]}))
+        s.commit()
+    a = c.get(f"/api/v1/runs/{uid}/analysis").json()
+    pi = a["per_image"]
+    assert len(pi) == 14, "全部含逐框记录的图都应返回（旧实现截断为 10）"
+    assert {w["image"] for w in pi} >= {f"synthetic_{i:02d}.jpg" for i in range(12)}
+    assert pi[0]["score"] == 2 and pi[-1]["score"] == 1  # 错框数降序
+    assert set(pi[0]) >= {"image", "tp", "fp", "fn", "confusion", "score", "overlay"}
 
 
 def test_analysis_cell_overlay_scoped_to_cell(m8_client):

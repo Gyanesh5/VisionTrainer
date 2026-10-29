@@ -68,9 +68,9 @@ v1.2 同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/valid
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/runs/{uid}/analysis` | 错误分析读（M8 01/02）：`{summary(P/R/F1/计数/Top混淆/小目标), sweep(阈值曲线+建议conf), worst[最差样本榜+overlay], matrix(axis+cells 含背景)}`；未分析返回 null |
+| GET | `/api/v1/runs/{uid}/analysis` | 错误分析读（M8 01/02）：`{summary(P/R/F1/计数/Top混淆/小目标), sweep(阈值曲线+建议conf), per_image[逐图错误明细：全部含逐框记录的 val 图（image/tp/fp/fn/confusion/score 错框数降序/overlay），无 Top10 截断], matrix(axis+cells 含背景)}`；未分析返回 null |
 | POST | `/api/v1/runs/{uid}/analysis` | 跑错误分析：训练 venv 低置信度全量推理 + IoU 贪心匹配入 run_sample_errors；仅 done Run；重复触发覆盖。body `{conf?}`（默认 0.25）设分析口径——低于该 conf 的预测框视同未检出，summary 回填 `conf`；同 Run 已推理过（predictions.jsonl 与 _done 在）则复用结果仅平台侧重算；阈值扫描恒基于全量匹配。segment/obb 任务 GT 与预测另采归一化 `poly`（预测取 masks.xyn）——匹配仍按外接矩形 IoU，叠加图与 `box` 字段绘/存多边形本体 |
-| GET | `/api/v1/runs/{uid}/analysis/cell?gt=&pred=` | 混淆矩阵点格下钻：该 (GT,Pred) 格逐框记录（UI 眼睛按钮据此渲染**格内聚焦叠加**——该图只画本格记录，按格缓存于 analysis/overlays_cells/，随重算失效） |
+| GET | `/api/v1/runs/{uid}/analysis/cell?gt=&pred=` | 混淆矩阵点格筛选：该 (GT,Pred) 格逐框记录（UI 明细表点格后整表切换为此数据；眼睛按钮据此渲染**格内聚焦叠加**——该图只画本格记录，按格缓存于 analysis/overlays_cells/，随重算失效） |
 | POST | `/api/v1/runs/{uid}/analysis/export` | 导出 FN/FP 改标清单 markdown 至 Run 目录 |
 | POST | `/api/v1/runs/{uid}/test-infer` | 训后试跑（M8 05）：body `{image, conf?, iou?}`；image 支持单图/图片目录（递归取前 30 张，响应附 `dir_total` 供截断提示）/视频（抽帧）；按需导出 ONNX 缓存 + 叠框图 |
 | GET | `/api/v1/model-library` | 模型库目录视图（M8 07）：items[{name,size_mb,mtime,run_uid,verified,is_latest}] |

@@ -604,7 +604,7 @@ def _cm_coord(r) -> tuple[str, str]:
 
 
 def get_error_analysis(manager, uid: str) -> dict | None:
-    """读错误分析（M8）：summary.json + DB 逐框记录聚合（最差榜 / 混淆矩阵）。"""
+    """读错误分析（M8）：summary.json + DB 逐框记录聚合（逐图错误明细 / 混淆矩阵）。"""
     from visiontrainer.db.models import Run, RunSampleError
 
     with manager.Session() as s:
@@ -620,14 +620,15 @@ def get_error_analysis(manager, uid: str) -> dict | None:
 
     classes = (data.get("summary") or {}).get("classes") or []
     overlays_dir = Path(run_dir) / "analysis" / "overlays"
-    # 最差样本榜（错框数降序，附叠加图路径）
+    # 逐图错误明细：全部含逐框记录的 val 图（错框数降序；2026-10-29 用户反馈不再截断 Top10）
     per_img: dict[str, dict] = {}
     for r in rows:
         e = per_img.setdefault(r.image, {"image": r.image, "fp": 0, "fn": 0, "confusion": 0, "tp": 0})
         if r.kind in ("fp", "fn", "confusion", "tp"):
             e[r.kind] += 1
-    worst = sorted(per_img.values(), key=lambda e: -(e["fp"] + e["fn"] + e["confusion"]))[:10]
-    for e in worst:
+    per_image = sorted(per_img.values(),
+                       key=lambda e: (-(e["fp"] + e["fn"] + e["confusion"]), e["image"]))
+    for e in per_image:
         e["score"] = e["fp"] + e["fn"] + e["confusion"]
         cand = overlays_dir / f"{Path(e['image']).stem}.jpg"
         e["overlay"] = str(cand) if cand.exists() else None
@@ -640,7 +641,7 @@ def get_error_analysis(manager, uid: str) -> dict | None:
         if g in idx and p in idx:
             matrix[idx[g]][idx[p]] += 1
     return {"run_uid": uid, "summary": data.get("summary"), "sweep": data.get("sweep"),
-            "worst": worst, "matrix": {"axis": axis, "cells": matrix},
+            "per_image": per_image, "matrix": {"axis": axis, "cells": matrix},
             "n_records": len(rows)}
 
 

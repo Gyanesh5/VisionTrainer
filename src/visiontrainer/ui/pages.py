@@ -2027,6 +2027,9 @@ document.addEventListener('scroll', function(e){
                                     ui.notify(f"导出失败：{exc}", type="negative")
 
                             def _show_overlay(e_img: str, e_overlay: str, e_score: dict) -> None:
+                                if not e_overlay:
+                                    ui.notify("叠加图缺失（分析时渲染失败）", type="warning")
+                                    return
                                 _zoomable_image_dialog(
                                     e_overlay,
                                     f"{Path(e_img).name} · 错框 {e_score['score']}"
@@ -2039,8 +2042,8 @@ document.addEventListener('scroll', function(e){
                                 _lbl = ui.label("best.pt 对 val 集逐图推理，逐框记 TP/FP/FN——回答「错在哪」"
                                                 ).classes("text-xs opacity-50")
                                 with _lbl:
-                                    ui.tooltip("低置信度全量采集 + IoU 贪心匹配；产出最差样本榜 / "
-                                               "GT-Pred 叠加大图 / 混淆矩阵下钻 / FN·FP 改标清单")
+                                    ui.tooltip("低置信度全量采集 + IoU 贪心匹配；产出逐图错误明细 / "
+                                               "GT-Pred 叠加大图 / 混淆矩阵点格筛选 / FN·FP 改标清单")
                                 with ui.row().classes("items-center gap-2"):
                                     ea_conf = _labeled("conf", ui.number, w="w-36", label_w="w-10",
                                                        value=0.25, min=0.01, max=1.0, step=0.05)
@@ -2089,106 +2092,151 @@ document.addEventListener('scroll', function(e){
                                         ui.echart(_threshold_options(sw)).classes("w-full h-52")
                                     with ui.column().classes("flex-1 min-w-[18rem]"):
                                         with ui.label("混淆矩阵").classes("text-xs font-semibold opacity-70"):
-                                            ui.tooltip("行=GT · 列=Pred · 含背景；点格下钻样本")
+                                            ui.tooltip("行=GT · 列=Pred · 含背景；点格筛选下方明细表")
                                         cm_axis = (analysis.get("matrix") or {}).get("axis") or []
                                         cm_chart = ui.echart(_confusion_options(analysis.get("matrix") or {})
                                                              ).classes("w-full h-56")
-                                        # 下钻样本列表在图下方（点格填入；空 column 无高度不占位）
-                                        cell_box = ui.column().classes("w-full")
 
-                                        def _on_cm_cell(e, _axis=cm_axis, _uid=uid) -> None:
-                                            v = getattr(e, "value", None)
-                                            if not isinstance(v, (list, tuple)) or len(v) < 2:
+                                # 错误明细表（唯一一张表，两态）：默认全部 val 图逐图统计，
+                                # 点混淆矩阵格切换为该格逐框记录（2026-10-29 用户反馈：两表合一）
+                                err_state = {"cell": None}
+                                err_head = ui.row().classes("w-full items-center gap-2 flex-wrap")
+                                err_box = ui.column().classes("w-full")
+                                _KIND_BADGE = {"tp": ("TP", "green"), "fp": ("FP", "red"),
+                                               "fn": ("FN", "orange"), "confusion": ("混淆", "purple")}
+                                _OPS_SLOT = (
+                                    '<q-td :props="props">'
+                                    '<q-btn flat dense round size=xs color=blue icon="visibility" '
+                                    '@click="() => $parent.$emit(\'view\', props.row)" />'
+                                    '<q-btn flat dense round size=xs color=blue icon="open_in_new" '
+                                    '@click="() => $parent.$emit(\'open_xal\', props.row)" />'
+                                    "</q-td>")
+
+                                def _show_cell(en: dict, cell: tuple[str, str]) -> None:
+                                    """只画本格记录的聚焦叠加——看图若带全图全量标注，
+                                    本格错在哪反而被淹没（2026-10-29 用户反馈）。"""
+                                    try:
+                                        ov = tsvc.analysis_cell_overlay(
+                                            get_manager(), uid, cell[0], cell[1], en["image"])
+                                    except Exception as exc:  # noqa: BLE001
+                                        ui.notify(f"叠加渲染失败：{exc}", type="negative")
+                                        return
+                                    _zoomable_image_dialog(
+                                        ov,
+                                        f"{Path(en['image']).name} · {cell[0]}→{cell[1]}（仅本格）",
+                                        on_open=lambda: _open_in_xal(en["image"]),
+                                        hint="只画本格记录：绿 = GT｜红 = Pred（类别 + 置信度），"
+                                             "其余标注不显示 · 滚轮缩放，放大后拖动平移")
+
+                                def _clear_cell_filter() -> None:
+                                    err_state["cell"] = None
+                                    _render_err_table()
+
+                                def _render_err_table() -> None:
+                                    err_head.clear()
+                                    err_box.clear()
+                                    cell = err_state["cell"]
+                                    entries = (tsvc.analysis_cell(get_manager(), uid, *cell)
+                                               if cell else None)
+                                    with err_head:
+                                        if cell is None:
+                                            with ui.label("样本错误明细 · "
+                                                          f"{len(analysis.get('per_image') or [])} 张"
+                                                          ).classes("text-xs font-semibold"):
+                                                ui.tooltip("全部含逐框记录的 val 图，错框数降序；"
+                                                           "点混淆矩阵格切到该格逐框记录")
+                                        else:
+                                            ui.icon("filter_alt", size="14px").classes("opacity-50")
+                                            ui.label(f"格 [{cell[0]} → {cell[1]}] · {len(entries)} 条"
+                                                     ).classes("text-xs font-semibold")
+                                            ui.button("清除筛选", icon="close",
+                                                      on_click=_clear_cell_filter
+                                                      ).props("flat dense size=xs")
+                                        exb = ui.button("导出 FN/FP 改标清单", icon="fact_check",
+                                                        on_click=lambda: do_export_list(uid))
+                                        exb.props("outline dense")
+                                    with err_box:
+                                        if cell is None:
+                                            wrows = analysis.get("per_image") or []
+                                            if not wrows:
+                                                ui.label("（val 集无逐框记录——没有可复盘样本）").classes(
+                                                    "text-xs opacity-40")
                                                 return
-                                            try:
-                                                gt, pred = _axis[int(v[1])], _axis[int(v[0])]
-                                            except (IndexError, TypeError):
-                                                return
-                                            entries = tsvc.analysis_cell(get_manager(), _uid, gt, pred)
+                                            tbl = ui.table(columns=[
+                                                {"name": "name", "label": "图片", "field": "name",
+                                                 "align": "left", "style": "white-space:normal",
+                                                 "sortable": True},
+                                                {"name": "score", "label": "错框", "field": "score",
+                                                 "sortable": True},
+                                                {"name": "fp", "label": "FP", "field": "fp",
+                                                 "sortable": True},
+                                                {"name": "fn", "label": "FN", "field": "fn",
+                                                 "sortable": True},
+                                                {"name": "cf", "label": "混淆", "field": "confusion",
+                                                 "sortable": True},
+                                                {"name": "tp", "label": "TP", "field": "tp",
+                                                 "sortable": True},
+                                                {"name": "ops", "label": "操作", "field": "ops"},
+                                            ], rows=[{**w, "name": Path(w["image"]).name}
+                                                     for w in wrows],
+                                                row_key="image").classes("text-xs")
+                                            _style_table(tbl)
+                                            tbl.add_slot("body-cell-ops", _OPS_SLOT)
+                                            tbl.on("view", lambda e: _show_overlay(
+                                                e.args["image"], e.args.get("overlay"), e.args))
+                                            tbl.on("open_xal", lambda e: _open_in_xal(e.args["image"]))
+                                        elif entries:
+                                            rows = []
+                                            for i, en in enumerate(entries):
+                                                kl, kc = _KIND_BADGE.get(en["kind"], (en["kind"], "grey"))
+                                                rows.append({
+                                                    "rid": i, "image": en["image"],
+                                                    "name": Path(en["image"]).name,
+                                                    "kind_label": kl, "kind_color": kc,
+                                                    "cls_gt": en["cls_gt"] or "—",
+                                                    "cls_pred": en["cls_pred"] or "—",
+                                                    "conf": round(en["conf"], 2)
+                                                    if en.get("conf") is not None else "—",
+                                                    "iou": round(en["iou"], 2) if en.get("iou") else "—"})
+                                            tbl = ui.table(columns=[
+                                                {"name": "name", "label": "图片", "field": "name",
+                                                 "align": "left", "style": "white-space:normal",
+                                                 "sortable": True},
+                                                {"name": "kind", "label": "类型", "field": "kind_label",
+                                                 "sortable": True},
+                                                {"name": "cls_gt", "label": "GT 类", "field": "cls_gt",
+                                                 "sortable": True},
+                                                {"name": "cls_pred", "label": "Pred 类", "field": "cls_pred",
+                                                 "sortable": True},
+                                                {"name": "conf", "label": "conf", "field": "conf",
+                                                 "sortable": True},
+                                                {"name": "iou", "label": "IoU", "field": "iou",
+                                                 "sortable": True},
+                                                {"name": "ops", "label": "操作", "field": "ops"},
+                                            ], rows=rows, row_key="rid").classes("text-xs")
+                                            _style_table(tbl)
+                                            tbl.add_slot("body-cell-kind", _badge_cell("kind"))
+                                            tbl.add_slot("body-cell-ops", _OPS_SLOT)
+                                            tbl.on("view", lambda e, _c=cell: _show_cell(e.args, _c))
+                                            tbl.on("open_xal", lambda e: _open_in_xal(e.args["image"]))
+                                        else:
+                                            ui.label("（该格无逐框记录）").classes("text-xs opacity-40")
 
-                                            def _show_cell(en: dict, _gt: str = gt, _pred: str = pred,
-                                                           _uid2: str = _uid) -> None:
-                                                """只画本格记录的聚焦叠加——下钻看图若带全图全量
-                                                标注，本格错在哪反而被淹没（2026-10-29 用户反馈）。"""
-                                                try:
-                                                    ov = tsvc.analysis_cell_overlay(
-                                                        get_manager(), _uid2, _gt, _pred, en["image"])
-                                                except Exception as exc:  # noqa: BLE001
-                                                    ui.notify(f"叠加渲染失败：{exc}", type="negative")
-                                                    return
-                                                _zoomable_image_dialog(
-                                                    ov,
-                                                    f"{Path(en['image']).name} · {_gt}→{_pred}（仅本格）",
-                                                    on_open=lambda p=en["image"]: _open_in_xal(p),
-                                                    hint="只画本格记录：绿 = GT｜红 = Pred（类别 + 置信度），"
-                                                         "其余标注不显示 · 滚轮缩放，放大后拖动平移")
+                                def _on_cm_cell(e, _axis=cm_axis) -> None:
+                                    v = getattr(e, "value", None)
+                                    if not isinstance(v, (list, tuple)) or len(v) < 2:
+                                        return
+                                    try:
+                                        gt, pred = _axis[int(v[1])], _axis[int(v[0])]
+                                    except (IndexError, TypeError):
+                                        return
+                                    err_state["cell"] = (gt, pred)
+                                    _render_err_table()
+                                    # 明细表在矩阵下方：点格后滚动跟随到表头，点格即见结果
+                                    _scroll_to(err_head)
 
-                                            cell_box.clear()
-                                            with cell_box:
-                                                with ui.row().classes("w-full items-center gap-2 q-mt-xs"):
-                                                    ui.icon("filter_alt", size="14px").classes("opacity-50")
-                                                    ui.label(f"格 [{gt} → {pred}]：{len(entries)} 条"
-                                                             ).classes("text-xs font-semibold")
-                                                for en in entries[:15]:
-                                                    with ui.row().classes("w-full items-center gap-2"):
-                                                        ui.badge(en["kind"].upper()).props("square").style(
-                                                            "font-size:9px")
-                                                        ui.label(Path(en["image"]).name).classes(
-                                                            "text-[11px] flex-1 min-w-0 truncate")
-                                                        if en.get("conf") is not None:
-                                                            ui.label(f"conf {en['conf']:.2f}").classes(
-                                                                "text-[10px] opacity-50")
-                                                        vb = ui.button(icon="visibility",
-                                                                       on_click=lambda en=en: _show_cell(en)
-                                                                       ).props("flat dense round size=xs color=blue")
-                                                        with vb:
-                                                            ui.tooltip("只看本格标注的叠加大图")
-                                                        ob = ui.button(icon="open_in_new",
-                                                                       on_click=lambda p=en["image"]: _open_in_xal(p)
-                                                                       ).props("flat dense round size=xs color=blue")
-                                                        with ob:
-                                                            ui.tooltip("在 X-AnyLabeling 中打开")
-                                                if len(entries) > 15:
-                                                    ui.label(f"… 其余 {len(entries) - 15} 条见导出清单"
-                                                             ).classes("text-[11px] opacity-40")
-                                            # 下钻列表在图下方：滚动跟随到列表头，点格即见结果
-                                            _scroll_to(cell_box)
-
-                                        cm_chart.on_point_click(_on_cm_cell)
-                                with ui.row().classes("w-full items-center gap-2 flex-wrap"):
-                                    with ui.label("最差样本榜").classes("text-xs font-semibold"):
-                                        ui.tooltip("错框数降序；点「查看」看叠加图")
-                                    exb = ui.button("导出 FN/FP 改标清单", icon="fact_check",
-                                                    on_click=lambda: do_export_list(uid))
-                                    exb.props("outline dense")
-                                wrows = []
-                                for w in (analysis.get("worst") or []):
-                                    if not w.get("score"):
-                                        continue
-                                    wrows.append(w)
-                                if wrows:
-                                    wtbl = ui.table(columns=[
-                                        {"name": "name", "label": "图片", "field": "name", "align": "left",
-                                         "style": "white-space:normal"},
-                                        {"name": "score", "label": "错框", "field": "score"},
-                                        {"name": "fp", "label": "FP", "field": "fp"},
-                                        {"name": "fn", "label": "FN", "field": "fn"},
-                                        {"name": "cf", "label": "混淆", "field": "confusion"},
-                                        {"name": "ops", "label": "操作", "field": "ops"},
-                                    ], rows=[{**w, "name": Path(w["image"]).name} for w in wrows],
-                                        row_key="image").classes("text-xs")
-                                    _style_table(wtbl)
-                                    wtbl.add_slot("body-cell-ops", (
-                                        '<q-td :props="props">'
-                                        '<q-btn flat dense round size=xs color=blue icon="visibility" '
-                                        '@click="() => $parent.$emit(\'view\', props.row)" />'
-                                        "</q-td>"))
-                                    wtbl.on("view", lambda e: _show_overlay(
-                                        e.args["image"], e.args["overlay"],
-                                        {"score": e.args["score"], "fp": e.args["fp"],
-                                         "fn": e.args["fn"], "confusion": e.args["confusion"]}))
-                                else:
-                                    ui.label("（val 集零错框——没有需要复盘的样本）").classes("text-xs opacity-40")
+                                cm_chart.on_point_click(_on_cm_cell)
+                                _render_err_table()
                                 ex_list = ui.column().classes("w-full")
 
                     # ── M8 05：试跑（ONNX 叠框）
