@@ -10,8 +10,10 @@
 import asyncio
 import json
 from base64 import b64encode
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from zlib import crc32
 
 from fastapi import Request
 from nicegui import app, ui
@@ -611,20 +613,25 @@ def _review_label_json(label_path: str | None) -> dict:
         return {}
 
 
-def _review_label_colors(j: dict) -> dict[str, str]:
-    """label → 色板色（shapes 首现序分配）——叠加与图例共用，两处同色。"""
+def _review_label_colors(j: dict, classes: list[str] | None = None) -> dict[str, str]:
+    """label → 色板色。有类别表按类别序分配——同名类全数据集同色，跨图/跨视图
+    （画布叠加、大图弹层、图例色卡）不随本图 shapes 出现顺序漂移；未登记类别
+    按名散列兜底，同样跨图确定。叠加与图例共用，两处同色。"""
+    order = {c: i for i, c in enumerate(classes)} if classes else {}
     colors: dict[str, str] = {}
     for s in j.get("shapes") or []:
         lbl = str(s.get("label", "?"))
         if lbl not in colors:
-            colors[lbl] = _REVIEW_PALETTE[len(colors) % len(_REVIEW_PALETTE)]
+            colors[lbl] = _REVIEW_PALETTE[
+                (order[lbl] if lbl in order else crc32(lbl.encode())) % len(_REVIEW_PALETTE)]
     return colors
 
 
-def _review_shape_legend(label_path: str | None) -> list[tuple[str, int, str]]:
+def _review_shape_legend(label_path: str | None,
+                         classes: list[str] | None = None) -> list[tuple[str, int, str]]:
     """本图标注图例（label × 数量 × 色板色）——审查检查器行/色卡。"""
     j = _review_label_json(label_path)
-    colors = _review_label_colors(j)
+    colors = _review_label_colors(j, classes)
     counts: dict[str, int] = {}
     for s in j.get("shapes") or []:
         lbl = str(s.get("label", "?"))
@@ -632,13 +639,14 @@ def _review_shape_legend(label_path: str | None) -> list[tuple[str, int, str]]:
     return [(lbl, n, colors[lbl]) for lbl, n in counts.items()]
 
 
-def _review_overlay_svg(label_path: str | None) -> str:
+def _review_overlay_svg(label_path: str | None,
+                        classes: list[str] | None = None) -> str:
     """labelme shapes → 百分比坐标 SVG（标注审查大图叠加；多边形直绘、两点外接框、类别着色）。"""
     j = _review_label_json(label_path)
     if not j:
         return ""
     w, h = j.get("imageWidth") or 1, j.get("imageHeight") or 1
-    colors = _review_label_colors(j)
+    colors = _review_label_colors(j, classes)
     parts: list[str] = []
     for s in j.get("shapes") or []:
         label = str(s.get("label", "?"))
@@ -694,18 +702,22 @@ _VT: dict = {}  # 大图查看器单例槽（holder 元素 + Viewer 实例 id）
 
 
 def _zoomable_image_dialog(path: str, title: str, on_open=None, hint: str | None = None,
-                           overlay_svg: str | None = None) -> None:
+                           overlay_svg: str | None = None,
+                           follow: Callable[[], None] | None = None) -> None:
     """全站大图查看（Viewer.js，本地 vendor 的现成轮子）：按住拖动平移、滚轮以光标
     为锚缩放、双击步进、键盘、全屏、旋转全内置；图片走签名原图路由（box=0），
     浏览器缓存 + 304 再验证。on_open（XAL 修复）经事件桥接成工具栏「✏」自定义按钮。
     overlay_svg（审查标注层）：客户端把 SVG 画进原图再交给 Viewer——标注成为图像
     的一部分，放大/平移/旋转下天然对齐，零同步代码；SVG 以 Blob 加载须带 xmlns。
+    follow：查看器开着时外部状态前进的同步回调（审查键盘流判定/切图后弹层换到
+    新当前图——由调用方先查 isShown 再调）；每次打开重置，别处开新图自然切断旧跟随。
     生命周期用库的自然形态：全局单例，开新图先 destroy 旧实例（彼时已隐藏，安全），
     关闭交给 Viewer 自己 hide——不挂 hidden/destroy 钩子（其动画状态机在本页环境
     下 close 路径 transitionend 不可靠，钩子式清理实测会卡容器，2026-10-24）。"""
     old = _VT.pop("holder", None)
     if old is not None and not getattr(old, "is_deleted", False):
         old.delete()  # 旧隐藏 img（其 Viewer 容器由 JS 侧单例 destroy 收走）
+    _VT["follow"] = follow
     url = thumbs.thumb_url(path, 0)
     holder = ui.element("img").props(f'src="{url}"').style("display:none")
     _VT["holder"] = holder
@@ -756,14 +768,16 @@ def _zoomable_image_dialog(path: str, title: str, on_open=None, hint: str | None
 
 
 def _img_name_link(path: str, text: str | None = None, cls: str = "",
-                   overlay_label: str | None = None) -> None:
+                   overlay_label: str | None = None,
+                   overlay_classes: list[str] | None = None) -> None:
     """图像文件名 → 点击查看大图（全站惯例：出现图像文件名即可点，滚轮缩放）。
-    overlay_label：labelme JSON 路径——弹层把标注合成进原图（读不到自动退化纯原图）。"""
+    overlay_label：labelme JSON 路径——弹层把标注合成进原图（读不到自动退化纯原图）。
+    overlay_classes：数据集类别序——着色与审查画布/图例同源（同名类同色）。"""
     label = text or Path(path).name
     el = ui.label(label).classes(f"cursor-pointer hover:underline {cls or 'text-[11px] opacity-70'}")
     el.on("click", lambda _e: _zoomable_image_dialog(
         path, label,
-        overlay_svg=_review_overlay_svg(overlay_label) if overlay_label else None))
+        overlay_svg=_review_overlay_svg(overlay_label, overlay_classes) if overlay_label else None))
     with el:
         ui.tooltip("点击查看大图")
 
@@ -922,13 +936,37 @@ def _list_subdirs(path: str) -> dict:
             "dirs": [{"name": d.name, "full": str(d)} for d in entries if d.is_dir()]}
 
 
+def _labeled(label: str, factory: Callable, *args, w: str = "w-full", label_w: str = "w-24",
+             **kwargs) -> object:
+    """经典表单排版：左侧固定宽右对齐标签 + 右侧控件占满余宽（Quasar 无原生左标签，自排）。
+
+    Args:
+        label: 左侧标签文本（保持简短，长说明进 tooltip）。
+        factory: 控件构造器（ui.input / ui.number / ui.select），不再接收 Quasar label。
+        w: 整个「标签+控件」行的宽度类；一行多字段时传 flex-1。
+        label_w: 标签列宽度类；同一表单内统一，控件列才对齐。
+        *args: 透传给 factory 的位置参数（如 ui.select 的 options）。
+        **kwargs: 透传给 factory 的关键字参数。
+
+    Returns:
+        控件元素（调用方在其上继续 .props / 挂 tooltip / on_value_change）。
+    """
+    with ui.row().classes(f"{w} items-center gap-2 no-wrap"):
+        ui.label(label).classes(f"{label_w} text-xs text-right opacity-70 shrink-0")
+        # 控件风格全站统一：紧凑边框盒（dense outlined）——下划线式与盒式混排
+        # 在控件密集的表单里高度/基线不齐，显杂乱（2026-10-29 用户反馈）
+        widget = factory(*args, **kwargs).classes("flex-1 min-w-0").props("dense outlined")
+    return widget
+
+
 def _path_picker_field(label: str, placeholder: str = "", value: str = ""):
     """路径输入框 + 浏览按钮：对话框内逐级浏览服务端目录，确认后回填。返回输入框元素。
 
     （2026-09-17 用户诉求：手输绝对路径易错，要可视化选择；单机自用=浏览器即本机。）
     """
     with ui.row().classes("w-full items-center gap-1"):
-        inp = ui.input(label, value=value, placeholder=placeholder).classes("flex-1")
+        inp = _labeled(label, ui.input, w="flex-1", label_w="w-20",
+                       value=value, placeholder=placeholder)
         browse = ui.button(icon="folder_open").props("flat dense round")
         with browse:
             ui.tooltip("浏览选择目录（系统文件选择框；不可用时用内置浏览器）")
@@ -1230,12 +1268,12 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
                 options.update({True: "开", False: "关"})
             if "options" in e:
                 options.update({o: o for o in e["options"]})
-            w = ui.select(options, value="", label=short).classes("flex-1")
+            w = _labeled(short, ui.select, options, value="", w="flex-1")
         elif t in ("int", "float"):
-            w = ui.number(short, precision=0 if t == "int" else None,
-                          step=0.0001 if t == "float" else 1).classes("flex-1")
+            w = _labeled(short, ui.number, precision=0 if t == "int" else None,
+                         step=0.0001 if t == "float" else 1, w="flex-1")
         else:  # 自由字符串 / freeze 的 int|list
-            w = ui.input(short).classes("flex-1")
+            w = _labeled(short, ui.input, w="flex-1")
         with w:
             ui.tooltip(full)
         if not is_select:
@@ -1276,7 +1314,8 @@ def _render_param_groups(on_change=None) -> tuple[dict, object]:
 
     # ── 搜索框 + 已修改徽章 + 一键复位（M7 表单工程学）
     with ui.row().classes("w-full items-center gap-2"):
-        search = ui.input("搜索参数（名称或中文说明）").props("dense outlined clearable").classes("flex-1")
+        search = _labeled("搜索参数", ui.input, w="flex-1", label_w="w-16",
+                          placeholder="名称或中文说明").props("dense outlined clearable")
         with search:
             ui.tooltip("示例：搜「学习率」「mosaic」「角度」即时过滤全部 64 项")
         counter = ui.badge("已修改 0 项").props("outline color=grey").style("font-size:10px")
@@ -2117,13 +2156,13 @@ document.addEventListener('scroll', function(e){
                     # ── M8 05：试跑（ONNX 叠框）
                     if run["status"] == "done":
                         with ui.expansion("试跑", icon="science").classes("w-full"):
-                            ti_path = ui.input("本地图片/目录/视频绝对路径",
+                            ti_path = _labeled("本地路径", ui.input,
                                                value=state.get("ti_path", ""),
                                                placeholder="/path/to/img.jpg · 目录（递归取前 30 张）· 视频（抽帧）"
-                                               ).classes("w-full")
+                                               )
                             with ui.row().classes("w-full items-center gap-2"):
-                                ti_conf = ui.number("conf", value=0.25, min=0.01, max=1.0,
-                                                    step=0.05).classes("w-28")
+                                ti_conf = _labeled("conf", ui.number, w="w-36", label_w="w-10",
+                                                   value=0.25, min=0.01, max=1.0, step=0.05)
                                 tib = ui.button("试跑", icon="play_circle",
                                                 on_click=lambda: do_test_infer()).props("unelevated dense")
                                 ui.label("首次会先导出 ONNX 缓存于 Run 目录（不动模型库）"
@@ -2381,15 +2420,15 @@ document.addEventListener('scroll', function(e){
                     _form_section("dataset", "数据与模型")
                     managed = {d["name"]: d["name"] for d in ds.list_datasets()
                                if d["form"] == "managed" and d.get("active_manifest")}
-                    c_ds = ui.select(managed or {"": "（暂无托管数据集，请先到数据集页导入）"}, label="数据集",
-                                     with_input=True).classes("w-full")
-                    c_model = ui.input("基模型", value="yolo11n").classes("w-full")
+                    c_ds = _labeled("数据集", ui.select, label_w="w-16",
+                                    options=managed or {"": "（暂无托管数据集，请先到数据集页导入）"},
+                                    with_input=True)
+                    c_model = _labeled("基模型", ui.input, label_w="w-16", value="yolo11n")
                     with c_model:
                         ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
                     c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
-                    c_name = ui.input("任务名", value="",
-                                      placeholder="数据集_基模型_日期_时间（随数据集/基模型自动生成，可改）"
-                                      ).classes("w-full")
+                    c_name = _labeled("任务名", ui.input, label_w="w-16", value="",
+                                      placeholder="数据集_基模型_日期_时间（随数据集/基模型自动生成，可改）")
 
                     def _auto_name() -> str:
                         return (f"{c_ds.value or '数据集'}_{(c_model.value or '').strip() or '模型'}"
@@ -2404,12 +2443,12 @@ document.addEventListener('scroll', function(e){
                             _name_state["auto"] = _auto_name()
                             c_name.set_value(_name_state["auto"])
                     # ── M8 08：预设实验模板（批量建 Task；与手填二选一）
-                    c_tpl = ui.select({
+                    c_tpl = _labeled("实验模板", ui.select, label_w="w-16", value="", options={
                         "": "（不使用模板 · 手动填参）",
                         "size": "尺寸扫描——imgsz 640/800/960 一键三任务",
                         "lr": "lr 扫描——lr0 0.005/0.01/0.02 一键三任务",
                         "few": "少样本快训——10 epoch · 30% 数据采样",
-                    }, value="", label="实验模板").classes("w-full")
+                    })
                     tpl_preview = ui.label("选择模板后预览").classes(
                         "text-[11px] opacity-55")
 
@@ -2484,12 +2523,15 @@ document.addEventListener('scroll', function(e){
                     # ── 分区 2：训练核心
                     _form_section("speed", "训练核心")
                     with ui.row().classes("w-full"):
-                        c_epochs = ui.number("epochs", value=50, precision=0, min=1, step=1).classes("flex-1")
-                        c_imgsz = ui.select({320: "320", 416: "416", 640: "640", 800: "800",
-                                             1024: "1024", 1280: "1280"}, value=640,
-                                            label="imgsz", with_input=True).classes("flex-1")
-                        c_batch = ui.select({-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
-                                            value=16, label="batch", with_input=True).classes("flex-1")
+                        c_epochs = _labeled("epochs", ui.number, w="flex-1", label_w="w-16",
+                                            value=50, precision=0, min=1, step=1)
+                        c_imgsz = _labeled("imgsz", ui.select, w="flex-1", label_w="w-16",
+                                           options={320: "320", 416: "416", 640: "640", 800: "800",
+                                                    1024: "1024", 1280: "1280"}, value=640,
+                                           with_input=True)
+                        c_batch = _labeled("batch", ui.select, w="flex-1", label_w="w-16",
+                                           options={-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
+                                           value=16, with_input=True)
                     # 时长预估（M7 02 号票）：历史 Run 中位耗时 × epochs
                     try:
                         est_rate = tsvc.estimate_training_time(get_manager())
@@ -2509,11 +2551,15 @@ document.addEventListener('scroll', function(e){
                     c_epochs.on_value_change(lambda _e: _upd_est())
                     _upd_est()
                     with ui.row().classes("w-full"):
-                        c_device = ui.input("device", value="0", placeholder="0 / 0,1 / cpu").classes("flex-1")
-                        c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
+                        c_device = _labeled("device", ui.input, w="flex-1", label_w="w-16",
+                                            value="0", placeholder="0 / 0,1 / cpu")
+                        c_workers = _labeled("workers", ui.number, w="flex-1", label_w="w-16",
+                                             value=8, precision=0, min=0)
                     with ui.row().classes("w-full"):
-                        c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
-                        c_patience = ui.number("patience", precision=0, min=1).classes("flex-1")
+                        c_seed = _labeled("seed", ui.number, w="flex-1", label_w="w-16",
+                                          value=42, precision=0)
+                        c_patience = _labeled("patience", ui.number, w="flex-1", label_w="w-16",
+                                              precision=0, min=1)
                         with c_patience.add_slot("append"):
                             ui.label("默认 100").classes("text-xs opacity-40").style("white-space: nowrap")
 
@@ -2985,7 +3031,8 @@ document.addEventListener('scroll', function(e){
                                 with ui.row().classes("w-full items-center gap-1"):
                                     _img_name_link(p["image"], Path(p["image"]).name + det,
                                                    "text-[11px] opacity-70 break-all flex-1 min-w-0",
-                                                   overlay_label=str(Path(p["image"]).with_suffix(".json")))
+                                                   overlay_label=str(Path(p["image"]).with_suffix(".json")),
+                                                   overlay_classes=meta.get("classes"))
                                     cp = ui.button(icon="content_copy",
                                                    on_click=lambda img=p["image"]: _copy_path(img)).props(
                                         "flat dense round size=xs color=grey")
@@ -3116,6 +3163,9 @@ document.addEventListener('scroll', function(e){
                     return
                 rst = {"items": queue["items"], "filter": "pending", "i": 0, "reject_open": False}
                 zh_state = {"pending": "待审", "approved": "通过", "rejected": "驳回", "skipped": "跳过"}
+                # 面板重建即宣告旧 follow 闭包过期（其 rst 已换新代）——先摘除，
+                # 免得旧代大图把键盘流同步到上一代状态上
+                _VT.pop("follow", None)
 
                 # 快捷键帮助浮层（maskflow-ui-study §5.1「按钮即文档」配套：? 呼出、键位与按钮互文）
                 with ui.dialog() as help_dlg, ui.card().classes("gap-2 max-w-md w-full"):
@@ -3129,7 +3179,8 @@ document.addEventListener('scroll', function(e){
                                   + " / ".join(f"{k_}={r}" for k_, r in enumerate(REVIEW_REASONS, 1)) + "）"),
                             ("s", "跳过（计入完成度，不算通过；「只训已审」开关不收录）"),
                             ("← / →", "上一张 / 下一张（在当前过滤子集内循环）"),
-                            ("单击图片", "弹出大图查看器——滚轮缩放 / 拖拽平移 / 1:1 / 旋转 / 全屏（Esc 退出）"),
+                            ("单击图片", "弹出大图查看器——滚轮缩放 / 拖拽平移 / 1:1 / 旋转 / 全屏"
+                                          "（Esc 退出；大图开着时 n/b/s/←/→ 同步生效，大图跟到新图）"),
                             ("点缩略图", "胶片条直达指定图"),
                         ]:
                             with ui.row().classes("items-start gap-3 w-full"):
@@ -3155,6 +3206,34 @@ document.addEventListener('scroll', function(e){
                     # scrollTop、MutationObserver 在新条带挂载后恢复——不依赖
                     # Python 消息顺序（run_javascript 夹缝方案实测 save 晚于 patch 执行，弃）
 
+                def _open_cur_zoom() -> None:
+                    """当前图的全屏大图（Viewer.js）——follow 自注册：键盘流前进时
+                    弹层换到新当前图（是否还开着由 _zoom_follow 先查 isShown）。"""
+                    fl = _fl()
+                    if not fl:
+                        return
+                    c = fl[rst["i"]]
+                    _zoomable_image_dialog(
+                        c["image"], Path(c["image"]).name,
+                        hint="滚轮缩放 · 按住拖拽平移 · 1:1 看像素 · 旋转 / 全屏 · Esc 退出",
+                        overlay_svg=_review_overlay_svg(c["label"], meta.get("classes")),
+                        follow=_open_cur_zoom)
+
+                async def _zoom_follow() -> None:
+                    """键盘流切图/判定后：全屏大图若还开着（Viewer.isShown，客户端
+                    实况查询）就同步换到新当前图；已关闭则不惊动——不能凭 Python 侧
+                    状态判断（无可靠 hidden 钩子），更不能无条件重开（会把用户关掉
+                    的弹层又弹回来）。"""
+                    if not _VT.get("follow"):
+                        return
+                    try:
+                        shown = await ui.run_javascript(
+                            "return !!(window.__vtV&&window.__vtV.isShown);")
+                    except Exception:  # noqa: BLE001 — 客户端断线等异常下放弃同步，判定流不受影响
+                        return
+                    if shown:
+                        _VT["follow"]()
+
                 async def _decide(state_: str, reason: str = "") -> None:
                     fl = _fl()
                     if not fl:
@@ -3175,6 +3254,7 @@ document.addEventListener('scroll', function(e){
                     rst["reject_open"] = False
                     _go(1)
                     _view.refresh()
+                    await _zoom_follow()
 
                 async def _exclude_cur() -> None:
                     fl = _fl()
@@ -3353,16 +3433,13 @@ document.addEventListener('scroll', function(e){
                                     "vt-pz w-full h-[62vh] rounded border border-white/10")
                                 # 单击画布 → 弹 Viewer.js 大图（原生 click 事件桥，全站惯例）；
                                 # 标注 SVG 一并传入，弹层内画进原图，放大看细节时框同步可见
-                                canvas.on("click", lambda: _zoomable_image_dialog(
-                                    cur["image"], Path(cur["image"]).name,
-                                    hint="滚轮缩放 · 按住拖拽平移 · 1:1 看像素 · 旋转 / 全屏 · Esc 退出",
-                                    overlay_svg=_review_overlay_svg(cur["label"])))
+                                canvas.on("click", lambda _e: _open_cur_zoom())
                                 with canvas:
                                     stage = ui.element("div").classes(
                                         "vt-pz-stage relative w-full")
                                     with stage:
                                         ui.image(url).classes("w-full block")
-                                        ui.html(_review_overlay_svg(cur["label"])).classes(
+                                        ui.html(_review_overlay_svg(cur["label"], meta.get("classes"))).classes(
                                             "absolute inset-0")
                             with ui.row().classes("items-center gap-1 flex-wrap max-w-full"):
                                 eff = cur["effective"]
@@ -3381,10 +3458,10 @@ document.addEventListener('scroll', function(e){
                                 ui.label(f"{cur['split']} · {cur['name']}"
                                          ).classes("text-[10px] opacity-60 truncate max-w-72")
                                 ui.label(f"{rst['i'] + 1}/{len(fl)}").classes("text-[10px] opacity-40")
-                            # 本图标注图例（色卡与画布叠加同一分配序——检查器行模式）
+                            # 本图标注图例（色卡与画布叠加同按类别序着色——检查器行模式）
                             with ui.row().classes("items-center gap-2 flex-wrap max-w-full"):
                                 ui.label("本图标注").classes("text-[10px] opacity-45")
-                                legend = _review_shape_legend(cur["label"])
+                                legend = _review_shape_legend(cur["label"], meta.get("classes"))
                                 if not legend:
                                     ui.label("无标注 shapes（负样本路径）").classes("text-[10px] opacity-40")
                                 for lbl, n, color in legend:
@@ -3454,9 +3531,11 @@ document.addEventListener('scroll', function(e){
                     if code == "ArrowRight":
                         _go(1)
                         _view.refresh()
+                        await _zoom_follow()
                     elif code == "ArrowLeft":
                         _go(-1)
                         _view.refresh()
+                        await _zoom_follow()
                     elif code == "KeyN":
                         await _decide("approved")
                     elif code == "KeyS":
@@ -4151,13 +4230,16 @@ document.addEventListener('scroll', function(e){
             # ── 导入（带实时进度）
             with ui.dialog() as import_dialog, ui.card().classes("w-[28rem] gap-2"):
                 ui.label("导入 X-AnyLabeling 标注目录").classes("font-bold")
-                i_name = ui.input("数据集名")
-                i_task = ui.select({k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
-                                   value="detect", label="任务类型")
-                i_src = _path_picker_field("标注目录绝对路径", placeholder="/home/you/annotations")
+                i_name = _labeled("数据集名", ui.input, label_w="w-20")
+                i_task = _labeled("任务类型", ui.select, label_w="w-20",
+                                  options={k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
+                                  value="detect")
+                i_src = _path_picker_field("标注目录", placeholder="/home/you/annotations")
                 with ui.row().classes("w-full"):
-                    i_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05).classes("flex-1")
-                    i_seed = ui.number("随机种子", value=42, precision=0).classes("flex-1")
+                    i_ratio = _labeled("train 比例", ui.number, w="flex-1", label_w="w-20",
+                                       value=0.8, min=0.05, max=0.95, step=0.05)
+                    i_seed = _labeled("随机种子", ui.number, w="flex-1", label_w="w-20",
+                                      value=42, precision=0)
                 i_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
                 i_progress = {"phase": "", "cur": 0, "total": 0, "active": False}
                 prog_label = ui.label("").classes("text-xs opacity-70").set_visibility(False)
@@ -4240,9 +4322,10 @@ document.addEventListener('scroll', function(e){
 
             with ui.dialog() as external_dialog, ui.card().classes("w-96 gap-2"):
                 ui.label("注册外部标准 YOLO 目录（只读）").classes("font-bold")
-                e_name = ui.input("数据集名")
-                e_task = ui.select({k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
-                                   value="detect", label="任务类型")
+                e_name = _labeled("数据集名", ui.input, label_w="w-20")
+                e_task = _labeled("任务类型", ui.select, label_w="w-20",
+                                  options={k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
+                                  value="detect")
                 e_path = _path_picker_field("目录绝对路径", placeholder="…/yolo_ds（需含 data.yaml 或 labels/）")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=external_dialog.close).props("flat")
@@ -4265,8 +4348,9 @@ document.addEventListener('scroll', function(e){
             with ui.dialog() as resplit_dialog, ui.card().classes("w-96 gap-2"):
                 r_title = ui.label("重新切分").classes("font-bold")
                 ui.label("生成新清单版本并切换活跃；各轮 val 恒定可比。").classes("text-xs opacity-60")
-                r_ratio = ui.number("train 比例", value=0.8, min=0.05, max=0.95, step=0.05)
-                r_seed = ui.number("随机种子", value=42, precision=0)
+                r_ratio = _labeled("train 比例", ui.number, label_w="w-20",
+                                   value=0.8, min=0.05, max=0.95, step=0.05)
+                r_seed = _labeled("随机种子", ui.number, label_w="w-20", value=42, precision=0)
                 r_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
                 # M9 03「只训已审」：数据集级开关的落点（默认关；重切生成只含通过图的新清单）
                 r_appr = ui.checkbox("只训已审").tooltip(
@@ -4493,17 +4577,18 @@ document.addEventListener('scroll', function(e){
                 if not keys:
                     return
                 with ui.row().classes("w-full items-center gap-2 flex-wrap q-mt-sm"):
-                    ui.label("超参对比").classes("text-sm font-semibold")
-                    base_sel = ui.select({t["id"]: t["name"][:16] for t in items},
-                                         value=cmp_state["baseline"] or items[0]["id"],
-                                         label="基准", on_change=lambda e: (cmp_state.update(baseline=e.value),
-                                                                            _render_compare()))
-                    base_sel.props("dense outlined size=sm").classes("w-52")
+                    with ui.label("超参对比").classes("text-sm font-semibold"):
+                        ui.tooltip("与基准任务不同的值标红")
+                    base_sel = _labeled("基准", ui.select, w="w-52", label_w="w-10",
+                                        options={t["id"]: t["name"][:16] for t in items},
+                                        value=cmp_state["baseline"] or items[0]["id"],
+                                        on_change=lambda e: (cmp_state.update(baseline=e.value),
+                                                              _render_compare()))
+                    base_sel.props("size=sm")
                     odsw = ui.switch("只看差异", value=cmp_state["only_diff_rows"],
                                      on_change=lambda e: (cmp_state.update(only_diff_rows=e.value),
                                                           _render_compare()))
                     odsw.props("dense size=sm")
-                    ui.label("红 = 与基准不同").classes("text-[11px] text-red-500 opacity-80")
                 baseline_id = cmp_state["baseline"] or items[0]["id"]
                 ordered = sorted(items, key=lambda t: (t["id"] != baseline_id,))
 
@@ -4547,7 +4632,8 @@ document.addEventListener('scroll', function(e){
                 ui.label("任务内跨轮对比与复盘报告").classes("text-base font-semibold")
             ui.separator().classes("q-mt-xs q-mb-sm")
             done_tasks = {t["id"]: t["name"] for t in tasks}
-            task_sel = ui.select(done_tasks, label="选择任务", with_input=True).classes("w-72")
+            task_sel = _labeled("选择任务", ui.select, w="w-72", label_w="w-16",
+                                options=done_tasks, with_input=True)
             detail = ui.column().classes("w-full")
 
             def render_rounds() -> None:
@@ -5256,25 +5342,33 @@ document.addEventListener('scroll', function(e){
                     ui.label("LLM 逐轮调参 · 每轮结束人工审批放行").classes("text-[10px] opacity-40")
                 with ui.column().classes("q-px-md max-h-[64vh] overflow-y-auto gap-1 pb-2"):
                     _form_section("dataset", "数据与模型")
-                    c_name = ui.input("任务名", value=f"调参-{datetime.now():%m%d-%H%M}").classes("w-full")
+                    c_name = _labeled("任务名", ui.input, label_w="w-16",
+                                      value=f"调参-{datetime.now():%m%d-%H%M}")
                     managed = {d["name"]: d["name"] for d in ds.list_datasets()
                                if d["form"] == "managed" and d.get("active_manifest")}
-                    c_ds = ui.select(managed or {"": "（暂无托管数据集，请先到数据集页导入）"}, label="数据集",
-                                     with_input=True).classes("w-full")
-                    c_model = ui.input("基模型", value="yolo11n").classes("w-full")
+                    c_ds = _labeled("数据集", ui.select, label_w="w-16",
+                                    options=managed or {"": "（暂无托管数据集，请先到数据集页导入）"},
+                                    with_input=True)
+                    c_model = _labeled("基模型", ui.input, label_w="w-16", value="yolo11n")
                     with c_model:
                         ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
                     c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
-                    c_obj = ui.select(["提升小目标召回", "压制误检", "收敛过拟合", "提升整体 mAP"],
-                                      label="优化目标（可输入自定义）", with_input=True).classes("w-full")
+                    c_obj = _labeled("优化目标", ui.select, label_w="w-16",
+                                     options=["提升小目标召回", "压制误检", "收敛过拟合", "提升整体 mAP"],
+                                     with_input=True)
+                    with c_obj:
+                        ui.tooltip("可直接输入自定义目标")
                     _form_section("speed", "每轮训练核心")
                     with ui.row().classes("w-full"):
-                        c_epochs = ui.number("epochs", value=50, precision=0, min=1).classes("flex-1")
-                        c_imgsz = ui.select({320: "320", 416: "416", 640: "640", 800: "800",
-                                             1024: "1024", 1280: "1280"}, value=640,
-                                            label="imgsz", with_input=True).classes("flex-1")
-                        c_batch = ui.select({-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
-                                            value=16, label="batch", with_input=True).classes("flex-1")
+                        c_epochs = _labeled("epochs", ui.number, w="flex-1", label_w="w-16",
+                                            value=50, precision=0, min=1)
+                        c_imgsz = _labeled("imgsz", ui.select, w="flex-1", label_w="w-16",
+                                           options={320: "320", 416: "416", 640: "640", 800: "800",
+                                                    1024: "1024", 1280: "1280"}, value=640,
+                                           with_input=True)
+                        c_batch = _labeled("batch", ui.select, w="flex-1", label_w="w-16",
+                                           options={-1: "自动", 8: "8", 16: "16", 32: "32", 64: "64"},
+                                           value=16, with_input=True)
                     # 每轮时长预估（M7 02 号票）
                     try:
                         a_est = tsvc.estimate_training_time(get_manager())
@@ -5294,19 +5388,25 @@ document.addEventListener('scroll', function(e){
                     c_epochs.on_value_change(lambda _e: _a_upd_est())
                     _a_upd_est()
                     with ui.row().classes("w-full"):
-                        c_device = ui.input("device", value="0", placeholder="0 / 0,1 / cpu").classes("flex-1")
-                        c_workers = ui.number("workers", value=8, precision=0, min=0).classes("flex-1")
+                        c_device = _labeled("device", ui.input, w="flex-1", label_w="w-16",
+                                            value="0", placeholder="0 / 0,1 / cpu")
+                        c_workers = _labeled("workers", ui.number, w="flex-1", label_w="w-16",
+                                             value=8, precision=0, min=0)
                     with ui.row().classes("w-full"):
-                        c_seed = ui.number("seed", value=42, precision=0).classes("flex-1")
-                        c_patience = ui.number("patience", precision=0, min=1).classes("flex-1")
+                        c_seed = _labeled("seed", ui.number, w="flex-1", label_w="w-16",
+                                          value=42, precision=0)
+                        c_patience = _labeled("patience", ui.number, w="flex-1", label_w="w-16",
+                                              precision=0, min=1)
                         with c_patience.add_slot("append"):
                             ui.label("默认 100").classes("text-xs opacity-40").style("white-space: nowrap")
 
                     _form_section("smart_toy", "调参循环")
                     with ui.row().classes("w-full"):
-                        c_rounds = ui.number("最大轮数", value=5, precision=0, min=1).classes("flex-1")
-                        c_approval = ui.select({"manual": "每轮人工审批", "auto": "自动直通"},
-                                               value="manual", label="审批模式").classes("flex-1")
+                        c_rounds = _labeled("最大轮数", ui.number, w="flex-1", label_w="w-16",
+                                            value=5, precision=0, min=1)
+                        c_approval = _labeled("审批模式", ui.select, w="flex-1", label_w="w-16",
+                                              options={"manual": "每轮人工审批", "auto": "自动直通"},
+                                              value="manual")
                     c_prune = ui.switch("烂轮早停",
                                         value=bool(load_config().get("agent", {}).get("prune_enabled", True)))
                     with c_prune:
@@ -5450,8 +5550,12 @@ document.addEventListener('scroll', function(e){
                 ui.label("Agent 调参（LLM）").classes("font-semibold")
                 ui.label("保存后立即生效（下一次调用读取新值）；测试连通性前请先保存。"
                          "密钥只存本地 config.toml，不进 git。").classes("text-xs opacity-50")
-                l_base = ui.input("base_url（OpenAI 兼容端点）", value=str(llm.get("base_url", ""))).classes("w-full")
-                l_key = ui.input("api_key", value=str(llm.get("api_key", ""))).props("type=password").classes("w-full")
+                l_base = _labeled("base_url", ui.input, label_w="w-24",
+                                  value=str(llm.get("base_url", "")))
+                with l_base:
+                    ui.tooltip("OpenAI 兼容端点")
+                l_key = _labeled("api_key", ui.input, label_w="w-24",
+                                 value=str(llm.get("api_key", ""))).props("type=password")
                 key_shown = {"on": False}
 
                 def _toggle_key() -> None:
@@ -5460,7 +5564,8 @@ document.addEventListener('scroll', function(e){
 
                 with l_key.add_slot("append"):
                     ui.button(icon="visibility", on_click=_toggle_key).props("flat dense round")
-                l_model = ui.input("model", value=str(llm.get("model", ""))).classes("w-full")
+                l_model = _labeled("model", ui.input, label_w="w-24",
+                                   value=str(llm.get("model", "")))
                 with ui.row().classes("gap-2"):
                     llm_btn = ui.button("保存", icon="save", on_click=lambda: do_save_llm())
                     test_btn = ui.button("测试 LLM 连通性", icon="wifi", on_click=lambda: do_test())
@@ -5498,8 +5603,10 @@ document.addEventListener('scroll', function(e){
             with ui.card().classes("w-full gap-2"):
                 ui.label("训练与目录").classes("font-semibold")
                 ui.label("保存后需重启平台生效（训练子进程与目录根在启动时装配）。").classes("text-xs opacity-50")
-                t_python = ui.input("训练 python（torch/ultralytics 所在环境）",
-                                    value=str(training.get("python", ""))).classes("w-full")
+                t_python = _labeled("训练 python", ui.input, label_w="w-24",
+                                    value=str(training.get("python", "")))
+                with t_python:
+                    ui.tooltip("torch/ultralytics 所在环境")
                 def _dir_input_open(field) -> None:
                     p = str(field.value or "").strip()
                     if not p:
@@ -5507,23 +5614,29 @@ document.addEventListener('scroll', function(e){
                         return
                     _open_dir(str(Path(p).expanduser()))
 
-                t_ds = ui.input("数据集根目录 datasets_dir",
-                                value=str(training.get("datasets_dir", "~/visiontrainer/datasets"))).classes("w-full")
+                t_ds = _labeled("数据集根目录", ui.input, label_w="w-24",
+                                value=str(training.get("datasets_dir", "~/visiontrainer/datasets")))
+                with t_ds:
+                    ui.tooltip("datasets_dir")
                 with t_ds.add_slot("append"):
                     _b = ui.button(icon="folder_open", on_click=lambda: _dir_input_open(t_ds)).props(
                         "flat dense round size=sm color=primary")
                     with _b:
                         ui.tooltip("在文件管理器中打开")
-                t_runs = ui.input("产物根目录 runs_dir",
-                                  value=str(training.get("runs_dir", "~/visiontrainer/runs"))).classes("w-full")
+                t_runs = _labeled("产物根目录", ui.input, label_w="w-24",
+                                  value=str(training.get("runs_dir", "~/visiontrainer/runs")))
+                with t_runs:
+                    ui.tooltip("runs_dir")
                 with t_runs.add_slot("append"):
                     _b = ui.button(icon="folder_open", on_click=lambda: _dir_input_open(t_runs)).props(
                         "flat dense round size=sm color=primary")
                     with _b:
                         ui.tooltip("在文件管理器中打开")
-                t_lib = ui.input("模型库目录 model_lib_dir",
-                                 value=str(training.get("model_lib_dir", "~/Documents/x-anylabeling-models"))).classes(
-                    "w-full")
+                t_lib = _labeled("模型库目录", ui.input, label_w="w-24",
+                                 value=str(training.get("model_lib_dir",
+                                                        "~/Documents/x-anylabeling-models")))
+                with t_lib:
+                    ui.tooltip("model_lib_dir")
                 with t_lib.add_slot("append"):
                     _b = ui.button(icon="folder_open", on_click=lambda: _dir_input_open(t_lib)).props(
                         "flat dense round size=sm color=primary")
@@ -5560,9 +5673,11 @@ document.addEventListener('scroll', function(e){
                                     value=bool(cfg.get("agent", {}).get("prune_enabled", True)))
                 with a_prune:
                     ui.tooltip("新轮主指标显著劣化时优雅终止并记 pruned（阈值 δ 见下方）")
-                a_delta = ui.number("剪枝阈值 δ（主指标低于历史同期中位数的差值）",
-                                    value=float(cfg.get("agent", {}).get("prune_delta", 0.05)),
-                                    min=0.001, max=1.0, step=0.005).classes("w-64")
+                a_delta = _labeled("剪枝阈值 δ", ui.number, w="w-64", label_w="w-24",
+                                   value=float(cfg.get("agent", {}).get("prune_delta", 0.05)),
+                                   min=0.001, max=1.0, step=0.005)
+                with a_delta:
+                    ui.tooltip("主指标低于历史同期中位数的差值")
                 misc_btn = ui.button("保存", icon="save", on_click=lambda: do_save_misc())
 
                 async def do_save_misc() -> None:
@@ -5579,10 +5694,11 @@ document.addEventListener('scroll', function(e){
             with ui.card().classes("w-full gap-2"):
                 ui.label("服务（server）").classes("font-semibold")
                 ui.label("修改监听地址/端口后需重启平台。").classes("text-xs opacity-50")
-                s_host = ui.input("监听地址 host",
-                                  value=str(cfg.get("server", {}).get("host", "127.0.0.1"))).classes("w-full")
-                s_port = ui.number("端口 port", value=int(cfg.get("server", {}).get("port", 8600)),
-                                   min=1, max=65535).classes("w-full")
+                s_host = _labeled("监听地址 host", ui.input, label_w="w-24",
+                                  value=str(cfg.get("server", {}).get("host", "127.0.0.1")))
+                s_port = _labeled("端口 port", ui.number, label_w="w-24",
+                                  value=int(cfg.get("server", {}).get("port", 8600)),
+                                  min=1, max=65535)
                 srv_btn = ui.button("保存", icon="save", on_click=lambda: do_save_server())
 
                 async def do_save_server() -> None:
