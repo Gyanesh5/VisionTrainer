@@ -2185,20 +2185,41 @@ document.addEventListener('scroll', function(e){
                                                 ui.label(f"目录共 {r['dir_total']} 张，按名称排序试跑前 "
                                                          f"{len(r['images'])} 张").classes(
                                                     "text-xs text-amber-600")
-                                            for im in r.get("images") or []:
-                                                ui.label(Path(im["image"]).name +
-                                                         (f" · 视频帧（共 {len(r['images'])} 帧网格）"
-                                                          if im.get("source") == "frame" else "")
-                                                         ).classes("text-xs font-semibold mt-1")
-                                                _local_image(im["annotated"])
-                                                boxes = im.get("boxes") or []
-                                                if boxes:
-                                                    with ui.row().classes("flex-wrap gap-1"):
-                                                        for b in boxes[:10]:
-                                                            ui.chip(f"{b['cls']} {b['conf']}").props(
-                                                                "dense square outline").classes("text-[11px]")
-                                                else:
-                                                    ui.label("（无检出框）").classes("text-xs opacity-40")
+                                            # 缩略图网格 + 点开大图（签名 512 档，同产物区；
+                                            # base64 全量内联挤 websocket——叠框 jpg 单张数 MB）
+                                            with ui.element("div").classes(
+                                                    "grid grid-cols-2 xl:grid-cols-3 gap-3 w-full"):
+                                                for im in r.get("images") or []:
+                                                    boxes = im.get("boxes") or []
+                                                    with ui.card().classes("w-full gap-1 q-pa-sm items-stretch"):
+                                                        with ui.row().classes(
+                                                                "w-full items-center gap-1 no-wrap"):
+                                                            ui.label(Path(im["image"]).name +
+                                                                     (" · 视频帧" if im.get("source") == "frame"
+                                                                      else "")).classes(
+                                                                "text-xs font-semibold opacity-75 "
+                                                                "flex-1 min-w-0 truncate")
+                                                            ui.label(f"{len(boxes)} 检出").classes(
+                                                                "text-[10px] opacity-45 shrink-0")
+                                                        img = ui.element("img").props(
+                                                            f'src="{thumbs.thumb_url(im["annotated"], 512)}" '
+                                                            'decoding="async"'
+                                                        ).classes("cursor-zoom-in w-full rounded-lg")
+                                                        img.on("click",
+                                                               lambda _e, _a=im["annotated"],
+                                                               _n=Path(im["image"]).name:
+                                                               _zoomable_image_dialog(_a, _n))
+                                                        with img:
+                                                            ui.tooltip("点击查看大图")
+                                                        if boxes:
+                                                            with ui.row().classes("flex-wrap gap-1"):
+                                                                for b in boxes[:10]:
+                                                                    ui.chip(f"{b['cls']} {b['conf']}").props(
+                                                                        "dense square outline").classes(
+                                                                        "text-[11px]")
+                                                        else:
+                                                            ui.label("（无检出框）").classes(
+                                                                "text-xs opacity-40")
                                             ui.label(f"ONNX：{r.get('onnx')}").classes(
                                                 "text-[11px] opacity-45 break-all")
                                     except Exception as exc:  # noqa: BLE001
