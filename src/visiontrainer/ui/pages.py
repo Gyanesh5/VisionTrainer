@@ -65,6 +65,16 @@ PROBLEM_ZH = {
     "keypoints_invalid": "关键点坐标为负",
 }
 
+# 恒可自动修复的问题码；obb_invalid 须靠 fixable 标记区分乱序（可修）与退化（人工）
+AUTO_FIX_CODES = ("out_of_bounds", "polygon_invalid", "keypoints_invalid", "orphan_json")
+
+
+def _split_fixable(problems: list[dict]) -> tuple[list[dict], list[dict]]:
+    """(可自动修复, 需人工)——旧报告无 fixable 标记时四类恒可修按码认，obb 只认标记。"""
+    fix = [p for p in problems if p.get("fixable") or p["code"] in AUTO_FIX_CODES]
+    manual = [p for p in problems if not (p.get("fixable") or p["code"] in AUTO_FIX_CODES)]
+    return fix, manual
+
 CHART_PALETTE = ["#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#dc2626", "#0891b2"]
 CHART_TEXT = "#94a3b8"  # 深浅两色模式下均可读的中性文字色
 
@@ -2954,7 +2964,10 @@ document.addEventListener('scroll', function(e){
                     warnings: list[str] = []
                     if meta.get("form") == "managed":
                         if lv and not lv.get("ok"):
-                            blockers.append(f"校验未过（{len(lv.get('problems') or [])} 个问题）——去数据集页查看修法指引")
+                            _fx, manual = _split_fixable(lv.get("problems") or [])
+                            if manual:  # 可自动修复项不算红灯（ADR 0005），概览有一键修复出口
+                                blockers.append(f"校验未过（需人工 {len(manual)} 项）——"
+                                                "去数据集页处理；可自动修复项在概览「一键修复」")
                         if meta.get("drops_pending_ack"):
                             blockers.append("丢弃清单待确认——去数据集页确认后再训练")
                         if prog.get("total") and \
@@ -3288,7 +3301,7 @@ document.addEventListener('scroll', function(e){
                 grouped: dict[str, list[dict]] = {}
                 for p in problems:
                     grouped.setdefault(p["code"], []).append(p)
-                with ui.expansion(f"问题明细（{len(problems)} 条）",
+                with ui.expansion(f"需人工处理（{len(problems)} 条）——错误/原因/修法见下",
                                   icon="build").classes("w-full text-xs"):
                     for code, items in grouped.items():
                         g = GUIDANCE.get(code) or {}
@@ -3329,20 +3342,67 @@ document.addEventListener('scroll', function(e){
             def _render_overview(meta: dict) -> None:
                 lv = meta.get("last_validation") or {}
                 if lv:
-                    counts = lv.get("counts") or {}
-                    n_problems = sum(counts.values())
+                    fixable, manual = _split_fixable(lv.get("problems") or [])
+                    seg = (f" · 需人工 {len(manual)} 项" if manual else "") + (
+                        f" · 可自动修复 {len(fixable)} 项" if fixable else "")
                     with ui.row().classes("w-full gap-2 items-start"):
                         ui.label("上次校验").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
                         with ui.column().classes("flex-1 min-w-0 gap-1"):
                             ui.label(f"{_fmt_ts(lv['checked_at'])} · 共 {lv['total_images']} 图"
                                      f"（标注 {lv['labeled']} / 负样本 {lv['background']}）"
-                                     f"{' · 问题 ' + str(n_problems) + ' 个' if n_problems else ' · 无问题'}"
-                                     ).classes("text-xs opacity-70")
-                            if lv.get("problems"):
-                                _render_problems(lv["problems"], meta.get("classes"))
+                                     f"{seg or ' · 无问题'}").classes("text-xs opacity-70")
+                            if manual:
+                                _render_problems(manual, meta.get("classes"))
                             elif lv.get("background"):
                                 ui.label("负样本（无标注图）是设计内行为：只进 train 充当背景，不算错误。"
                                          ).classes("text-[11px] opacity-45")
+                            if fixable:
+                                # 一键修复（ADR 0005）：平台可确定性处理项——按钮常驻琥珀条，
+                                # 执行前确认门复述计数，执行后自动重转派生并重校验
+                                by_code: dict[str, int] = {}
+                                for p in fixable:
+                                    by_code[p["code"]] = by_code.get(p["code"], 0) + 1
+                                parts = " · ".join(
+                                    f"{PROBLEM_ZH.get(c, c).split('（')[0]} {n}" for c, n in by_code.items())
+
+                                async def _do_autofix(ds_name: str, dlg) -> None:
+                                    dlg.close()
+                                    try:
+                                        r = await _io(ds.auto_fix_dataset, ds_name)
+                                        v = r.get("validation") or {}
+                                        msg = f"已修复 {r.get('fixed_files', 0)} 个标注文件"
+                                        if r.get("orphans_moved"):
+                                            msg += f"、隔离孤儿 {r['orphans_moved']} 个"
+                                        msg += f"——重校验{'通过' if v.get('ok') else '仍有需人工项'}"
+                                        ui.notify(msg, type="positive" if v.get("ok") else "warning")
+                                    except Exception as exc:  # noqa: BLE001
+                                        ui.notify(f"修复失败：{exc}", type="negative")
+                                    refresh()
+                                    render_detail()
+
+                                with ui.dialog() as autofix_dlg, ui.card().classes(
+                                        "w-full max-w-lg gap-2"):
+                                    ui.label("一键修复").classes("text-sm font-semibold")
+                                    ui.label(f"将修复 {len(fixable)} 项（{parts}）写回源标注文件——"
+                                             "原文件备份到数据集 autofix/ 目录、已有审查判定保留、"
+                                             "完成后自动重转派生并重新校验。").classes(
+                                        "text-xs opacity-70")
+                                    with ui.row().classes("w-full justify-end gap-2"):
+                                        ui.button("取消", on_click=autofix_dlg.close).props("flat")
+                                        ui.button("执行修复", icon="auto_fix_high",
+                                                  on_click=lambda: _do_autofix(meta["name"],
+                                                                               autofix_dlg)).props(
+                                            "unelevated color=warning")
+
+                                with ui.row().classes(
+                                        "w-full items-center gap-2 q-pa-sm rounded").style(
+                                        "background:rgba(245,158,11,.12)"):
+                                    ui.icon("auto_fix_high").classes("text-amber-400")
+                                    ui.label(f"可自动修复 {len(fixable)} 项：{parts}").classes(
+                                        "text-xs flex-1 min-w-0")
+                                    ui.button("一键修复", icon="auto_fix_high",
+                                              on_click=autofix_dlg.open).props(
+                                        "dense unelevated color=warning")
                 # M9 确认门：转换丢弃未确认 → 横幅 + 确认按钮（确认前提交训练被拒）
                 if meta.get("drops_pending_ack"):
                     n_drop = (lv.get("drops") or

@@ -267,6 +267,16 @@ def drops_ack(name: str):
         return _error_response(exc)
 
 
+@router.post("/{name}/autofix")
+def auto_fix(name: str):
+    """一键自动修复（ADR 0005）：越界钳制/多边形 make_valid/旋转框重排/关键点钳制/孤儿隔离
+    写回源标注（原文件备份 + 审查判定继承），随后增量重转派生并全量重校验。"""
+    try:
+        return svc.auto_fix_dataset(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
 @router.delete("/{name}")
 def delete_dataset(name: str):
     # delete_files 查询参数（api.md）对数据集域含义为：清理平台创建的目录。

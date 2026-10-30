@@ -12,6 +12,12 @@ M9 01 号票变更：
 - 标注级 lint：坐标越界（±1% 容差）/极小框警告/孤儿 JSON/多边形有效性（shapely）/
   obb 四点退化·凸性/关键点负坐标——按 task_type 启用；
 - 健康 meta 的 objs 升级带像素 w/h（小目标占比原料）。
+
+自动修复口径（2026-10-30 用户裁决，ADR 0005）：
+- 平台可确定性修复的问题带 fixable=True 标记（越界钳制/多边形 make_valid/旋转框凸包
+  重排/关键点负坐标钳制/孤儿隔离/segment 误画折线闭合），由 autofix 一键写回源标注 JSON；
+- ok 只看不可自动修复项——fixable 问题不再让校验结果为「有问题」（修不修一句话的事，
+  不配占用红灯）；报告 problems 仍完整保留（零静默守恒不变）。
 """
 
 from __future__ import annotations
@@ -58,32 +64,32 @@ GUIDANCE: dict[str, dict[str, str]] = {
     "drop": {
         "error": "标注未进入训练派生（转换丢弃）",
         "cause": "shape 与任务不匹配、类别未登记、几何非法（零面积框/坏圆/点数不足/obb 越界/pose 无框）——明细见每条的 reason",
-        "fix": "在 X-AnyLabeling 中修正该 shape（改形状/类别/补框）或确认有意丢弃后到数据集页「确认接受丢弃」",
+        "fix": "在 X-AnyLabeling 中修正该 shape（改形状/类别/补框）或确认有意丢弃后到数据集页「确认接受丢弃」；segment 里误用折线工具画的封闭形状可「一键修复」闭合成多边形（点不动）",
     },
     "out_of_bounds": {
         "error": "标注坐标越界超出 ±1% 容差",
-        "cause": "框画到图像边界外（缩放/旋转标注常见），转换会按容差裁剪，超容差部分已失真",
-        "fix": "在 X-AnyLabeling 中重新框住目标本体，勿越出画布",
+        "cause": "框画到图像边界外（缩放/旋转标注常见），转换虽按容差裁剪，超容差部分已失真",
+        "fix": "数据集概览「一键修复」自动钳制回画布并写回标注；要求精确贴合目标本体则回 X-AnyLabeling 重框",
     },
     "orphan_json": {
         "error": "孤儿标注：JSON 没有对应图片",
         "cause": "图片被删除/改名，或 JSON 拷贝时带了多余文件",
-        "fix": "找回同名图片，或删除该 JSON（平台不会用它训练）",
+        "fix": "数据集概览「一键修复」自动移入隔离区（不删除、可找回）；或手动找回同名图片",
     },
     "polygon_invalid": {
         "error": "分割多边形无效（自交/重复点/退化环）",
         "cause": "手绘多边形时线条交叉，或自动标注产物畸形",
-        "fix": "在 X-AnyLabeling 中重画该多边形（避免自交）；只报告，不自动修复",
+        "fix": "数据集概览「一键修复」make_valid 自动修复（自交修复后形状可能变形或分裂）；要求贴合原意则回 X-AnyLabeling 重画",
     },
     "obb_invalid": {
         "error": "旋转框无效（四点退化/非凸）",
         "cause": "四角点共线、面积近似零或顶点顺序混乱",
-        "fix": "在 X-AnyLabeling 中重画旋转框，保证四角点顺序正确且不退化",
+        "fix": "顶点乱序可「一键修复」凸包重排；共线/内点退化无法自动修——回 X-AnyLabeling 重画",
     },
     "keypoints_invalid": {
         "error": "关键点坐标为负（画布外）",
         "cause": "关键点拖出画布左/上边界",
-        "fix": "在 X-AnyLabeling 中把关键点拖回画布内",
+        "fix": "数据集概览「一键修复」自动钳回画布内（贴边）",
     },
 }
 
@@ -111,6 +117,43 @@ def _obb_shape_ok(pts: list) -> bool:
         cx, cy = p[(i + 2) % 4]
         crosses.append((bx - ax) * (cy - by) - (by - ay) * (cx - bx))
     return all(v >= 0 for v in crosses) or all(v <= 0 for v in crosses)
+
+
+def obb_hull_reorderable(pts: list) -> bool:
+    """obb 无效但四点处于凸位置（凸包恰为四边形）→ 顶点顺序混乱，凸包环重排可修；
+    共线/零面积/内点（凸包为三角形）不可自动修，仍归人工。lint 的 fixable 判据与
+    autofix 的修复动作共用此谓词，防止两处口径漂移。"""
+    if len(pts) != 4:
+        return False
+    from shapely.geometry import MultiPoint
+
+    try:
+        hull = MultiPoint([(float(x), float(y)) for x, y in pts]).convex_hull
+    except (TypeError, ValueError):
+        return False
+    return hull.geom_type == "Polygon" and len(hull.exterior.coords) == 5
+
+
+def linestrip_closable(pts: list) -> bool:
+    """折线（linestrip）按点序隐式闭合后能构成有面积的多边形 → 误用折线工具画的封闭
+    形状，改 shape_type 即可转换（点一字不动）。两点的 line、闭合后无面积成分（开放
+    裂缝曲线等）不可修，仍归人工。lint 的 fixable 判据与 autofix 的修复动作共用此
+    谓词，防止两处口径漂移。"""
+    if len(pts) < 3:
+        return False
+    from shapely.geometry import Polygon
+    from shapely.validation import make_valid
+
+    try:
+        poly = Polygon(pts)
+        if poly.is_valid:
+            return poly.area > 0
+        geom = make_valid(poly)
+    except (TypeError, ValueError):
+        return False
+    parts = [geom] if geom.geom_type == "Polygon" else [
+        g for g in getattr(geom, "geoms", []) if g.geom_type == "Polygon"]
+    return any(g.area > 0 for g in parts)
 
 
 def list_images(source_dir: Path) -> list[Path]:
@@ -187,7 +230,16 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
             _lines, _has, drops = json_to_yolo_lines(data, task_type, classes)
             for d in drops:
                 entry["problems"].append("drop")
-                problems.append({"image": str(image), "code": "drop", "detail": d})
+                # 误用折线工具画的封闭形状可一键闭合成 polygon（仅 segment——polygon
+                # 只在 seg 模式被转换器接受，detect/obb 翻转了照样丢弃不标可修）
+                fixable = (
+                    task_type == "segment"
+                    and d.get("reason") == "task_mismatch" and d.get("shape_type") == "linestrip"
+                    and 0 <= d.get("index", -1) < len(shapes)
+                    and linestrip_closable(shapes[d["index"]].get("points") or [])
+                )
+                problems.append({"image": str(image), "code": "drop", "detail": d,
+                                 "fixable": fixable})
             for s in shapes:
                 st = s.get("shape_type")
                 box = shape_bbox_px(s)
@@ -197,7 +249,7 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
                             or x1 > (1 + OOB_TOLERANCE) * w or y1 > (1 + OOB_TOLERANCE) * h):
                         entry["problems"].append("out_of_bounds")
                         problems.append({"image": str(image), "code": "out_of_bounds",
-                                         "detail": s.get("label")})
+                                         "detail": s.get("label"), "fixable": True})
                     elif (x1 - x0) < TINY_BOX_PX or (y1 - y0) < TINY_BOX_PX:
                         warnings.append({"image": str(image), "code": "tiny_box",
                                          "detail": s.get("label")})
@@ -208,21 +260,23 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
                         if not _ShPolygon(s["points"]).is_valid:
                             entry["problems"].append("polygon_invalid")
                             problems.append({"image": str(image), "code": "polygon_invalid",
-                                             "detail": s.get("label")})
+                                             "detail": s.get("label"), "fixable": True})
                     except Exception:  # noqa: BLE001 — 坏点交给转换 drops，这里不炸
                         pass
                 if task_type == "obb" and st == "rotation" and len(s.get("points") or []) == 4:
                     if not _obb_shape_ok(s["points"]):
                         entry["problems"].append("obb_invalid")
+                        # 凸位置乱序 → 重排可修；共线/零面积/内点 → 人工重画
                         problems.append({"image": str(image), "code": "obb_invalid",
-                                         "detail": s.get("label")})
+                                         "detail": s.get("label"),
+                                         "fixable": obb_hull_reorderable(s["points"])})
                 if task_type == "pose" and st == "point":
                     try:
                         x, y = s["points"][0]
                         if float(x) < 0 or float(y) < 0:
                             entry["problems"].append("keypoints_invalid")
                             problems.append({"image": str(image), "code": "keypoints_invalid",
-                                             "detail": s.get("label")})
+                                             "detail": s.get("label"), "fixable": True})
                     except (TypeError, ValueError, IndexError):
                         pass
 
@@ -245,7 +299,7 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
     dir_keys = {(Path(e["image"]).parent, Path(e["image"]).stem) for e in entries}
     for j in source_dir.rglob("*.json"):
         if (j.parent, j.stem) not in dir_keys:
-            problems.append({"image": str(j), "code": "orphan_json"})
+            problems.append({"image": str(j), "code": "orphan_json", "fixable": True})
 
     # 图片可解码性：只查扩展名与文件头magic（避免全量解码的性能税；深度解码交给训练侧报错）
     for e in entries:
@@ -282,6 +336,8 @@ def validate_dataset(source_dir: Path, task_type: str, classes: list[str],
                                  "detail": p.split(":", 1)[1]})
 
     drop_count = sum(1 for p in problems if p["code"] == "drop")
+    # fixable 问题不压 ok（ADR 0005：一键可修不配占用红灯）；problems 全量保留守恒账目
+    blocking = [p for p in problems if not p.get("fixable")]
     return {
         "checked_at": datetime.now().isoformat(timespec="seconds"),
         "task_type": task_type,
@@ -304,7 +360,6 @@ def validate_dataset(source_dir: Path, task_type: str, classes: list[str],
             "obb_invalid": sum(1 for p in problems if p["code"] == "obb_invalid"),
             "keypoints_invalid": sum(1 for p in problems if p["code"] == "keypoints_invalid"),
         },
-        "ok": not problems and all(
-            not [p for p in e["problems"] if p != "missing_json"] for e in entries
-        ),  # missing_json = 负样本（设计内），不算问题
+        "fixables": len(problems) - len(blocking),  # 可自动修复项数（概览琥珀区 + 一键修复入口）
+        "ok": not blocking,
     }

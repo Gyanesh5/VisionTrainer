@@ -91,7 +91,8 @@ def test_guidance_covers_all_problem_codes():
                              "polygon_invalid", "obb_invalid", "keypoints_invalid"}
     for code, g in GUIDANCE.items():
         assert all(g.get(k) for k in ("error", "cause", "fix")), f"{code} 缺三行文案之一"
-        assert "X-AnyLabeling" in g["fix"] or "平台" in g["fix"] or "无需修复" in g["fix"], \
+        assert "X-AnyLabeling" in g["fix"] or "平台" in g["fix"] or "无需修复" in g["fix"] \
+            or "「一键修复」" in g["fix"], \
             f"{code} 修法须指向可执行动作"
 
 

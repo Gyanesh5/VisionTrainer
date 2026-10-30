@@ -65,6 +65,14 @@ v1.2 同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/valid
 
 同步语义：切片集是普通托管数据集（`dataset.json` 的 `source_dir` 指向自己目录内的 `source/`，切片图与 labelme JSON 落盘于此），此后的校验/审查/重切分/训练链路零特判；`GET /datasets/{id}` 详情对切片集自动附审查进度摘要。
 
+### 数据集域自动修复（2026-10-30，ADR 0005）
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/v1/datasets/{id}/autofix` | 一键自动修复：越界钳制 / 多边形 make_valid（自交可能分裂）/ 旋转框凸包重排（乱序可修，退化不修）/ 误画折线闭合（仅 segment：linestrip→polygon 点不动）/ 关键点负坐标钳制 / 孤儿标注隔离——写回源标注 JSON（原子写、只动 shapes 几何点与折线的 shape_type，label/flags/审查键等原样保留），原文件备份至 `<数据集目录>/autofix/<时间戳>/backup/`、孤儿移入同目录 `orphans/`（源目录外防重扫）；已有审查判定继承（`vt_review.shapes_hash` 重算）；随后增量重转派生并全量重校验。返回 `{fixed_files, orphans_moved, fixes{码:数}, backup_dir, quarantine_dir, skipped[], relabel, validation{ok,fixables,counts,drops,needs_confirm}}`；外部数据集 → 400 |
+
+同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/validate` 的 validation_report 各 problem 项对可自动修问题带 `fixable: true`（obb_invalid 仅乱序为 true；drop 仅 segment 可闭合折线为 true），报告新增 `fixables` 计数；`ok` 口径改为只看不可自动修复项（fixable 问题不再判「有问题」），problems 全量保留（守恒账目不变）；审查可疑度的「校验」来源不再计 fixable 项。
+
 ### 系统域 M6 增补（启动自检，2026-09-20）
 
 | 方法 | 路径 | 说明 |

@@ -137,9 +137,9 @@ def compute_suspicion(meta: dict, manifest: dict, dataset: str) -> dict[str, dic
         if source not in rec["sources"]:
             rec["sources"].append(source)
 
-    # ① 校验未过（missing_json 是负样本设计内行为，不计）
+    # ① 校验未过（missing_json 负样本设计内不计；fixable 可一键修复项概览有出口，不抢审查前排）
     for p in (meta.get("last_validation") or {}).get("problems") or []:
-        if p.get("code") and p["code"] not in ("missing_json",):
+        if p.get("code") and p["code"] != "missing_json" and not p.get("fixable"):
             _add(p["image"], "校验", SUSP_VALIDATION)
 
     # ② 审计缓存命中（只读缓存，未跑过体检则缺席）
