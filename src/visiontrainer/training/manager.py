@@ -295,6 +295,9 @@ class TrainingManager:
     def _launch_inner(self, run_id: int) -> None:
         with self.Session() as s:
             run = s.get(Run, run_id)
+            if run is None or run.status != "queued":
+                # 选中到启动之间被取消/任务被删：不复活、不启动
+                return
             task = s.get(Task, run.task_id)
             run.status = "running"
             run.run_dir = str(self.s.runs_dir / task.uid / run.uid)
@@ -464,6 +467,12 @@ class TrainingManager:
     def _finalize(self, cur: CurrentRun, ret: int) -> None:
         with self.Session() as s:
             run = s.get(Run, cur.run_id)
+            if run is None:
+                # Run 行已消失（任务被删 / 双 watchdog 收割竞态）：
+                # 进程已收割，无行可落终态——清槽位退出，不炸线程不压队列
+                self.current = None
+                self._publish_queue(s)
+                return
             run.finished_at = _now()
             weights = Path(run.run_dir) / "weights" if run.run_dir else None
             best = weights / "best.pt" if weights else None

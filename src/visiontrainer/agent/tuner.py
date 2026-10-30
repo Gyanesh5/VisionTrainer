@@ -38,10 +38,6 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def _now_dt():
-    return datetime.now()
-
-
 # ---------------------------------------------------------------- 状态存取
 
 def _set_state(s, task, state: str) -> None:
@@ -113,11 +109,17 @@ def approve(manager, task_id: int, action: str) -> dict:
         else:
             raise ValueError(f"未知 action：{action}")
         t.agent_config = cfg
+        queued_uids: list[str] = []
         if action == "stop":
-            for r in s.query(Run).filter(Run.task_id == task_id, Run.status == "queued").all():
-                r.status = "cancelled"
-                r.finished_at = _now_dt()
+            queued_uids = [r.uid for r in
+                           s.query(Run).filter(Run.task_id == task_id, Run.status == "queued").all()]
         s.commit()
+    if queued_uids:  # 走 manager 统一取消链（排队轮的取消要过队列簿记，不直改 DB 状态）
+        for uid in queued_uids:
+            try:
+                manager.request_stop(uid)
+            except KeyError:
+                pass
     return {"task_id": task_id, "action": action}
 
 
@@ -372,8 +374,8 @@ def _wait_run(manager, run_uid: str, stop: threading.Event, timeout: float = 360
             from visiontrainer.db.models import Run
 
             r = s.query(Run).filter(Run.uid == run_uid).one_or_none()
-            if r and r.status not in ("queued", "running", "stopping"):
-                return
+            if r is None or r.status not in ("queued", "running", "stopping"):
+                return  # 终态，或轮所在任务已被删除（记录不存在）
         if prune_state == "wait" and task_id is not None:
             prune_state = _prune_check(manager, run_uid, task_id, prune[1])
         time.sleep(POLL)

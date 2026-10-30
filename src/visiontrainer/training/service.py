@@ -87,33 +87,56 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
 
 
 def list_tasks(manager) -> list[dict]:
-    from visiontrainer.db.models import Run, Task
+    from sqlalchemy import func
+
+    from visiontrainer.db.models import EpochMetric, Run, Task
 
     with manager.Session() as s:
         queued_runs = s.query(Run).filter(Run.status == "queued").order_by(Run.id).all()
-        queue_pos = {r.task_id: i + 1 for i, r in enumerate(queued_runs)}
+        queue_pos = {r.id: i + 1 for i, r in enumerate(queued_runs)}  # Run 级排队位次
+        # 各 Run 的 epoch 记录数一条查完（终态轮「共 N epoch」口径，实际产出而非配置值）
+        epochs_of = dict(s.query(EpochMetric.run_id, func.count())
+                         .group_by(EpochMetric.run_id).all())
         out = []
         for t in s.query(Task).order_by(Task.id.desc()).all():
-            runs = s.query(Run).filter(Run.task_id == t.id).all()
+            runs = s.query(Run).filter(Run.task_id == t.id).order_by(Run.round_no).all()
             best = max((r.primary_metric or 0) for r in runs) if runs else None
-            # 进度摘要：running → epoch x/y；queued → 排队位次；已结束 → epoch 总数（列不留空）
-            progress, prog_frac = "", None
-            if runs:
-                last = max(runs, key=lambda r: r.round_no)
-                if last.status == "running":
-                    pg = manager.current_progress.get(last.id) or {}
+            meta = _dataset_meta_of_task(t)
+            dataset = meta.get("name") or (
+                Path(t.dataset_manifest_path).parent.parent.parent.name
+                if t.dataset_manifest_path else "")
+            # Run 概要列表（训练记录行数据面，2026-10-30 任务列表按数据集分组、每 Run 一行）
+            run_list = []
+            for r in runs:
+                rp, rf = "", None
+                if r.status == "running":
+                    pg = manager.current_progress.get(r.id) or {}
                     ep, ep_total = pg.get("epoch"), pg.get("epochs_total")
-                    progress = f"epoch {ep or 0}/{ep_total or '?'}"
+                    rp = f"epoch {ep or 0}/{ep_total or '?'}"
                     if ep and ep_total:
-                        prog_frac = min(ep / ep_total, 1.0)
-                elif last.status == "queued" and t.id in queue_pos:
-                    progress = f"排队第 {queue_pos[t.id]} 位"
-                elif last.status in ("done", "failed", "cancelled"):
-                    total = (t.train_args or {}).get("epochs")
-                    progress = f"共 {total} epoch" if total else ""
+                        rf = min(ep / ep_total, 1.0)
+                elif r.status == "queued":
+                    rp = f"排队第 {queue_pos[r.id]} 位" if r.id in queue_pos else "排队中"
+                else:
+                    rp = f"共 {epochs_of.get(r.id, 0)} epoch"
+                run_list.append({
+                    "uid": r.uid, "round_no": r.round_no, "status": r.status,
+                    "pruned": bool(r.pruned), "primary_metric": r.primary_metric,
+                    "error": r.error, "epochs": epochs_of.get(r.id, 0),
+                    "progress": rp, "prog_frac": rf,
+                    "started_at": r.started_at.isoformat(timespec="seconds") if r.started_at else None,
+                    "finished_at": r.finished_at.isoformat(timespec="seconds") if r.finished_at else None,
+                    "block_reason": manager.block_reason if r.status == "queued" else None,
+                })
+            # 任务级进度摘要沿用旧口径（最新一轮），供结果复盘/Agent 页等既有消费者
+            progress = run_list[-1]["progress"] if run_list else ""
+            prog_frac = run_list[-1]["prog_frac"] if run_list else None
             out.append({"id": t.id, "uid": t.uid, "name": t.name, "source": t.source,
                         "status": t.status, "base_model": t.base_model,
-                        "runs": len(runs), "primary_metric": best,
+                        "dataset": dataset,
+                        "created_at": t.created_at.isoformat(timespec="seconds") if t.created_at else None,
+                        "runs": run_list, "rounds": len(run_list),
+                        "primary_metric": best,
                         "agent_state": (t.agent_config or {}).get("state"),
                         "progress": progress, "prog_frac": prog_frac,
                         "block_reason": manager.block_reason if t.status == "queued" else None})

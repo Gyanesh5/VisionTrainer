@@ -24,8 +24,8 @@ from ..datasets import service as ds
 from ..training.params import GROUPS as PARAM_GROUPS
 
 NAV_ITEMS = [
-    ("训练", "model_training", "/"),
     ("数据集", "dataset", "/datasets"),
+    ("训练", "model_training", "/"),
     ("结果", "insights", "/results"),
     ("Agent", "smart_toy", "/agent"),
     ("设置", "settings", "/settings"),
@@ -1108,6 +1108,61 @@ def _no_data_cell(icon: str, text: str) -> str:
             f'<div class="text-caption">{text}</div></div>')
 
 
+def _records_body_cell() -> str:
+    """训练记录表整行槽：数据集组头行（colspan 横跨、点击折叠）与 Run 行同表渲染。
+
+    单表保证全部分组列宽天然对齐——此前每组一张表各自排宽、表头逐组重复，
+    上下错位观感杂乱（2026-10-30 用户反馈「不规整」）。组头行的选中过滤
+    （__group 行不进勾选计数/批量删除）与折叠切换在页面侧处理。
+    """
+    return ('<q-tr :props="props" class="cursor-pointer" '
+            '@click="() => $parent.$emit(\'pick\', props.row)">'
+            # ── 组头行：折叠箭头 + 数据集名 + 条数 + 最近活动（右对齐）
+            '<q-td v-if="props.row.__group" colspan="100%" class="bg-grey-2" '
+            'style="border-top:1px solid rgba(0,0,0,.10)">'
+            '<div class="row items-center no-wrap q-py-xs" style="min-height:22px">'
+            '<q-icon :name="props.row.__open ? \'expand_more\' : \'chevron_right\'" '
+            'size="19px" color="grey-7" />'
+            '<q-icon name="dataset" size="15px" color="primary" class="q-ml-xs" />'
+            '<span class="text-weight-medium q-ml-sm text-body2">{{ props.row.name }}</span>'
+            '<span class="text-caption text-grey-7 q-ml-sm">{{ props.row.count }} 条记录</span>'
+            '<q-space />'
+            '<span class="text-caption text-grey-6">{{ props.row.last }}</span>'
+            '</div></q-td>'
+            # ── Run 行：勾选 | 任务 | 轮 | 预训练权重 | 状态 | 进度 | 主指标 | 来源 | 开始时间
+            '<template v-else>'
+            # 勾选格不可带 :props——QTd 见 props 而无 key 时 colsMap 查列落空，
+            # render 直接 return 什么都不画（Quasar 源码行为；裸 q-td 才走普通 td 分支）
+            '<q-td auto-width @click.stop>'
+            '<q-checkbox dense v-model="props.selected" /></q-td>'
+            '<q-td :props="props" key="name">'
+            '<span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'
+            'max-width:22rem;display:inline-block;vertical-align:bottom">'
+            '{{ props.row.name }}</span>'
+            '<q-tooltip>{{ props.row.name }}</q-tooltip></q-td>'
+            '<q-td :props="props" key="round_no">'
+            '<q-badge :label="\'轮 \' + props.row.round_no" color="blue-grey-2" '
+            'text-color="grey-10" class="q-py-xs" style="font-size:10px" /></q-td>'
+            '<q-td :props="props" key="base_model">'
+            '<span class="text-caption text-grey-8">{{ props.row.base_model }}</span></q-td>'
+            '<q-td :props="props" key="status">'
+            '<q-badge :color="props.row.status_color" :label="props.row.status_label" '
+            'class="q-py-xs" style="font-size:10px" /></q-td>'
+            '<q-td :props="props" key="progress">'
+            '<div class="column" style="min-width:96px">'
+            '<q-linear-progress v-if="props.row.prog_frac != null" :value="props.row.prog_frac" '
+            'size="6px" color="blue" track-color="grey-4" class="q-mb-xs" />'
+            '<div class="text-[11px]" style="opacity:.75">'
+            "{{ props.row.progress || props.row.block_reason || '—' }}</div></div></q-td>"
+            '<q-td :props="props" key="metric_str">'
+            '<span class="text-caption text-weight-medium">{{ props.row.metric_str }}</span></q-td>'
+            '<q-td :props="props" key="source">'
+            '<span class="text-caption text-grey-8">{{ props.row.source }}</span></q-td>'
+            '<q-td :props="props" key="started">'
+            '<span class="text-caption text-grey-8">{{ props.row.started }}</span></q-td>'
+            '</template></q-tr>')
+
+
 def _progress_cell() -> str:
     """行内进度槽：运行中 → 进度条 + epoch x/y；排队 → 位次/占用原因。"""
     return ('<q-td :props="props">'
@@ -1774,7 +1829,7 @@ document.addEventListener('scroll', function(e){
         from ..training.manager import get_manager
 
         state: dict = {"selected": None, "open_create": lambda: ui.notify("页面初始化中…"),
-                       "auto": False}
+                       "auto": False, "open_groups": {}}
         bulk_btn_holder: dict = {"btn": None}
         state["open_bulk_del"] = lambda: None
 
@@ -1785,14 +1840,26 @@ document.addEventListener('scroll', function(e){
             ui.button("新建训练", icon="add", on_click=lambda: state["open_create"]()).props("unelevated")
 
         def rows_data() -> list[dict]:
+            """训练记录行：每条 Run 一行（含取消历史），任务新在前、轮次升序。"""
             rows = []
             for t in tsvc.list_tasks(get_manager()):
-                row = dict(t)
-                row["base_model"] = _model_short(t.get("base_model"))
-                row["metric_str"] = _fmt_metric(t.get("primary_metric"))
-                label, color = RUN_STATUS.get(t["status"], (t["status"], "grey"))
-                row["status_label"], row["status_color"] = label, color
-                rows.append(row)
+                base_model = _model_short(t.get("base_model"))
+                created = t.get("created_at") or ""
+                for r in t["runs"]:
+                    label, color = RUN_STATUS.get(r["status"], (r["status"], "grey"))
+                    started = r.get("started_at")
+                    rows.append({
+                        "uid": r["uid"], "task_id": t["id"],
+                        "name": t["name"], "round_no": r["round_no"],
+                        "dataset": t["dataset"], "base_model": base_model,
+                        "status": r["status"], "status_label": label, "status_color": color,
+                        "progress": r["progress"], "prog_frac": r.get("prog_frac"),
+                        "block_reason": r.get("block_reason"),
+                        "metric_str": _fmt_metric(r.get("primary_metric")),
+                        "source": t["source"],
+                        "started": (started or "")[5:16].replace("T", " "),
+                        "sort_time": started or created,
+                    })
             return rows
 
         def body() -> None:
@@ -1828,40 +1895,116 @@ document.addEventListener('scroll', function(e){
 
             ui.timer(0.1, _load_selfcheck, once=True)
 
-            columns = [
-                {"name": "name", "label": "任务", "field": "name", "align": "left",
-                 "style": "white-space:normal"},
+            run_columns = [
+                {"name": "name", "label": "任务", "field": "name", "align": "left"},
+                {"name": "round_no", "label": "轮", "field": "round_no", "align": "center"},
                 {"name": "base_model", "label": "预训练权重", "field": "base_model", "align": "left"},
-                {"name": "status", "label": "状态", "field": "status"},
+                {"name": "status", "label": "状态", "field": "status", "align": "left"},
                 {"name": "progress", "label": "进度", "field": "progress", "align": "left"},
-                {"name": "metric_str", "label": "最优主指标", "field": "metric_str"},
-                {"name": "runs", "label": "轮数", "field": "runs"},
-                {"name": "source", "label": "来源", "field": "source"},
+                {"name": "metric_str", "label": "主指标", "field": "metric_str", "align": "right"},
+                {"name": "source", "label": "来源", "field": "source", "align": "center"},
+                {"name": "started", "label": "开始时间", "field": "started", "align": "left"},
             ]
-            table = ui.table(columns=columns, rows=rows_data(), row_key="uid", selection="multiple",
-                             on_select=lambda e: sync_bulk_btn())
-            _style_table(table)
-            table.add_slot("body-cell-status", _badge_cell("status"))
-            table.add_slot("body-cell-progress", _progress_cell())
-            table.add_slot("no-data", _no_data_cell(
+
+            def select(row) -> None:
+                """选中一条训练记录（Run 行）渲染其详情；防重入守卫防重复重渲染。"""
+                if not isinstance(row, dict) or row.get("__group"):
+                    return
+                if state.get("rendered_id") == row.get("uid"):
+                    return
+                state["rendered_id"] = row["uid"]
+                state["selected"] = row["uid"]
+                render_detail()
+
+            records_tbl = ui.table(columns=run_columns, rows=[], row_key="uid",
+                                   selection="multiple", on_select=lambda e: sync_bulk_btn())
+            _style_table(records_tbl)
+            records_tbl.add_slot("body", _records_body_cell())
+            records_tbl.add_slot("no-data", _no_data_cell(
                 "rocket_launch", "还没有训练任务，点右上「新建训练」开始第一跑"))
+
+            def _selected_runs() -> list[dict]:
+                """勾选的训练记录行（Run 行）——组头行（__group）不进勾选口径。"""
+                return [r for r in (records_tbl.selected or []) if not r.get("__group")]
+
+            def sync_bulk_btn() -> None:
+                n = len(_selected_runs())
+                btn = bulk_btn_holder.get("btn")
+                if btn is not None:
+                    btn.set_text(f"删除所选（{n}）")
+                    btn.set_enabled(n > 0)
+
+            def toggle_group(name: str) -> None:
+                state["open_groups"][name] = not state["open_groups"].get(name, True)
+                # 折叠后不可见的勾选行随即出账——隐藏行不该留在批量口径里；
+                # 直接赋 selected 不触发 on_select，按钮计数须手动同步
+                records_tbl.selected = [r for r in (records_tbl.selected or [])
+                                        if r.get("dataset") != name]
+                sync_bulk_btn()
+                render_rows(state["last_rows"])
+
+            def _on_pick(e) -> None:
+                """行点击（body 槽统一 emit）：组头行 = 折叠切换；Run 行 = 选中滚动看详情。"""
+                row = e.args
+                if not isinstance(row, dict):
+                    return
+                if row.get("__group"):
+                    toggle_group(row["name"])
+                    return
+                select(row)
+                _scroll_to(detail)  # 无条件跟随：重复点同一行也能滚回详情（旧 _on_row_click 语义）
+
+            records_tbl.on("pick", _on_pick)
+
+            def render_rows(rows: list[dict]) -> None:
+                """训练记录单表行：数据集组头行（灰带、点击折叠）+ 组内 Run 行，
+                组间按最近活动在前。签名守卫防无变化整表重渲染抢点击/闪烁。"""
+                state["last_rows"] = rows
+                groups: dict[str, list[dict]] = {}
+                for r in rows:  # rows 已按任务新在前 + 轮次升序产出，组内顺序即继承
+                    groups.setdefault(r["dataset"] or "（未知数据集）", []).append(r)
+                for k in [k for k in state["open_groups"] if k not in groups]:
+                    state["open_groups"].pop(k, None)  # 数据集删净后清开合记忆
+                reveal = state.pop("reveal_uid", None)  # 续训新轮首次亮相：强制展开所在组
+                display: list[dict] = []
+                ordered = sorted(groups.items(),
+                                 key=lambda kv: max((x["sort_time"] or "" for x in kv[1])),
+                                 reverse=True)
+                for name, grp in ordered:
+                    open_ = state["open_groups"].get(name, True)
+                    if reveal is not None and any(r["uid"] == reveal for r in grp):
+                        open_ = True
+                    last = max((r["started"] or "" for r in grp), default="")
+                    display.append({"uid": f"__group__{name}", "__group": True, "name": name,
+                                    "count": len(grp), "__open": open_,
+                                    "last": f"最近 {last}" if last else ""})
+                    if open_:
+                        display.extend(grp)
+                _update_rows(records_tbl, display)
 
             detail = ui.column().classes("w-full")
 
             def render_detail() -> None:
                 detail.clear()
-                task_id = state["selected"]
-                if not task_id:
+                uid = state["selected"]
+                if not uid:
                     with detail:
-                        ui.label("点击任务行查看运行详情").classes("text-xs opacity-40")
+                        ui.label("点击训练记录行查看该次运行详情").classes("text-xs opacity-40")
                     return
-                task = tsvc.get_task(get_manager(), task_id)
-                if not task["runs"]:
+                try:
+                    run = tsvc.get_run(get_manager(), uid)
+                except Exception:  # noqa: BLE001
+                    # 选中记录已不存在（任务被删）：回空态，别让详情区卡在残影
+                    state["selected"] = None
+                    state["rendered_id"] = None
                     with detail:
-                        ui.label("该任务暂无运行记录").classes("text-xs opacity-40")
+                        ui.label("该记录已不存在（任务被删除）").classes("text-xs opacity-40")
                     return
-                uid = task["runs"][-1]["uid"]
-                run = tsvc.get_run(get_manager(), uid)
+                # 详情区签名：选中 Run 的状态（2s 刷新据此自动重渲染，见 refresh；
+                # 运行中不重渲染——1s poll 管曲线与进度）
+                state["detail_sig"] = run["status"]
+                task = {"name": run["task_name"]}
+                task_id = run["task_id"]
                 status_label, status_color = RUN_STATUS.get(run["status"], (run["status"], "grey"))
                 with detail, ui.card().classes("w-full gap-2"):
                     with ui.row().classes("w-full items-center gap-2 flex-wrap"):
@@ -2380,18 +2523,7 @@ document.addEventListener('scroll', function(e){
                         poll.n = 0
                         ui.timer(1.0, poll)
 
-            select = _select_with_sync(table, state, "id", render_detail, lambda: _scroll_to(detail),
-                                       sync_selected=False)
-            _on_row_click(table, select, lambda: _scroll_to(detail))
-
-            # ── 批量删除（勾选归批量，行点击归详情；运行中的任务会被服务层拒绝并逐个汇报）
-            def sync_bulk_btn() -> None:
-                n = len(table.selected or [])
-                btn = bulk_btn_holder.get("btn")
-                if btn is not None:
-                    btn.set_text(f"删除所选（{n}）")
-                    btn.set_enabled(n > 0)
-
+            # ── 批量删除（勾选归批量——跨数据集组聚合、按任务去重删；行点击归详情）
             with ui.dialog() as bulk_del_dialog, ui.card().classes("w-96 gap-2"):
                 bulk_title = ui.label("").classes("font-bold")
                 bulk_names = ui.label("").classes("text-xs opacity-60 break-all")
@@ -2400,10 +2532,13 @@ document.addEventListener('scroll', function(e){
                     ui.button("取消", on_click=bulk_del_dialog.close).props("flat")
 
                     async def _do_bulk_del() -> None:
-                        targets = [(r["id"], r["name"]) for r in (table.selected or [])]
+                        sel = _selected_runs()
+                        by_task: dict[int, str] = {}
+                        for r in sel:  # 勾选按训练记录（Run 行），删除按任务去重
+                            by_task.setdefault(r["task_id"], r["name"])
                         bulk_del_dialog.close()
                         ok, fails = 0, []
-                        for tid, _name in targets:
+                        for tid, _name in by_task.items():
                             try:
                                 await _io(tsvc.delete_task, get_manager(), tid, bulk_files.value)
                                 ok += 1
@@ -2413,7 +2548,7 @@ document.addEventListener('scroll', function(e){
                             ui.notify(f"已删除 {ok} 个任务", type="positive")
                         for f in fails:
                             ui.notify(f"删除失败 {f}", type="negative")
-                        table.selected = []
+                        records_tbl.selected = []
                         state["selected"] = None
                         state["rendered_id"] = None
                         refresh()
@@ -2423,11 +2558,15 @@ document.addEventListener('scroll', function(e){
                               ).props("unelevated")
 
             def open_bulk_del() -> None:
-                sel = table.selected or []
+                sel = _selected_runs()
                 if not sel:
                     return
-                bulk_title.set_text(f"批量删除 {len(sel)} 个任务")
-                bulk_names.set_text("；".join(r["name"] for r in sel))
+                names: list[str] = []
+                for r in sel:
+                    if r["name"] not in names:
+                        names.append(r["name"])
+                bulk_title.set_text(f"批量删除 {len(names)} 个任务（勾选 {len(sel)} 条记录）")
+                bulk_names.set_text("将连同各任务全部轮次记录一并删除：" + "；".join(names))
                 bulk_del_dialog.open()
 
             state["open_bulk_del"] = open_bulk_del
@@ -2464,6 +2603,7 @@ document.addEventListener('scroll', function(e){
             def do_stop(uid: str) -> None:
                 tsvc.stop_run(get_manager(), uid)
                 ui.notify(f"停止请求已发出：{uid}")
+                render_detail()  # 停止链即时反馈（排队中取消同步落终态）
 
             def do_force_stop(uid: str) -> None:
                 try:
@@ -2491,7 +2631,10 @@ document.addEventListener('scroll', function(e){
             def do_resume(uid: str) -> None:
                 new_uid_ = tsvc.resume_run(get_manager(), uid)
                 ui.notify(f"续训 Run {new_uid_} 已排队")
-                refresh()
+                state["reveal_uid"] = new_uid_  # 新记录行所在数据集组强制展开亮相
+                refresh()  # 新记录行进列表（同一任务、下一轮）
+                state["selected"] = new_uid_
+                state["rendered_id"] = new_uid_
                 render_detail()
 
             def do_retry(uid: str) -> None:
@@ -2509,7 +2652,7 @@ document.addEventListener('scroll', function(e){
                 del_dialog.open()
 
             with detail:
-                ui.label("点击任务行查看运行详情").classes("text-xs opacity-40")
+                ui.label("点击训练记录行查看该次运行详情").classes("text-xs opacity-40")
 
             with ui.dialog() as del_dialog, ui.card().classes("w-96 gap-2"):
                 del_title = ui.label("").classes("font-bold")
@@ -2871,7 +3014,8 @@ document.addEventListener('scroll', function(e){
                     confirm_dlg.open()
 
             def refresh() -> None:
-                _update_rows(table, rows_data())
+                rows = rows_data()
+                render_rows(rows)
                 # 部署完成全局通知（训练页也能看到，不必切去结果页）
                 try:
                     deps = tsvc.list_deployments(get_manager())["deployments"]
@@ -2885,10 +3029,17 @@ document.addEventListener('scroll', function(e){
                     pass
                 if not state["auto"] and state["selected"] is None:
                     state["auto"] = True
-                    for r in table.rows:
-                        if r["status"] in ("running", "queued"):
-                            select(r)
-                            break
+                    hit = next((r for r in rows if r["status"] in ("running", "queued")), None)
+                    if hit is not None:
+                        select(hit)
+                        _scroll_to(detail)
+                # 详情区随选中 Run 的状态变化自动重渲染（排队→运行→停止链→终态落定）；
+                # 运行中不重渲染（1s poll 管曲线刷新）；行消失（任务被删）回空态
+                if state["selected"] is not None:
+                    row = next((r for r in state["last_rows"] if r["uid"] == state["selected"]),
+                               None)
+                    if row is None or row["status"] != state.get("detail_sig"):
+                        render_detail()
 
             seen_dep: set = set()
             state["open_create"] = create_dialog.open
@@ -4601,7 +4752,7 @@ document.addEventListener('scroll', function(e){
                 label, color = RUN_STATUS.get(t["status"], (t["status"], "grey"))
                 cross_rows.append({"id": t["id"], "name": t["name"],
                                    "base_model": _model_short(t["base_model"]),
-                                   "runs": t["runs"], "best_str": _fmt_metric(t.get("primary_metric")),
+                                   "runs": t["rounds"], "best_str": _fmt_metric(t.get("primary_metric")),
                                    "status_label": label, "status_color": color})
             cross = ui.table(columns=[
                 {"name": "name", "label": "任务", "field": "name", "align": "left",

@@ -108,6 +108,43 @@ def test_resume_after_done(training_client):
     assert run["round_no"] == 2
 
 
+def test_tasks_list_run_records(training_client):
+    """任务列表数据面（2026-10-30 重构）：runs 为 Run 概要列表 + rounds 计数 + dataset
+    名归组；取消的轮次（含零指标续训轮）作为历史记录保留在列表，不回收不消失。"""
+    c = training_client
+    task_uid = _create_task(c, epochs=100, name="list-records")
+    task = _wait_task(c, task_uid, {"running"})
+    task_id, r1 = task["id"], task["runs"][0]["uid"]
+    deadline = time.time() + 20  # 等首个 epoch 落地再停：取消轮带部分曲线
+    while time.time() < deadline:
+        if len(c.get(f"/api/v1/runs/{r1}").json().get("metrics") or []) >= 1:
+            break
+        time.sleep(0.2)
+    c.post(f"/api/v1/runs/{r1}/stop")
+    _wait_status(c, r1, {"cancelled"})
+
+    def _list_row() -> dict:
+        return [t for t in c.get("/api/v1/tasks").json() if t["id"] == task_id][0]
+
+    row = _list_row()
+    assert row["dataset"] == "plate"
+    assert row["rounds"] == 1 and len(row["runs"]) == 1
+    rec = row["runs"][0]
+    assert rec["uid"] == r1 and rec["round_no"] == 1 and rec["status"] == "cancelled"
+    assert rec["epochs"] >= 1 and rec["progress"] == f"共 {rec['epochs']} epoch"
+    assert rec["started_at"] and rec["finished_at"]
+    # 用户场景：续训后立刻反悔取消——轮 2 作为历史保留（记录在、可查详情）
+    new_uid = c.post(f"/api/v1/runs/{r1}/resume").json()["new_run_uid"]
+    _wait_status(c, new_uid, {"running"})
+    c.post(f"/api/v1/runs/{new_uid}/stop")
+    _wait_status(c, new_uid, {"cancelled"})
+    row = _list_row()
+    assert row["rounds"] == 2
+    assert [r["round_no"] for r in row["runs"]] == [1, 2]
+    assert row["runs"][1]["status"] == "cancelled"
+    assert c.get(f"/api/v1/runs/{new_uid}").status_code == 200
+
+
 def test_task_status_latest_round_wins(tmp_path, datasets_root, detect_source):
     """聚合口径=最新一轮终态（用户实测回归）：轮 1 failed(-9) + 续训轮 2 done → Task 应显示 done，
     不被历史失败轮永久压成 failed。"""
@@ -489,8 +526,18 @@ def test_adopt_stopping_dead_pid_finalizes_cancelled(tmp_path, datasets_root, de
                 break
             time.sleep(0.1)
         assert run_uid, "训练未进入 running"
+        # pid 在启动链第二笔提交才落库（payload/快照/Popen 之后），等它就位再杀——
+        # 文件级负载下 status=running 与 pid 提交之间存在可观测窗口
+        pid = None
+        deadline = time.time() + 15
+        while time.time() < deadline:
+            pid = _run_pid(db, run_uid)
+            if pid:
+                break
+            time.sleep(0.1)
+        assert pid, "启动未落 pid"
         # 进程被杀（产物不完整 → 孤儿判定为 failed 的形态），等 watchdog 落定后再伪造 stopping
-        os.kill(_run_pid(db, run_uid), signal.SIGKILL)
+        os.kill(pid, signal.SIGKILL)
         _wait_run_status(c1, run_uid, {"failed"}, timeout=10.0)
         _db_exec(db, "UPDATE runs SET status='stopping' WHERE uid=?", (run_uid,))
 
