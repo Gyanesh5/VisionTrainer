@@ -16,10 +16,13 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+from PIL import Image
+
 from .audit import compute_audit, fingerprint_of, load_cached, save_cached
 from .convert import TASK_SHAPES, json_to_yolo_lines, write_label
-from .split import build_manifest, excluded_manifest, restored_manifest, save_manifest
+from .split import build_grouped_manifest, build_manifest, excluded_manifest, restored_manifest, save_manifest
 from .stats import build_stats, get_stats, recompose, save_stats
+from .tiling import JPEG_QUALITY, TILE_GRID_MAX, TILE_OVERLAP_MAX, TILE_TASKS, plan_image, summarize
 from .validate import scan_entries, validate_dataset
 
 VALID_TASK_TYPES = set(TASK_SHAPES)
@@ -319,6 +322,205 @@ def rename_classes(name: str, classes: list[str], root: Path | None = None) -> d
         payload["classes"] = classes
         save_stats(name, payload)
     return meta
+
+
+# ---------------------------------------------------------------- 切片（Tiling）
+
+def _tile_guard(name: str, root: Path | None) -> dict:
+    """切片前置：托管数据集 + 任务类型受限（ADR 0004 / spec 2.1）。"""
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不支持切片（平台对其零写入）")
+    if meta["task_type"] not in TILE_TASKS:
+        raise DatasetError("invalid_args",
+                           f"切片仅支持检测/分割/旋转框任务（当前 {meta['task_type']}）")
+    return meta
+
+
+def _tile_params(rows: int, cols: int, overlap: float) -> None:
+    if not (1 <= int(rows) <= TILE_GRID_MAX and 1 <= int(cols) <= TILE_GRID_MAX):
+        raise DatasetError("invalid_args", f"行/列数须在 1–{TILE_GRID_MAX}")
+    if not (0.0 <= float(overlap) <= TILE_OVERLAP_MAX):
+        raise DatasetError("invalid_args", f"重叠率须在 0–{TILE_OVERLAP_MAX}")
+
+
+def _tile_items(meta: dict, manifest: dict, rows: int, cols: int, overlap: float) -> list[dict]:
+    """活跃清单逐图切片计划。排除过的图不在清单内，天然不参与切片。
+
+    几何尺寸真源是标注 JSON 的 imageWidth/Height；负样本（无 JSON）用 PIL 读图头。
+    不可读/坏 JSON/缺尺寸的图带 skip 原因返回（计数不静默），不中断整体。
+    """
+    items: list[dict] = []
+    for f in manifest["files"]:
+        data: dict | None = None
+        lbl = f.get("label")
+        if lbl and Path(lbl).exists():
+            try:
+                data = json.loads(Path(lbl).read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                items.append({"file": f, "data": None, "plan": None, "skip": "bad_json"})
+                continue
+        if data is not None and (not data.get("imageWidth") or not data.get("imageHeight")):
+            data = None  # 缺尺寸 → 与负样本同路径，PIL 兜底
+        if data is None:
+            try:
+                with Image.open(f["image"]) as im:
+                    data = {"shapes": [], "imageWidth": im.size[0], "imageHeight": im.size[1]}
+            except Exception:  # noqa: BLE001 — PIL 打不开（假文件头/损坏）按不可读跳过
+                items.append({"file": f, "data": None, "plan": None, "skip": "unreadable_image"})
+                continue
+        plan = plan_image(data, rows, cols, overlap)
+        items.append({"file": f, "data": data, "plan": plan, "skip": None})
+    return items
+
+
+def _tile_summary(items: list[dict], keep_empty: bool, name: str,
+                  rows: int, cols: int, overlap: float) -> dict:
+    plans = [it["plan"] for it in items if it["skip"] is None]
+    s = summarize(plans, keep_empty)
+    s["dropped_pct"] = round(100.0 * s["dropped_assignments"] / s["assignments"], 1) \
+        if s["assignments"] else 0.0
+    s["skipped"] = [{"image": it["file"]["image"], "reason": it["skip"]}
+                    for it in items if it["skip"]]
+    s["params"] = {"rows": rows, "cols": cols, "overlap": overlap,
+                   "keep_empty": bool(keep_empty), "source": name}
+    s["default_name"] = f"{name}-tile{rows}x{cols}"
+    return s
+
+
+def tile_dataset_preview(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
+                         keep_empty: bool = False, root: Path | None = None) -> dict:
+    """切片预览（dry-run，零写入）：确认门数字与执行同口径。"""
+    meta = _tile_guard(name, root)
+    _tile_params(rows, cols, overlap)
+    rows, cols, overlap = int(rows), int(cols), float(overlap)
+    manifest = _read_meta(_ds_dir(name, root) / "derived" / meta["active_manifest"]
+                          / "split_manifest.json")
+    items = _tile_items(meta, manifest, rows, cols, overlap)
+    return _tile_summary(items, keep_empty, name, rows, cols, overlap)
+
+
+def tile_dataset(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
+                 new_name: str | None = None, keep_empty: bool = False,
+                 ratio: float = 0.8, seed: int = 42, stratify: bool = False,
+                 root: Path | None = None, progress_cb=None) -> dict:
+    """切片（Tiling）：按网格把活跃清单内的图与标注切成小图，生成全新托管数据集。
+
+    规则（ADR 0004 / spec 2.1）：标注完整落入才归属（无裁剪无残缺标注，跨界目标靠
+    重叠在邻片完整出现）；空片默认丢弃；出生按源图分组随机重新切分（同源小图同侧）；
+    审查判定按一致性继承——片内目标全部完整归属（或零目标）继承源图判定（经
+    write_review 重算哈希），有残影回待审。源集零改动；失败清理半成品目录。
+    """
+    from . import review as rv
+
+    meta = _tile_guard(name, root)
+    _tile_params(rows, cols, overlap)
+    rows, cols, overlap = int(rows), int(cols), float(overlap)
+    keep_empty = bool(keep_empty)
+    new_name = (new_name or f"{name}-tile{rows}x{cols}").strip()
+    _slug(new_name)
+    base_root = root or get_datasets_root()
+    ds_dir = base_root / new_name
+    if ds_dir.exists() or (base_root / ".external" / f"{new_name}.json").exists():
+        raise DatasetError("state_conflict", f"数据集已存在：{new_name}")
+    manifest = _read_meta(_ds_dir(name, root) / "derived" / meta["active_manifest"]
+                          / "split_manifest.json")
+    items = _tile_items(meta, manifest, rows, cols, overlap)
+    task_type, classes = meta["task_type"], meta["classes"]
+
+    def _cb(phase: str):
+        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
+
+    src_dir = ds_dir / "source"
+    try:
+        src_dir.mkdir(parents=True)
+        (ds_dir / "classes.txt").write_text(
+            "\n".join(classes) + ("\n" if classes else ""), encoding="utf-8")
+        groups: list[dict] = []
+        used_names: set[str] = set()
+        crop_cb = _cb("切片图像")
+        work = [it for it in items if it["skip"] is None]
+        for i, it in enumerate(work):
+            if crop_cb is not None and (i % 5 == 0 or i == len(work) - 1):
+                crop_cb(i + 1, len(work))
+            f, plan = it["file"], it["plan"]
+            img_path = Path(f["image"])
+            try:
+                im = Image.open(img_path)
+            except Exception:  # noqa: BLE001 — 预览按 JSON 尺寸过了，此处像素读不出
+                it["skip"] = "unreadable_image"
+                continue
+            if im.size != (plan["width"], plan["height"]):
+                it["skip"] = "size_mismatch"  # 标注尺寸与像素不符：平移坐标将错位，拒绝切片
+                im.close()
+                continue
+            entries: list[dict] = []
+            for t in plan["tiles"]:
+                if not keep_empty and not t["shapes"]:
+                    continue
+                stem = f"{img_path.stem}_r{t['r']}c{t['c']}"
+                if stem in used_names:  # 源目录子目录同名图防御：追加源路径短哈希
+                    stem = f"{stem}_{hashlib.sha256(str(f['image']).encode()).hexdigest()[:6]}"
+                used_names.add(stem)
+                ext = img_path.suffix.lower() or ".png"
+                tile_img = src_dir / f"{stem}{ext}"
+                tile = im.crop((t["x0"], t["y0"], t["x1"], t["y1"]))
+                if ext in (".jpg", ".jpeg") and tile.mode != "RGB":
+                    tile = tile.convert("RGB")
+                tile.save(tile_img, **({"quality": JPEG_QUALITY}
+                                       if ext in (".jpg", ".jpeg") else {}))
+                out = dict(it["data"])
+                out.update(imagePath=tile_img.name, imageData=None, shapes=t["shapes"],
+                           imageWidth=t["x1"] - t["x0"], imageHeight=t["y1"] - t["y0"])
+                out.pop("vt_review", None)  # 审查键不随模板拷贝——继承一律走 write_review 重算哈希
+                out.pop("checked", None)
+                tile_json = src_dir / f"{stem}.json"
+                tile_json.write_text(json.dumps(out, ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
+                if not t["fragment"] and f.get("label") and Path(f["label"]).exists():
+                    st = rv.read_state(Path(f["label"]))
+                    if st["effective"] in ("approved", "rejected", "skipped"):
+                        rv.write_review(tile_json, st["effective"], st["reason"], st["note"])
+                entries.append({"image": str(tile_img), "label": str(tile_json),
+                                "primary_label": next((s.get("label") for s in t["shapes"]
+                                                       if s.get("label") in classes), None)})
+            im.close()
+            groups.append({"source": f["image"], "primary_label": f.get("primary_label"),
+                           "entries": entries})
+        if not any(g["entries"] for g in groups):
+            raise DatasetError("state_conflict", "没有产出任何小图（空片全被丢弃——可开启「保留空片」）")
+
+        scan = scan_entries(src_dir, task_type, classes, progress=_cb("校验标注"))
+        report = validate_dataset(src_dir, task_type, classes, scan=scan)
+        (ds_dir / "validation_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        manifest_new = build_grouped_manifest(groups, ratio, seed, stratify)
+        save_manifest(ds_dir, manifest_new)
+        _derive(ds_dir, manifest_new, task_type, classes, progress=_cb("派生训练结构"))
+        save_stats(new_name, build_stats(scan["entries"], manifest_new, task_type, classes, new_name))
+
+        summary = _tile_summary(items, keep_empty, name, rows, cols, overlap)
+        meta_new = {
+            "name": new_name,
+            "task_type": task_type,
+            "form": "managed",
+            "source_dir": str(src_dir),
+            "classes": classes,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "manifests": [_manifest_brief(manifest_new)],
+            "active_manifest": manifest_new["uid"],
+            "last_validation": report,
+            "tiling": {"source": name, "rows": rows, "cols": cols, "overlap": overlap,
+                       "keep_empty": keep_empty,
+                       "created_at": datetime.now().isoformat(timespec="seconds")},
+        }
+        _mark_drops(meta_new, report)
+        (ds_dir / "dataset.json").write_text(
+            json.dumps(meta_new, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"meta": meta_new, "summary": summary}
+    except Exception:
+        shutil.rmtree(ds_dir, ignore_errors=True)
+        raise
 
 
 def exclude_files(name: str, files: list[str], reason: str = "", root: Path | None = None) -> dict:

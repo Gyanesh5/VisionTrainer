@@ -57,6 +57,20 @@ class SwitchManifestBody(BaseModel):
     uid: str
 
 
+class TilePreviewBody(BaseModel):
+    rows: int = Field(default=2, ge=1, le=4)
+    cols: int = Field(default=2, ge=1, le=4)
+    overlap: float = Field(default=0.2, ge=0.0, le=0.5)
+    keep_empty: bool = False
+
+
+class TileBody(TilePreviewBody):
+    name: str | None = None
+    ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
+    seed: int = 42
+    stratify: bool = False
+
+
 class RelabelRefreshBody(BaseModel):
     image: str | None = None  # 省略 = 全清单按 mtime 增量
     force: bool = False       # 跳过增量判断全量重转换（转换器规则变更后的恢复通道）
@@ -184,6 +198,25 @@ def switch_manifest(name: str, body: SwitchManifestBody):
     try:
         m = svc.switch_manifest(name, body.uid)
         return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"])}
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/tile/preview")
+def tile_dataset_preview(name: str, body: TilePreviewBody):
+    """切片预览（dry-run 零写入，确认门数字与执行同口径）。"""
+    try:
+        return svc.tile_dataset_preview(name, body.rows, body.cols, body.overlap, body.keep_empty)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/tile")
+def tile_dataset(name: str, body: TileBody):
+    """执行切片 → 新托管数据集（源集不动；返回 meta 含 tiling 血缘 + summary 计数）。"""
+    try:
+        return svc.tile_dataset(name, body.rows, body.cols, body.overlap, body.name,
+                                body.keep_empty, body.ratio, body.seed, body.stratify)
     except DatasetError as exc:
         return _error_response(exc)
 

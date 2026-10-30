@@ -58,6 +58,15 @@
 
 v1.2 同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/validate` 的 validation_report 新增发现类型——`drops`（丢弃清单：shape 数守恒，图/shape/类别/原因逐条）/ `degenerate`（零面积与 <2px）/ `out_of_bounds`（±1% 容差）/ `orphan`（图↔JSON↔txt）/ `polygon_invalid`·`obb_invalid`·`keypoints_invalid`（按 task_type 启用）；导入含 drops 时响应带 `needs_confirm`，确认动作后方可继续（确认门）；`GET .../audit` 报告新增 `duplicates_within`（同图重复两档：IoU>0.999 完全重复 / 0.85–0.95 复核，只报告）；`GET .../stats` 的 `sizes` 增加阈值线与 `small_ratio`；`POST /datasets/{id}/resplit` body 增加可选 `approved_only`（「只训已审」开关落点——true 时新清单只含 `checked:true` 图，旧清单保留可切回）；`GET /datasets/{id}` 与 `GET /datasets` 增加审查进度摘要；`POST /tasks` 提交确认附审查完成度提示（低占比黄牌提醒，不阻断）。无 WS 新事件（质检作业走 REST 轮询）；DB schema 维持 v4（审查状态寄生 JSON，不落库）。
 
+### 数据集域切片（Tiling，2026-10-30，ADR 0004）
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/v1/datasets/{id}/tile/preview` | 切片预览（dry-run 零写入，数字与执行同口径）。body: `{rows?, cols?, overlap?, keep_empty?}`（默认 2/2/0.2/false，rows·cols ∈ 1–4、overlap ∈ 0–0.5）；返回 `{images, tiles_total, tiles_written, empty_dropped, frag_empty_dropped, assignments, kept_assignments, dropped_assignments, dropped_pct, shapes_nowhere, re_review, skipped[], params, default_name}`；外部/pose/classify 数据集 → 400 |
+| POST | `/api/v1/datasets/{id}/tile` | 执行切片 → 新托管数据集（源集零改动）。body: `{rows?, cols?, overlap?, name?, keep_empty?, ratio?, seed?, stratify?}`；规则：标注完整落入才归属（无裁剪，跨界靠重叠补救）、空片默认丢弃、按源图分组随机切分（同源小图同侧）、审查按一致性继承（残影片回待审）；返回 `{meta（含 tiling 血缘：source/rows/cols/overlap/keep_empty，及 last_validation）, summary}`；重名或无可产片 → 409 |
+
+同步语义：切片集是普通托管数据集（`dataset.json` 的 `source_dir` 指向自己目录内的 `source/`，切片图与 labelme JSON 落盘于此），此后的校验/审查/重切分/训练链路零特判；`GET /datasets/{id}` 详情对切片集自动附审查进度摘要。
+
 ### 系统域 M6 增补（启动自检，2026-09-20）
 
 | 方法 | 路径 | 说明 |

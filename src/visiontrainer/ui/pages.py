@@ -3002,6 +3002,14 @@ document.addEventListener('scroll', function(e){
                                     "全量重转换派生 YOLO 标注（转换器规则变更后的恢复通道；日常标注修改自动增量刷新）")
                                 res_btn = ui.button("重切分", icon="call_split", on_click=lambda: open_resplit(meta))
                                 res_btn.props("outline dense")
+                                tile_btn = ui.button("切片", icon="grid_view",
+                                                     on_click=lambda: open_tiling(meta))
+                                tile_btn.props("outline dense")
+                                if meta["task_type"] in ("detect", "segment", "obb"):
+                                    tile_btn.tooltip(
+                                        "按网格切小图生成新数据集（源集不动；标注完整落入才归属，跨界靠重叠补救）")
+                                else:
+                                    tile_btn.props("disable").tooltip("切片支持检测/分割/旋转框任务")
                             del_btn = ui.button("删除", icon="delete", color="negative",
                                                 on_click=lambda: open_delete(meta))
                             del_btn.props("outline dense")
@@ -4329,6 +4337,19 @@ document.addEventListener('scroll', function(e){
                     r_strat.set_value(bool(brief["stratify"]))
                 resplit_dialog.open()
 
+            def open_tiling(meta: dict) -> None:
+                tl_title.set_text(f"切片 {meta['name']}")
+                tl_name_st["touched"] = False
+                tl_rows.set_value(2)
+                tl_cols.set_value(2)
+                tl_ov.set_value(0.2)
+                tl_empty.set_value(False)
+                tl_ratio.set_value(0.8)
+                tl_seed.set_value(42)
+                tl_strat.set_value(False)
+                _tl_invalidate()  # 复位预览区/确认门并回填默认新集名
+                tiling_dialog.open()
+
             def open_delete(meta: dict) -> None:
                 del_title.set_text(f"删除数据集 {meta['name']}")
                 del_note.set_text("托管数据集：删除平台侧数据（含派生结构），标注源目录永不触碰。"
@@ -4497,6 +4518,136 @@ document.addEventListener('scroll', function(e){
                             ui.notify(f"重切失败：{exc}", type="negative")
                     refresh()
                     render_detail()
+
+            # ── 切片（Tiling）：dry-run 预览确认门 + 进度；参数变更即失效须重新预览
+            with ui.dialog() as tiling_dialog, ui.card().classes("w-[30rem] gap-2"):
+                tl_title = ui.label("切片").classes("font-bold")
+                ui.label("切小图生成新托管数据集（源集不动）；标注完整落入才归属，跨界目标靠重叠补救。").classes(
+                    "text-xs opacity-60")
+                with ui.row().classes("w-full"):
+                    tl_rows = _labeled("行数", ui.number, w="flex-1", label_w="w-20",
+                                       value=2, min=1, max=4, precision=0)
+                    tl_cols = _labeled("列数", ui.number, w="flex-1", label_w="w-20",
+                                       value=2, min=1, max=4, precision=0)
+                    tl_ov = _labeled("重叠率", ui.number, w="flex-1", label_w="w-20",
+                                     value=0.2, min=0.0, max=0.5, step=0.05).tooltip(
+                        "相邻片共享边带的比例（SAHI 同款默认 0.2）；跨界目标靠它在邻片完整出现")
+                tl_name = _labeled("新数据集名", ui.input, label_w="w-20")
+                tl_empty = ui.checkbox("保留空片（负样本）").tooltip(
+                    "无归属标注的片默认丢弃；开启后保留为负样本（零目标片继承源图审查判定）")
+                with ui.row().classes("w-full"):
+                    tl_ratio = _labeled("train 比例", ui.number, w="flex-1", label_w="w-20",
+                                        value=0.8, min=0.05, max=0.95, step=0.05)
+                    tl_seed = _labeled("随机种子", ui.number, w="flex-1", label_w="w-20",
+                                       value=42, precision=0)
+                tl_strat = ui.checkbox("按类别分层").tooltip(
+                    "随机单位是源图：同源小图永不跨侧（防 val 泄漏）；分层按源图主类")
+                tl_prev = ui.column().classes("w-full gap-0.5").set_visibility(False)
+                tl_prog = {"phase": "", "cur": 0, "total": 0, "active": False}
+                tl_prog_label = ui.label("").classes("text-xs opacity-70").set_visibility(False)
+                tl_prog_bar = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
+
+                def _tl_prog_tick() -> None:
+                    if tl_prog["active"]:
+                        tl_prog_label.set_visibility(True)
+                        tl_prog_bar.set_visibility(True)
+                        total = max(tl_prog["total"], 1)
+                        tl_prog_label.set_text(f"{tl_prog['phase']} {tl_prog['cur']}/{tl_prog['total']}")
+                        tl_prog_bar.set_value(min(tl_prog["cur"] / total, 1.0))
+                    else:
+                        tl_prog_label.set_visibility(False)
+                        tl_prog_bar.set_visibility(False)
+
+                ui.timer(0.3, _tl_prog_tick)
+
+                tl_name_st = {"touched": False, "silent": False}
+
+                def _tl_default_name() -> str:
+                    return f"{state['selected']}-tile{int(tl_rows.value or 2)}x{int(tl_cols.value or 2)}"
+
+                def _tl_on_name(_e) -> None:
+                    if not tl_name_st["silent"]:
+                        tl_name_st["touched"] = True
+
+                def _tl_invalidate() -> None:
+                    tl_prev.clear()
+                    tl_prev.set_visibility(False)
+                    tl_ok.props("disabled")
+                    if not tl_name_st["touched"]:
+                        tl_name_st["silent"] = True
+                        tl_name.set_value(_tl_default_name())
+                        tl_name_st["silent"] = False
+
+                tl_name.on_value_change(_tl_on_name)
+                for wgt in (tl_rows, tl_cols, tl_ov, tl_empty):
+                    wgt.on_value_change(lambda _e: _tl_invalidate())
+
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=tiling_dialog.close).props("flat")
+                    tl_prev_btn = ui.button("预览", icon="query_stats",
+                                            on_click=lambda: do_tile_preview()).props("outline dense")
+                    tl_ok = ui.button("确认切片", icon="grid_view",
+                                      on_click=lambda: do_tile()).props("unelevated dense disabled")
+
+                async def do_tile_preview() -> None:
+                    with _busy(tl_prev_btn, "预览中…"):
+                        try:
+                            s = await _io(ds.tile_dataset_preview, state["selected"],
+                                          int(tl_rows.value or 2), int(tl_cols.value or 2),
+                                          float(tl_ov.value or 0.2), bool(tl_empty.value))
+                        except Exception as exc:  # noqa: BLE001
+                            ui.notify(f"预览失败：{exc}", type="negative")
+                            return
+                    with tl_prev:
+                        frag_note = f"（含残影 {s['frag_empty_dropped']}）" if s["frag_empty_dropped"] else ""
+                        ui.label(f"原图 {s['images']} → 产片 {s['tiles_written']}"
+                                 f"（网格共 {s['tiles_total']}）· 空片丢弃 {s['empty_dropped']}{frag_note}"
+                                 f" · 跨界丢弃 {s['dropped_assignments']}（{s['dropped_pct']}%）"
+                                 f" · 复审片 {s['re_review']}").classes("text-xs opacity-80")
+                        if s["shapes_nowhere"]:
+                            ui.label(f"⚠ {s['shapes_nowhere']} 个目标比片还大、任何片都无法完整容纳"
+                                     "——建议调大网格或重叠率").classes("text-xs text-red-500")
+                        elif s["dropped_pct"] > 30:
+                            ui.label(f"跨界丢弃占比 {s['dropped_pct']}% 偏高——可提高重叠率").classes(
+                                "text-xs text-orange-700")
+                        if s["skipped"]:
+                            ui.label(f"跳过 {len(s['skipped'])} 张不可读图（原因计入执行结果）").classes(
+                                "text-xs text-orange-700")
+                    tl_prev.set_visibility(True)
+                    tl_ok.props(remove="disabled")
+
+                async def do_tile() -> None:
+                    name_new = (tl_name.value or "").strip() or _tl_default_name()
+                    tl_ok.props("disabled")
+                    tl_prev_btn.props("disabled")
+                    tl_prog.update(active=True, phase="准备中", cur=0, total=1)
+
+                    def _cb(phase: str, cur: int, total: int) -> None:
+                        tl_prog.update(phase=phase, cur=cur, total=total)
+
+                    try:
+                        r = await _io(ds.tile_dataset, state["selected"],
+                                      int(tl_rows.value or 2), int(tl_cols.value or 2),
+                                      float(tl_ov.value or 0.2), name_new, bool(tl_empty.value),
+                                      tl_ratio.value or 0.8, int(tl_seed.value or 42), tl_strat.value,
+                                      progress_cb=_cb)
+                        tiling_dialog.close()
+                        s = r["summary"]
+                        ui.notify(f"切片完成 {r['meta']['name']}：产片 {s['tiles_written']} · "
+                                  f"复审 {s['re_review']} 片（源集不动）", type="positive")
+                        state["selected"] = r["meta"]["name"]
+                    except Exception as exc:  # noqa: BLE001
+                        ui.notify(f"切片失败：{exc}", type="negative")
+                    finally:
+                        tl_prog.update(active=False)
+                        tl_ok.props(remove="disabled")
+                        tl_prev_btn.props(remove="disabled")
+                    refresh()
+                    row = next((rr for rr in table.rows if rr["name"] == state["selected"]), None)
+                    if row is not None:
+                        select(row)
+                    else:
+                        render_detail()
 
             def refresh() -> None:
                 _update_rows(table, rows_data())

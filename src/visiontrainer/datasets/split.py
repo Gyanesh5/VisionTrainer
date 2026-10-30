@@ -73,6 +73,58 @@ def build_manifest(
     return manifest
 
 
+def build_grouped_manifest(groups: list[dict], ratio: float, seed: int, stratify: bool) -> dict:
+    """源图分组随机切分（切片集出生切分）：随机单位是源图——同源小图永不跨侧（防泄漏）。
+
+    groups: [{source, primary_label, entries:[{image, label, primary_label}]}]；
+    算法与 build_manifest 同构（分层按源图 primary_label 分组，负样本源图组只进 train），
+    区别仅在洗牌与切分发生在组级、归属按组展开。manifest 带 grouped=source_image 标记。
+    """
+    rng = random.Random(seed)
+    labeled = [g for g in groups if g.get("primary_label")]
+    background = [g for g in groups if not g.get("primary_label")]
+
+    group_buckets: dict[str, list[dict]] = defaultdict(list)
+    if stratify:
+        for g in labeled:
+            group_buckets[g["primary_label"]].append(g)
+        buckets = list(group_buckets.values())
+    else:
+        rng.shuffle(labeled)
+        buckets = [labeled]
+
+    train_groups: list[dict] = []
+    val_groups: list[dict] = []
+    for bucket in buckets:
+        k = int(len(bucket) * ratio)
+        train_groups.extend(bucket[:k])
+        val_groups.extend(bucket[k:])
+    train_groups.extend(background)
+
+    def _entries(gs: list[dict]) -> list[dict]:
+        out: list[dict] = []
+        for g in gs:
+            out.extend(g["entries"])
+        return out
+
+    entries = _entries(train_groups) + _entries(val_groups)
+    files_hash = _file_label({e["image"]: e.get("primary_label") for e in entries})
+    return {
+        "uid": _manifest_uid(seed, ratio, files_hash),
+        "seed": seed,
+        "ratio": ratio,
+        "stratify": stratify,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "files": [
+            {"image": e["image"], "label": e["label"], "primary_label": e.get("primary_label")}
+            for e in sorted(entries, key=lambda e: e["image"])
+        ],
+        "train": sorted(e["image"] for e in _entries(train_groups)),
+        "val": sorted(e["image"] for e in _entries(val_groups)),
+        "grouped": "source_image",
+    }
+
+
 def save_manifest(dataset_dir: Path, manifest: dict) -> Path:
     derived = dataset_dir / "derived" / manifest["uid"]
     derived.mkdir(parents=True, exist_ok=True)
