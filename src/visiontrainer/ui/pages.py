@@ -3130,7 +3130,8 @@ document.addEventListener('scroll', function(e){
                 ui.clipboard.write(p)
                 ui.notify("路径已复制", type="info")
 
-            def _render_problems(problems: list[dict]) -> None:
+            def _render_problems(problems: list[dict],
+                                 overlay_classes: list[str] | None = None) -> None:
                 from ..datasets.validate import GUIDANCE
 
                 grouped: dict[str, list[dict]] = {}
@@ -3165,7 +3166,7 @@ document.addEventListener('scroll', function(e){
                                     _img_name_link(p["image"], Path(p["image"]).name + det,
                                                    "text-[11px] opacity-70 break-all flex-1 min-w-0",
                                                    overlay_label=str(Path(p["image"]).with_suffix(".json")),
-                                                   overlay_classes=meta.get("classes"))
+                                                   overlay_classes=overlay_classes)
                                     cp = ui.button(icon="content_copy",
                                                    on_click=lambda img=p["image"]: _copy_path(img)).props(
                                         "flat dense round size=xs color=grey")
@@ -3187,7 +3188,7 @@ document.addEventListener('scroll', function(e){
                                      f"{' · 问题 ' + str(n_problems) + ' 个' if n_problems else ' · 无问题'}"
                                      ).classes("text-xs opacity-70")
                             if lv.get("problems"):
-                                _render_problems(lv["problems"])
+                                _render_problems(lv["problems"], meta.get("classes"))
                             elif lv.get("background"):
                                 ui.label("负样本（无标注图）是设计内行为：只进 train 充当背景，不算错误。"
                                          ).classes("text-[11px] opacity-45")
