@@ -2,7 +2,7 @@
 
 布局定稿自 UI 原型（变体 A「工作台」）。本轮（ui-polish，2026-09-09）按视觉审计清单全面打磨：
 - 状态彩色 badge + 行内进度 + 全中文化（Quasar language=zh-CN + no-data 槽）
-- 防呆：基模型随数据集任务类型自动带出、不匹配硬拦截（禁用创建+红字原因）
+- 防呆：预训练权重随数据集任务类型自动带出、官方名不匹配硬拦截（禁用创建+红字原因）；支持本地 .pt 路径
 - 交互：行点击选中、详情自动滚动、自动选中运行中任务、数据集→训练直达（query 预填）
 - 反馈：导入进度条、排队位次、Agent 待审批横幅、决策历史 chip 化、部署完成全局通知、深色模式
 """
@@ -1146,14 +1146,27 @@ def _scroll_to(el) -> None:
 
 
 def _model_task(model: str) -> str | None:
-    """基模型名推断任务类型（后缀语义）；无后缀 = detect。"""
+    """预训练权重推断任务类型：官方名按后缀（无后缀 = detect，.pt 可剥）；
+    本地路径读权重才知任务，平台无 torch 不猜——返回 None 不参与防呆。"""
     m = (model or "").strip().lower()
     if not m:
         return None
+    if "/" in m or "\\" in m:
+        return None
+    if m.endswith(".pt"):
+        m = m[:-3]
     for suf, task in (("-seg", "segment"), ("-obb", "obb"), ("-pose", "pose"), ("-cls", "classify")):
         if m.endswith(suf):
             return task
     return "detect"
+
+
+def _model_short(model: str | None) -> str:
+    """显示收短：本地权重路径只显示文件名（如 best.pt），官方名原样。"""
+    m = (model or "").strip()
+    if not m or ("/" not in m and "\\" not in m):
+        return m
+    return m.replace("\\", "/").rsplit("/", 1)[-1]
 
 
 def _suggest_model(task_type: str) -> str:
@@ -1162,7 +1175,8 @@ def _suggest_model(task_type: str) -> str:
 
 
 def _wire_model_dataset(model_input, ds_select, reason_label, ok_btn) -> None:
-    """防呆联动：数据集选定 → 自动带出匹配基模型（用户未手改时）；不匹配 → 红字原因 + 禁用创建。"""
+    """防呆联动：数据集选定 → 自动带出匹配官方权重（用户未手改时）；官方名与任务
+    不匹配 → 红字原因 + 禁用创建；本地路径任务类型不可推断，不拦。"""
     st = {"touched": False, "silent": False}
 
     def check() -> None:
@@ -1184,7 +1198,7 @@ def _wire_model_dataset(model_input, ds_select, reason_label, ok_btn) -> None:
             st["silent"] = False
         model_task = _model_task(model_input.value)
         if model_task and task and model_task != task:
-            reason_label.set_text(f"基模型与数据集不匹配：该数据集任务为 {TASK_TYPE_ZH.get(task, task)}，"
+            reason_label.set_text(f"预训练权重与数据集不匹配：该数据集任务为 {TASK_TYPE_ZH.get(task, task)}，"
                                   f"建议 {_suggest_model(task)}")
             ok_btn.props("disabled")
 
@@ -1774,6 +1788,7 @@ document.addEventListener('scroll', function(e){
             rows = []
             for t in tsvc.list_tasks(get_manager()):
                 row = dict(t)
+                row["base_model"] = _model_short(t.get("base_model"))
                 row["metric_str"] = _fmt_metric(t.get("primary_metric"))
                 label, color = RUN_STATUS.get(t["status"], (t["status"], "grey"))
                 row["status_label"], row["status_color"] = label, color
@@ -1816,7 +1831,7 @@ document.addEventListener('scroll', function(e){
             columns = [
                 {"name": "name", "label": "任务", "field": "name", "align": "left",
                  "style": "white-space:normal"},
-                {"name": "base_model", "label": "基模型", "field": "base_model", "align": "left"},
+                {"name": "base_model", "label": "预训练权重", "field": "base_model", "align": "left"},
                 {"name": "status", "label": "状态", "field": "status"},
                 {"name": "progress", "label": "进度", "field": "progress", "align": "left"},
                 {"name": "metric_str", "label": "最优主指标", "field": "metric_str"},
@@ -1971,7 +1986,7 @@ document.addEventListener('scroll', function(e){
                             _snap_kv("切分参数", f"seed {sm.get('seed')} · train 比例 {sm.get('ratio')} · "
                                      f"{'分层' if sm.get('stratify') else '不分层'}")
                             _snap_kv("类别表", f"{len(cls.get('list') or [])} 类 · sha256 {str(cls.get('sha256', ''))[:12]}")
-                            _snap_kv("基础权重", f"{winfo.get('name') or winfo.get('path')}"
+                            _snap_kv("预训练权重", f"{winfo.get('name') or _model_short(winfo.get('path'))}"
                                      + (f" · sha256 {winfo['sha256'][:12]}" if winfo.get("sha256") else "（训练端解析）"))
                             _snap_kv("冻结时间", snap.get("frozen_at", "—"))
                             with ui.row().classes("w-full flex-wrap gap-1"):
@@ -2530,21 +2545,24 @@ document.addEventListener('scroll', function(e){
                     c_ds = _labeled("数据集", ui.select, label_w="w-16",
                                     options=managed or {"": "（暂无托管数据集，请先到数据集页导入）"},
                                     with_input=True)
-                    c_model = _labeled("基模型", ui.input, label_w="w-16", value="yolo11n")
+                    c_model = _labeled("预训练权重", ui.input, label_w="w-16", value="yolo11n")
                     with c_model:
-                        ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
+                        ui.tooltip("官方模型名（如 yolo11n，首次由 ultralytics 自动下载，随数据集任务类型"
+                                   "自动带出）；或本地 .pt 绝对路径（如历史 Run 的 best.pt，本地路径"
+                                   "任务类型不可推断，不参与匹配防呆）")
                     c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
                     c_name = _labeled("任务名", ui.input, label_w="w-16", value="",
-                                      placeholder="数据集_基模型_日期_时间（随数据集/基模型自动生成，可改）")
+                                      placeholder="数据集_预训练权重_日期_时间（随数据集/权重自动生成，可改）")
 
                     def _auto_name() -> str:
-                        return (f"{c_ds.value or '数据集'}_{(c_model.value or '').strip() or '模型'}"
+                        return (f"{c_ds.value or '数据集'}_"
+                                f"{_model_short(c_model.value).removesuffix('.pt') or '模型'}"
                                 f"_{datetime.now():%Y%m%d_%H%M}")
 
                     _name_state: dict = {"auto": None}
 
                     def _sync_name() -> None:
-                        """默认名跟随数据集/基模型；用户手改过则不覆盖；未选数据集时留占位符。"""
+                        """默认名跟随数据集/预训练权重；用户手改过则不覆盖；未选数据集时留占位符。"""
                         cur = (c_name.value or "").strip()
                         if c_ds.value and (not cur or cur == _name_state["auto"]):
                             _name_state["auto"] = _auto_name()
@@ -2673,7 +2691,7 @@ document.addEventListener('scroll', function(e){
                     # ── 分区 3：高级参数（tabs 一次点开，替代套娃折叠）
                     def _refresh_summary() -> None:
                         n = len(_collect_params(param_fields))
-                        parts = [c_model.value or "?", c_ds.value or "未选数据集",
+                        parts = [_model_short(c_model.value) or "?", c_ds.value or "未选数据集",
                                  f"{int(c_epochs.value or 0)} epoch", f"imgsz {c_imgsz.value or 640}",
                                  f"batch {c_batch.value if c_batch.value is not None else 16}",
                                  f"GPU {c_device.value or '0'}"]
@@ -2699,7 +2717,7 @@ document.addEventListener('scroll', function(e){
                         ui.button("取消", on_click=create_dialog.close).props("flat")
                         c_ok = ui.button("创建任务", icon="add", on_click=lambda: _open_confirm()).props("unelevated")
                 _wire_model_dataset(c_model, c_ds, c_reason, c_ok)
-                # 默认任务名联动：注册在 wire 之后，数据集带出基模型的级联里最后落定
+                # 默认任务名联动：注册在 wire 之后，数据集带出预训练权重的级联里最后落定
                 c_ds.on_value_change(lambda _e: _sync_name())
                 c_model.on_value_change(lambda _e: _sync_name())
                 _sync_name()
@@ -2776,7 +2794,7 @@ document.addEventListener('scroll', function(e){
                                       + (f" · {lv.get('total_images')} 张" if lv.get("total_images") else "")
                                       + (f" · {cls_n} 类" if cls_n else "")))
                     n_adv = len(_collect_params(param_fields))
-                    facts.append(("参数", f"{c_model.value or '?'} · {int(c_epochs.value or 0)} 轮"
+                    facts.append(("参数", f"{_model_short(c_model.value) or '?'} · {int(c_epochs.value or 0)} 轮"
                                   f" · imgsz {c_imgsz.value}"
                                   f" · batch {c_batch.value if c_batch.value is not None else '自动'}"
                                   f" · 早停 {c_patience.value or 100} 轮 · GPU {c_device.value or '0'}"
@@ -4523,13 +4541,14 @@ document.addEventListener('scroll', function(e){
             cross_rows = []
             for t in tasks:
                 label, color = RUN_STATUS.get(t["status"], (t["status"], "grey"))
-                cross_rows.append({"id": t["id"], "name": t["name"], "base_model": t["base_model"],
+                cross_rows.append({"id": t["id"], "name": t["name"],
+                                   "base_model": _model_short(t["base_model"]),
                                    "runs": t["runs"], "best_str": _fmt_metric(t.get("primary_metric")),
                                    "status_label": label, "status_color": color})
             cross = ui.table(columns=[
                 {"name": "name", "label": "任务", "field": "name", "align": "left",
                  "style": "white-space:normal"},
-                {"name": "base_model", "label": "基模型", "field": "base_model", "align": "left"},
+                {"name": "base_model", "label": "预训练权重", "field": "base_model", "align": "left"},
                 {"name": "status", "label": "状态", "field": "status_label"},
                 {"name": "runs", "label": "轮数", "field": "runs"},
                 {"name": "best_str", "label": "最优主指标", "field": "best_str"},
@@ -5452,7 +5471,7 @@ document.addEventListener('scroll', function(e){
                 refresh()
                 render_detail()
 
-            # ── 新建对话框：分区 + 档位 + 官方全量参数 tabs + 基模型联动（与训练页同节奏）
+            # ── 新建对话框：分区 + 档位 + 官方全量参数 tabs + 预训练权重联动（与训练页同节奏）
             with ui.dialog() as create_dialog:
               with ui.card().classes("w-[40rem] p-0 gap-0"):
                 with ui.row().classes("w-full items-center q-px-md q-pt-md pb-none"):
@@ -5468,9 +5487,11 @@ document.addEventListener('scroll', function(e){
                     c_ds = _labeled("数据集", ui.select, label_w="w-16",
                                     options=managed or {"": "（暂无托管数据集，请先到数据集页导入）"},
                                     with_input=True)
-                    c_model = _labeled("基模型", ui.input, label_w="w-16", value="yolo11n")
+                    c_model = _labeled("预训练权重", ui.input, label_w="w-16", value="yolo11n")
                     with c_model:
-                        ui.tooltip("随数据集任务类型自动带出；obb 数据集 → yolo11n-obb 等")
+                        ui.tooltip("官方模型名（如 yolo11n，首次由 ultralytics 自动下载，随数据集任务类型"
+                                   "自动带出）；或本地 .pt 绝对路径（如历史 Run 的 best.pt，本地路径"
+                                   "任务类型不可推断，不参与匹配防呆）")
                     c_reason = ui.label("").classes("text-xs text-red-500 min-h-4")
                     c_obj = _labeled("优化目标", ui.select, label_w="w-16",
                                      options=["提升小目标召回", "压制误检", "收敛过拟合", "提升整体 mAP"],

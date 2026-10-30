@@ -72,7 +72,7 @@ def test_importance_correlation_and_insufficient(tmp_path):
     assert imp["keys"][0]["rho"] > 0.9
     assert "lr0" in render_context(imp) and "ρ" in render_context(imp)
 
-    # 过滤：不同基模型不混入
+    # 过滤：不同预训练权重不混入
     _seed_run(factory, tmp_path, lr0=0.5, primary=0.99, base="other-model")
     imp2 = compute_importance(factory, base_model="stub-model")
     assert imp2["n_runs"] == 5

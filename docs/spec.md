@@ -47,7 +47,8 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **生命周期**：训练子进程 `start_new_session` 脱离；平台重启**孤儿收养**（pid + csv 恢复监控）；停止链 SIGTERM → `trainer.stop` → 超时 killpg SIGKILL。
 - **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态——续训成功不被历史失败轮压成 failed）。
 - **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供"续训"（新 Run）。
-- **运行快照** [M6]：Run 启动冻结全量训练输入（切分清单 + classes.txt 哈希 + 增强参数 + 基础权重标识）入 Run manifest；历史 Run 可复现、跨 Run diff 完整。
+- **预训练权重**：创建任务时权重为双形态——官方模型名（如 yolo11n，ultralytics 首次自动下载，随数据集 task_type 自动带出）或本地 .pt 绝对路径（如历史 Run 的 best.pt）；官方名与数据集任务不匹配时防呆拦截，本地路径任务类型不可推断（平台无 torch 不读权重）、不参与防呆。UI 表与任务名等显示处路径收短为文件名。
+- **运行快照** [M6]：Run 启动冻结全量训练输入（切分清单 + classes.txt 哈希 + 增强参数 + 预训练权重标识）入 Run manifest；历史 Run 可复现、跨 Run diff 完整。
 - **失败 Retry** [M7]：Failed/Cancelled Run 一键以相同参数重开 Task。
 - **表单工程学** [M7]：超参失焦 clamp 反馈、只存非默认值、「已修改」徽章——超参 diff 天然只剩差异。
 - **预设实验模板** [M8]：尺寸扫描（640/800/960 一键三 Task）/lr 扫描模板 + 少样本快训预设；不做自然语言入口。

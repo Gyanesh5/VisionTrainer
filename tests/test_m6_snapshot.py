@@ -105,7 +105,7 @@ def test_snapshot_args_diff_across_rounds(snap_client, tmp_path):
 
 
 def test_snapshot_local_weight_hash(tmp_path, detect_source):
-    """基础权重为本地文件时记录 sha256（复现实验的关键输入）。"""
+    """预训练权重为本地文件时记录 sha256（复现实验的关键输入）。"""
     w = tmp_path / "best.pt"
     w.write_bytes(b"weights-bytes")
     data_yaml = tmp_path / "data.yaml"

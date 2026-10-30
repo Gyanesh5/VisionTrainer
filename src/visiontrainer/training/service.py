@@ -414,7 +414,7 @@ def compare_runs(manager, task_id: int) -> dict:
                            "best_val": best_val, "curve": curve,
                            "split_uid": (snap or {}).get("split_manifest", {}).get("uid"),
                            "args_changes": changes})
-        # M7：任务内跨轮显存对比（有采样才带）+ 参数重要性（同数据集/基模型全量 Run 统计）
+        # M7：任务内跨轮显存对比（有采样才带）+ 参数重要性（同数据集/同预训练权重全量 Run 统计）
         gpu_curves = []
         for r in rounds:
             samples = run_gpu_samples(manager, r["uid"])

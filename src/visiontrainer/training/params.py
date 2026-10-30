@@ -41,7 +41,7 @@ GROUPS: dict[str, list[dict]] = {
         {"key": "save", "type": "bool", "default": True, "label": "save（保存 ckpt/结果）"},
         {"key": "save_period", "type": "int", "default": -1, "label": "save_period（checkpoint 间隔 epoch，-1 关）", "min": -1},
         {"key": "cache", "type": "bool|str", "default": False, "label": "cache（数据缓存）", "options": ["ram", "disk"]},
-        {"key": "pretrained", "type": "bool", "default": True, "label": "pretrained（预训练权重）"},
+        {"key": "pretrained", "type": "bool", "default": True, "label": "pretrained（预训练开关）"},
         {"key": "cls_remap", "type": "bool", "default": True, "label": "cls_remap（类别重映射）"},
         {"key": "verbose", "type": "bool", "default": True, "label": "verbose（详细日志）"},
         {"key": "deterministic", "type": "bool", "default": True, "label": "deterministic（确定性训练）"},

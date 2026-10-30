@@ -14,7 +14,7 @@ MAX_KEYS = 12         # bar 图 / LLM 注入取前 N 个关键超参
 
 
 def _collect(Session, dataset: str | None, base_model: str | None) -> list[dict]:
-    """(features, target) 样本集：有快照、有主指标的 done Run；可按数据集+基模型过滤。"""
+    """(features, target) 样本集：有快照、有主指标的 done Run；可按数据集+预训练权重过滤。"""
     from ..db.models import Run, Task
     from ..training.snapshot import load_snapshot
 

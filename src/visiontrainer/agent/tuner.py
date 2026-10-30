@@ -413,7 +413,7 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
                    if t.dataset_manifest_path else None)
         pruned_rounds = (t.agent_config or {}).get("pruned_rounds") or []
 
-    # 参数重要性（M7 05 号票）：同数据集+基模型的历史 Run 统计，注入决策上下文
+    # 参数重要性（M7 05 号票）：同数据集+同预训练权重的历史 Run 统计，注入决策上下文
     importance = compute_importance(Session, dataset=dataset, base_model=t.base_model)
     imp_text = render_context(importance)
 

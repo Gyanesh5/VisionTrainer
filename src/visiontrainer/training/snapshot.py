@@ -2,7 +2,7 @@
 
 冻结内容（写入 <run_dir>/run_manifest.json，随产物归档）：
 - 当轮训练参数（Agent 轮即该轮真实生效的超参，不是任务当前值）
-- 基础权重标识：基模型名 +（本地文件时的 sha256；ultralytics 名字权重记「由训练端解析」）
+- 基础权重标识：预训练权重名 +（本地文件时的 sha256；ultralytics 名字权重记「由训练端解析」）
 - 切分清单冻结副本（train/val 全量清单 + 种子/比例）
 - 类别表：内容 + sha256（此后改名/重排不影响旧 Run 查证）
 
@@ -50,7 +50,7 @@ def build_snapshot(*, run_uid: str, round_no: int, base_model: str,
     if classes_txt.is_file():
         classes = [ln for ln in classes_txt.read_text(encoding="utf-8").splitlines() if ln.strip()]
 
-    # 基础权重：本地路径 → 内容哈希；模型名 → 训练端解析（不猜缓存位置）
+    # 预训练权重：本地路径 → 内容哈希；模型名 → 训练端解析（不猜缓存位置）
     weight_path = Path(base_model).expanduser()
     weight_identity = ({"kind": "file", "path": str(weight_path), "sha256": _file_sha256(weight_path)}
                        if weight_path.is_file() else {"kind": "resolved_by_trainer", "name": base_model})
