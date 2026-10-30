@@ -31,7 +31,7 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/datasets/{id}/stats` | 健康报告画像（M6 01/02）：`{summary, per_image[], agg:{by_split, obj_hist, sizes, heatmap}}`；无画像返回 `null`（UI 提示先重新校验）；随导入/重新校验同遍历生成，重切/排除后重组；外部数据集 400 |
+| GET | `/api/v1/datasets/{id}/stats` | 健康报告画像（M6 01/02）：`{summary, per_image[], agg:{by_split, obj_hist, sizes, heatmap, obj_size}}`；`obj_size` 小/中/大按 COCO 32²/96² 阈值在 640 基准尺度分档（`thresholds.ref_imgsz`，分辨率无关）；无画像返回 `null`（UI 提示先重新校验）；随导入/重新校验同遍历生成，重切/排除后重组；外部数据集 400 |
 | GET | `/api/v1/datasets/{id}/audit` | 体检报告缓存读（M6 03）；未体检过返回 `null` |
 | POST | `/api/v1/datasets/{id}/audit` | 跑体检（长操作，指纹命中缓存秒回）。报告：`exact_groups`（sha256）/ `near_groups`（phash≤8 并查集）/ `leaks`（跨切分泄漏对）/ `imbalance`（失衡判定+规则文案）/ `skipped_undecodable`；`from_cache` 标记 |
 | POST | `/api/v1/datasets/{id}/exclude` | 从切分清单排除（M6 04，质量审计唯一处置）。body: `{files: [绝对路径], reason?}`；只删清单不洗牌（剩余文件 train/val 归属不变），生成新 manifest 并切 active，旧清单保留；排空 train/val → 409 |

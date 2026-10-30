@@ -3773,21 +3773,17 @@ document.addEventListener('scroll', function(e){
                             ch_heat = ui.echart(_center_heat_options(payload), renderer="svg").classes("w-full h-56")
                             ch_heat.on_point_click(_on_heat_cell)
                             ch_heat.on("chart:brushEnd", _on_brush, ["areas"])
-                    # M9 E：目标尺寸画像（COCO 32²/96² 口径 + 640 训练尺度换算）
+                    # M9 E：目标尺寸画像（COCO 32²/96² 阈值按 640 基准尺度分档，分辨率无关）
                     osz = (payload.get("agg") or {}).get("obj_size")
                     if osz:
                         with ui.row().classes("w-full items-center gap-2 flex-wrap text-[11px]"):
                             ui.icon("straighten").classes("text-[14px] opacity-50")
                             with ui.label("目标尺寸").classes("opacity-60"):
-                                ui.tooltip("COCO 口径：小 <32² · 中 32²–96² · 大 >96² px")
+                                ui.tooltip("COCO 口径，按 640 基准换算：小 <32² · 中 32²–96² · 大 ≥96² px")
                             for k, zh, c in (("small", "小", "amber"), ("medium", "中", "blue"),
                                              ("large", "大", "green")):
                                 ui.badge(f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
                                          ).props(f"color={c} outline").style("font-size:10px")
-                            s640 = (osz.get("scaled_640") or {}).get("small_ratio")
-                            if s640 is not None:
-                                ui.label(f"按 640 训练尺度换算后小目标占 {s640:.0%}"
-                                         "——小目标多可考虑提高 imgsz").classes("opacity-45")
                 else:
                     ui.label("分类任务无目标框：直方图 / 尺寸散点 / 中心热力图不适用").classes("text-xs opacity-40")
                 rerender_drill()

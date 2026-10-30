@@ -14,6 +14,9 @@ from datetime import datetime
 HEATMAP_GRID = 20  # 标注中心热力图网格边长
 SMALL_AREA = 32 ** 2   # COCOeval 官方小目标线（px²）
 MEDIUM_AREA = 96 ** 2  # 中目标线
+OBJ_SIZE_REF = 640     # 尺寸分档基准尺度：COCO 阈值按 ~640 分辨率图像定义，
+                       # 必须先换算到该基准再判——绝对像素口径在高分辨率图上失真
+                       # （5472×3648 的 107×138 目标绝对面积是「大」，训练时全缩小成小目标）
 
 
 def _split_of(image: str, manifest: dict) -> str | None:
@@ -100,31 +103,33 @@ def _compose(dataset: str, task_type: str, classes: list[str],
             heat[iy][ix] += 1
 
     labeled = sum(1 for r in per_image if r.get("labels") or r.get("cls"))
-    # M9 E：目标尺寸画像（COCO 32²/96² 口径 + 640 训练尺度换算）
+    # M9 E：目标尺寸画像——小/中/大按 COCO 32²/96² 阈值在 640 基准尺度分档
+    # （分辨率无关：同一目标不因原图分辨率高而「变大」，贴近训练时的真实尺度）
     obj_size = None
     if task_type in ("detect", "segment", "obb"):
-        small = medium = large = small_640 = total = 0
+        small = medium = large = total = 0
         for r in per_image:
             rw, rh = r.get("w"), r.get("h")
-            scale = (640.0 / max(float(rw), float(rh))) if rw and rh else None
+            if not (rw and rh):
+                continue
+            scale = OBJ_SIZE_REF / max(float(rw), float(rh))
             for o in r.get("objs") or []:
                 bw, bh = o.get("w"), o.get("h")
-                if not bw or not bh:
+                if not (bw and bh):
                     continue
                 total += 1
-                if bw * bh < SMALL_AREA:
+                area = (bw * scale) * (bh * scale)
+                if area < SMALL_AREA:
                     small += 1
-                elif bw * bh < MEDIUM_AREA:
+                elif area < MEDIUM_AREA:
                     medium += 1
                 else:
                     large += 1
-                if scale is not None and (bw * scale) * (bh * scale) < SMALL_AREA:
-                    small_640 += 1
         if total:
             obj_size = {"total": total, "small": small, "medium": medium, "large": large,
                         "small_ratio": round(small / total, 4),
-                        "thresholds": {"small_px2": SMALL_AREA, "medium_px2": MEDIUM_AREA},
-                        "scaled_640": {"imgsz": 640, "small_ratio": round(small_640 / total, 4)}}
+                        "thresholds": {"small_px2": SMALL_AREA, "medium_px2": MEDIUM_AREA,
+                                       "ref_imgsz": OBJ_SIZE_REF}}
     return {
         "dataset": dataset,
         "task_type": task_type,

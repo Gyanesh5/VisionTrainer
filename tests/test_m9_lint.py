@@ -262,9 +262,9 @@ def test_stats_obj_size(tmp_path):
         "image": "/x/a.png", "label": "/x/a.json", "primary_label": "car",
         "problems": [],
         "meta": {"w": 1000, "h": 800, "objs": [
-            {"label": "car", "cx": 0.5, "cy": 0.5, "w": 20.0, "h": 20.0},   # 400px² 小
-            {"label": "car", "cx": 0.5, "cy": 0.5, "w": 50.0, "h": 50.0},   # 2500px² 中
-            {"label": "car", "cx": 0.5, "cy": 0.5, "w": 400.0, "h": 400.0},  # 160000px² 大
+            {"label": "car", "cx": 0.5, "cy": 0.5, "w": 20.0, "h": 20.0},   # 640 基准 12.8px 小
+            {"label": "car", "cx": 0.5, "cy": 0.5, "w": 50.0, "h": 50.0},   # →32px=1024px² 中
+            {"label": "car", "cx": 0.5, "cy": 0.5, "w": 400.0, "h": 400.0},  # →256px 大
         ]},
     }]
     manifest = {"uid": "u", "train": ["/x/a.png"], "val": []}
@@ -272,8 +272,24 @@ def test_stats_obj_size(tmp_path):
     osz = payload["agg"]["obj_size"]
     assert osz["total"] == 3 and osz["small"] == 1 and osz["medium"] == 1 and osz["large"] == 1
     assert osz["small_ratio"] == round(1 / 3, 4)
-    # 640 尺度换算：scale=640/1000 → 50px 边长变 32px（=1024px² 边界，不算小）；20px→12.8px 仍小
-    assert osz["scaled_640"]["small_ratio"] == round(1 / 3, 4)
+    assert osz["thresholds"]["ref_imgsz"] == 640
+
+
+def test_stats_obj_size_scale_invariant():
+    """分档与原图分辨率无关：同一目标放大到高分辨率图里不许变成「大目标」。"""
+    entries = [{
+        "image": "/x/big.png", "label": "/x/big.json", "primary_label": "chip",
+        "problems": [],
+        # 5472×3648 工业大图：107×138 绝对面积 14766px²>96² 会误判「大」，
+        # 按 640 基准（scale≈0.117）换算后 12.5×16.1px 应是小目标
+        "meta": {"w": 5472, "h": 3648, "objs": [
+            {"label": "chip", "cx": 0.5, "cy": 0.5, "w": 107.0, "h": 138.0},
+        ]},
+    }]
+    manifest = {"uid": "u", "train": ["/x/big.png"], "val": []}
+    payload = build_stats(entries, manifest, "detect", ["chip"], "ds")
+    osz = payload["agg"]["obj_size"]
+    assert osz["total"] == 1 and osz["small"] == 1 and osz["medium"] == 0 and osz["large"] == 0
 
 
 # ---------------------------------------------------------------- meta objs 带宽高（健康原料）
