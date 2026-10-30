@@ -258,24 +258,6 @@ def export_review_rejects(name: str):
         return _error_response(exc)
 
 
-@router.post("/{name}/label-probe")
-def run_label_probe(name: str):
-    """跑标注质检（M9 04，后台作业：快训探针→全量推理→三嫌疑榜单）；进行中重复触发 409。"""
-    try:
-        return svc.run_label_probe(name)
-    except DatasetError as exc:
-        return _error_response(exc)
-
-
-@router.get("/{name}/label-probe")
-def label_probe_status(name: str):
-    """质检作业/结果读（M9 04）：{status: running|done|failed, report?}；未跑过返回 null。"""
-    try:
-        return svc.label_probe_status(name)
-    except DatasetError as exc:
-        return _error_response(exc)
-
-
 @router.post("/{name}/drops-ack")
 def drops_ack(name: str):
     """确认接受丢弃（M9 确认门）：同一批丢弃确认一次即粘住，出现新丢弃集合才重新要求。"""

@@ -44,15 +44,13 @@
 | :--- | :--- | :--- |
 | GET | `/api/v1/thumb?p=&box=&t=` | 图片直出（PIL 缩略图或原图）。`box` 白名单 0/72/96/260/512（0=原图不缩放，大图查看器用）。`t` 为 HMAC 签名（UI 经 `thumbs.thumb_url` 签发，24h 有效）——无签名/篡改路径 → 403；缺文件/坏图 → 404；box 越界 → 400。响应带 ETag（绑 size+mtime+box）与 `Cache-Control: max-age=86400`，`If-None-Match` 命中回 304。缩略图档服务端 (path, mtime, box) LRU 缓存字节 |
 
-### 数据集域 v1.2 增补（标注审查 / 标注质检 / 规则扩充，2026-09-22）
+### 数据集域 v1.2 增补（标注审查 / 规则扩充，2026-09-22）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,split,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——有效状态按双指纹现算（shapes 哈希变更 → pending+modified 标记）；负样本（无标注 JSON）不入队；可疑度分值与来源（校验/审计/错误分析/标注质检）由平台聚合，队列按可疑度降序 |
+| GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,split,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——有效状态按双指纹现算（shapes 哈希变更 → pending+modified 标记）；负样本（无标注 JSON）不入队；可疑度分值与来源（校验/审计/错误分析）由平台聚合，队列按可疑度降序 |
 | POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单（`checked`/`vt_review`）原子写回标注 JSON（ADR 0003）；rejected 必填 reason（漏标/多标/框不准/类别错+note）；图不在活跃清单 404 |
 | POST | `/api/v1/datasets/{id}/review/export` | 导出驳回清单 markdown 至数据集目录（与改标清单同构：逐项图名+理由+XAL 直达行） |
-| POST | `/api/v1/datasets/{id}/label-probe` | 跑标注质检（M9，后台作业：训练 venv yolo11n 快训 3–5 epoch → 全量低 conf 推理 → 平台侧三榜单重组）；进行中重复触发 409 |
-| GET | `/api/v1/datasets/{id}/label-probe` | 质检作业/结果读：`{status: running\|done\|failed, started_at, report?{missing[], misclass[], spurious[]}}`；未跑过返回 `null` |
 | POST | `/api/v1/datasets/{id}/relabel-refresh` | 标注变更联动（M9）：单图重转换刷新派生 YOLO txt。body: `{image?}`（省略=全清单按 mtime 增量）；返回刷新数 |
 | POST | `/api/v1/datasets/{id}/drops-ack` | 确认接受丢弃（M9 确认门）：`drops_pending_ack=true` 时提交训练被 409 拒绝，确认后方可继续；同一批丢弃（签名相同）确认一次即粘住 |
 

@@ -2606,7 +2606,7 @@ document.addEventListener('scroll', function(e){
 
                     c_tpl.on_value_change(lambda _e: _upd_tpl_preview())
 
-                    # M9 03：审查完成度提示（仅提示不阻断——快训探针场景不受阻）
+                    # M9 03：审查完成度提示（仅提示不阻断）
                     rv_hint = ui.label("").classes("text-[11px] opacity-60")
                     cr_ctx: dict = {"meta": None, "progress": None}  # B 确认弹窗 facts 缓存
 
@@ -2775,7 +2775,7 @@ document.addEventListener('scroll', function(e){
                         ui.notify(f"创建失败：{exc}", type="negative")
 
                 # ── B 确认门（maskflow-ui-study §5.3）：facts 复述 + 三档检查 + 期望管理
-                # 不问新问题，只复述「你将得到什么」；blocker 不硬断（快训探针场景），
+                # 不问新问题，只复述「你将得到什么」；blocker 不硬断，
                 # 但红色示警让「校验未过/丢弃待确认」在点击创建前被看见。
                 def _confirm_payload() -> tuple[list[tuple[str, str]], list[str], list[str]]:
                     """(facts 键值对, blockers, warnings)——打开确认弹窗时现算。"""
@@ -3413,98 +3413,12 @@ document.addEventListener('scroll', function(e){
                     rst["i"] = min(rst["i"], max(len(_fl()) - 1, 0))
                     _view.refresh()
 
-                async def _run_probe() -> None:
-                    try:
-                        await _io(ds.run_label_probe, meta["name"])
-                        ui.notify("标注质检已启动：探针快训 + 全量推理（几分钟，本页签自动刷新）",
-                                  type="positive")
-                    except Exception as exc:  # noqa: BLE001
-                        ui.notify(f"启动失败：{exc}", type="negative")
-                    _probe_area.refresh()
-
                 async def _export_rejects() -> None:
                     try:
                         r = await _io(ds.export_review_rejects, meta["name"])
                         ui.notify(f"驳回清单已导出：{r['path']}（{r['count']} 张）", type="positive")
                     except Exception as exc:  # noqa: BLE001
                         ui.notify(f"导出失败：{exc}", type="negative")
-
-                @ui.refreshable
-                def _probe_area() -> None:
-                    try:
-                        p = ds.label_probe_status(meta["name"])
-                    except Exception:  # noqa: BLE001
-                        p = None
-                    if not p:
-                        return
-                    if p["status"] == "running":
-                        with ui.row().classes("items-center gap-2 text-[11px] opacity-70"):
-                            ui.spinner("dots", size="sm")
-                            ui.label("标注质检运行中：探针快训 + 全量推理…（本区自动刷新）")
-                        return
-                    rep = p.get("report")
-                    if p["status"] == "failed":
-                        with ui.row().classes("items-center gap-2 text-[11px] text-rose-300"):
-                            ui.icon("error").classes("text-[14px]")
-                            ui.label(f"上次标注质检失败：{p.get('error', '')}").classes("break-all")
-                        return
-                    if not rep:
-                        return
-                    zh = {"missing": "漏标嫌疑", "misclass": "类错标嫌疑", "spurious": "幽灵标嫌疑"}
-                    with ui.row().classes("items-center gap-2 text-[11px]"):
-                        ui.icon("biotech").classes("text-[13px] opacity-60")
-                        ui.label(f"标注质检 {_fmt_ts(rep.get('checked_at'))} · {rep.get('images', 0)} 图"
-                                 ).classes("opacity-60")
-                        for k in ("missing", "misclass", "spurious"):
-                            n = (rep.get("counts") or {}).get(k, 0)
-                            ui.badge(f"{zh[k]} {n}").props(
-                                "outline " + ("color=negative" if k == "missing" else
-                                              "color=warning" if k == "misclass" else "color=grey-6")
-                            ).style("font-size:10px")
-                    for k in ("missing", "misclass", "spurious"):
-                        items = rep.get(k) or []
-                        if not items:
-                            continue
-                        with ui.expansion(f"{zh[k]}（前 15 / 共 {len(items)}）",
-                                          icon="rule").classes("w-full text-xs"):
-                            for it in items[:15]:
-                                with ui.row().classes("w-full items-center gap-2"):
-                                    detail = (f"conf {it.get('conf'):.2f} · {it.get('cls_gt')}→{it.get('cls_pred')}"
-                                              if k == "misclass" else
-                                              f"conf {it.get('conf'):.2f} · {it.get('cls')}" if k == "missing"
-                                              else f"{it.get('cls')}（无任何重叠预测）")
-                                    # 不加 loading=lazy：QScrollArea 的变换层让原生懒加载判定
-                                    # 过保守（视口内也不拉，实测 80 张只出 6 张），榜单小区域直载
-                                    ui.element("img").props(
-                                        f'src="{thumbs.thumb_url(it["image"], 96)}" decoding="async"'
-                                    ).classes("w-14 h-9 object-cover rounded-sm shrink-0")
-                                    ui.label(detail).classes("text-[10px] opacity-60 w-48 shrink-0")
-                                    _img_name_link(it["image"], Path(it["image"]).name,
-                                                   "text-[11px] truncate flex-1 min-w-0")
-
-                                    def _jump(img=it["image"]) -> None:
-                                        rst["filter"] = "all"
-                                        idx = next((i for i, x in enumerate(_fl())
-                                                    if x["image"] == img), None)
-                                        if idx is not None:
-                                            rst["i"] = idx
-                                            _view.refresh()
-
-                                    ui.button("审查此图", icon="gavel").props(
-                                        "flat dense size=xs color=primary").on_click(_jump)
-                                    ui.button(icon="open_in_new",
-                                              on_click=lambda img=it["image"]: _open_in_xal(img)).props(
-                                        "flat dense size=xs").tooltip("在 X-AnyLabeling 中打开")
-
-                def _probe_tick() -> None:
-                    try:
-                        p = ds.label_probe_status(meta["name"]) or {}
-                    except Exception:  # noqa: BLE001
-                        return
-                    if p.get("status") == "running":
-                        _probe_area.refresh()
-
-                ui.timer(3.0, _probe_tick)
 
                 @ui.refreshable
                 def _view() -> None:
@@ -3530,13 +3444,9 @@ document.addEventListener('scroll', function(e){
                                  ).props("outline color=teal").style("font-size:10px").tooltip(
                             "判定即时写回标注 JSON，X-AnyLabeling 图标即时同步——无「未保存」态")
                         ui.space()
-                        ui.button("标注质检", icon="biotech").props("flat dense size=xs").tooltip(
-                            "训前探针：yolo11n 快训 3 epoch → 全量低置信度推理 → 漏标/类错标/幽灵标三嫌疑榜单（约几分钟）"
-                        ).on_click(_run_probe)
                         ui.button("导出驳回清单", icon="fact_check").props("flat dense size=xs").tooltip(
                             "驳回图 markdown 清单落数据集目录（与改标清单同构）").on_click(_export_rejects)
                         ui.button("刷新队列", icon="refresh").props("flat dense size=xs").on_click(_reload)
-                    _probe_area()
                     with ui.row().classes("w-full gap-1 flex-wrap text-[10px]"):
                         for key, zh in (("pending", "待审"), ("modified", "已修改"), ("rejected", "驳回"),
                                         ("approved", "通过"), ("skipped", "跳过"), ("all", "全部")):

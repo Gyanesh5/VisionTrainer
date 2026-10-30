@@ -123,10 +123,9 @@ def _atomic_write_json(p: Path, data: dict) -> None:
 
 # ---------------------------------------------------------------- 可疑度聚合
 
-def compute_suspicion(meta: dict, manifest: dict, dataset: str,
-                      probe_report: dict | None = None) -> dict[str, dict]:
+def compute_suspicion(meta: dict, manifest: dict, dataset: str) -> dict[str, dict]:
     """聚合可疑度来源（0–1）：校验问题 / 审计命中（重复·泄漏·同图重复）/ 训后错误分析
-    FN·FP / 标注质检三榜单。返回 {image: {"susp": float, "sources": [str]}}。
+    FN·FP。返回 {image: {"susp": float, "sources": [str]}}。
 
     DB 不可用或某来源无数据时该来源自然缺席。
     """
@@ -159,15 +158,6 @@ def compute_suspicion(meta: dict, manifest: dict, dataset: str,
                 _add(it["image"], "审计·泄漏", SUSP_AUDIT_LEAK)
         for d in (audit.get("duplicates_within") or {}).get("items") or []:
             _add(d["image"], "审计·同图重复", SUSP_AUDIT_DUP * 0.8)
-
-    # ③ 标注质检三嫌疑榜单（M9 04；报告落盘由 service 读入传入）
-    if probe_report:
-        for m in probe_report.get("missing") or []:
-            _add(m["image"], "标注质检", 0.8)
-        for m in probe_report.get("misclass") or []:
-            _add(m["image"], "标注质检", 0.8)
-        for m in probe_report.get("spurious") or []:
-            _add(m["image"], "标注质检", 0.7)
 
     # ③ 训后错误分析（该数据集最近一次 Run 的逐框错误）：FN/FP/混淆 图级计数
     try:

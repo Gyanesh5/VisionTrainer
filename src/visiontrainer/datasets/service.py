@@ -753,10 +753,7 @@ def review_queue(name: str, root: Path | None = None) -> dict:
     ds_dir = _ds_dir(name, root)
     manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
     train_set = set(manifest["train"])
-    from .label_probe import load_probe_report
-
-    susp = rv.compute_suspicion(meta, manifest, name,
-                                probe_report=load_probe_report(ds_dir, manifest["uid"]))
+    susp = rv.compute_suspicion(meta, manifest, name)
 
     counts = {"pending": 0, "approved": 0, "rejected": 0, "skipped": 0, "modified": 0}
     items, unlabeled = [], 0
@@ -844,72 +841,6 @@ def export_review_rejects(name: str, root: Path | None = None) -> dict:
     out.write_text("\n".join(lines), encoding="utf-8")
     return {"path": str(out), "count": len(rejects),
             "entries": [{"image": it["image"], "reason": it["reason"]} for it in rejects]}
-
-
-# ---------------------------------------------------------------- 标注质检（M9 04 号票）
-
-_LABEL_PROBE_JOBS: dict[str, dict] = {}  # name -> {status: running|done|failed, started_at, ...}
-
-
-def label_probe_status(name: str, root: Path | None = None) -> dict | None:
-    """质检作业/结果读：内存作业态优先（running/failed），否则落盘报告（done），未跑过 null。"""
-    meta = get_dataset(name, root)
-    if meta["form"] != "managed":
-        raise DatasetError("invalid_args", "外部数据集不做标注质检")
-    job = _LABEL_PROBE_JOBS.get(name)
-    report = None
-    try:
-        from .label_probe import load_probe_report
-
-        report = load_probe_report(_ds_dir(name, root), meta["active_manifest"])
-    except Exception:  # noqa: BLE001 — 报告读取失败按未跑过处理
-        report = None
-    if job and job["status"] == "running":
-        return {"status": "running", "started_at": job.get("started_at")}
-    if job and job["status"] == "failed":
-        return {"status": "failed", "started_at": job.get("started_at"),
-                "error": job.get("error") or "未知错误", "report": report}
-    return {"status": "done", "report": report} if report else None
-
-
-def run_label_probe(name: str, root: Path | None = None) -> dict:
-    """启动标注质检（后台线程）：快训探针 → 全量推理 → 三嫌疑榜单；进行中重复触发 409。"""
-    from .label_probe import PROBE_MODELS
-
-    meta = get_dataset(name, root)
-    if meta["form"] != "managed":
-        raise DatasetError("invalid_args", "外部数据集不做标注质检")
-    if meta["task_type"] not in PROBE_MODELS:
-        raise DatasetError("invalid_args",
-                           f"标注质检仅支持检测/分割/旋转框任务（当前 {meta['task_type']}）")
-    job = _LABEL_PROBE_JOBS.get(name)
-    if job and job["status"] == "running":
-        raise DatasetError("state_conflict", "标注质检正在运行中（全量推理需几分钟）")
-    _LABEL_PROBE_JOBS[name] = {"status": "running",
-                               "started_at": datetime.now().isoformat(timespec="seconds")}
-    threading.Thread(target=_probe_worker, args=(name, root), daemon=True).start()
-    return {"status": "running", **_LABEL_PROBE_JOBS[name]}
-
-
-def _probe_worker(name: str, root: Path | None = None) -> None:
-    from .label_probe import run_probe
-
-    job = _LABEL_PROBE_JOBS.setdefault(name, {"status": "running",
-                                              "started_at": datetime.now().isoformat(timespec="seconds")})
-    try:
-        from ..config import load_config
-
-        meta = get_dataset(name, root)
-        ds_dir = _ds_dir(name, root)
-        manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"]
-                              / "split_manifest.json")
-        py = load_config().get("training", {}).get("python") or sys.executable
-        report = run_probe(ds_dir, manifest, meta["task_type"], meta["classes"], py)
-        job.update(status="done", report=report,
-                   finished_at=datetime.now().isoformat(timespec="seconds"))
-    except Exception as exc:  # noqa: BLE001 — 作业失败落状态供 GET 读，不炸线程
-        job.update(status="failed", error=str(exc),
-                   finished_at=datetime.now().isoformat(timespec="seconds"))
 
 
 # ---------------------------------------------------------------- 派生结构
