@@ -338,7 +338,7 @@ def _overlay_options(curves: list[tuple[str, list[dict]]]) -> dict:
                "data": [c["primary"] for c in curve]} for label, curve in curves]
     return {
         "backgroundColor": "transparent",
-        "color": CHART_PALETTE,
+        "color": CHART_PALETTE + ["#f472b6", "#a3e635", "#fb923c"],
         "textStyle": {"color": CHART_TEXT},
         "grid": _base_grid(),
         "legend": _legend(),
@@ -4552,6 +4552,12 @@ document.addEventListener('scroll', function(e){
 
             cross_out = ui.column().classes("w-full")
             PALETTE9 = CHART_PALETTE + ["#f472b6", "#a3e635", "#fb923c"]
+            # 转置后两表共用的「任务」行标签槽：曲线同源色点 + 全名换行（长任务名不再截断）
+            _TASK_CELL = ('<q-td :props="props" style="max-width:280px">'
+                          '<div class="flex items-center gap-1.5">'
+                          '<span class="inline-block rounded-full shrink-0" '
+                          ':style="`width:9px;height:9px;background:${props.row.dot}`" />'
+                          '<span class="break-all">{{ props.value }}</span></div></q-td>')
 
             def _dot(color: str) -> None:
                 ui.element("span").classes("inline-block rounded-full").style(
@@ -4604,28 +4610,30 @@ document.addEventListener('scroll', function(e){
                                            on_change=lambda e: (cmp_state.update(only_diff_cols=e.value),
                                                                 _render_compare()))
                             od.props("dense size=sm")
-                        rows = []
-                        for k in shown:
-                            row = {"metric": k}
+                        # 转置布局：任务做行（全名换行 + 曲线同源色点），指标做列——长任务名不再截断
+                        rows = [{"tid": str(t["id"]), "name": t["name"], "dot": PALETTE9[i % 9]}
+                                for i, t in enumerate(items)]
+                        for j, k in enumerate(shown):
                             vals = [ms.get(k, {}).get(cmp_state["mode"]) for ms in summaries]
                             nums = [v for v in vals if isinstance(v, (int, float))]
                             hi = max(nums) if nums and cmp_state["mode"] in ("best", "max", "last") else (
                                 min(nums) if nums else None)
                             for i, v in enumerate(vals):
-                                row[f"t{i}"] = "—" if v is None else f"{v:.4f}".rstrip("0").rstrip(".")
-                                row[f"t{i}_hi"] = (v is not None and hi is not None
-                                                   and abs(v - hi) < 1e-12 and len(nums) > 1)
-                            rows.append(row)
-                        cols = [{"name": "metric", "label": "指标", "field": "metric", "align": "left"}] + [
-                            {"name": f"t{i}", "label": t["name"][:12], "field": f"t{i}"} for i, t in enumerate(items)]
-                        mtbl = ui.table(columns=cols, rows=rows, row_key="metric")
+                                rows[i][f"m{j}"] = "—" if v is None else f"{v:.4f}".rstrip("0").rstrip(".")
+                                rows[i][f"m{j}_hi"] = (v is not None and hi is not None
+                                                       and abs(v - hi) < 1e-12 and len(nums) > 1)
+                        cols = [{"name": "name", "label": "任务", "field": "name", "align": "left"}] + [
+                            {"name": f"m{j}", "label": k, "field": f"m{j}",
+                             "headerStyle": "white-space: normal"} for j, k in enumerate(shown)]
+                        mtbl = ui.table(columns=cols, rows=rows, row_key="tid")
                         _style_table(mtbl)
                         mtbl.classes("text-xs")
                         hi_cell = ('<q-td :props="props"><span :class="props.row[props.col.name + \'_hi\'] ? '
                                    '\'text-green-600 text-weight-bold\' : \'\'">'
                                    "{{ props.value }}</span></q-td>")
-                        for i in range(len(items)):
-                            mtbl.add_slot(f"body-cell-t{i}", hi_cell)
+                        for j in range(len(shown)):
+                            mtbl.add_slot(f"body-cell-m{j}", hi_cell)
+                        mtbl.add_slot("body-cell-name", _TASK_CELL)
 
                     # ── 平行坐标（数值超参轴 + 主指标轴）
                     if len(items) >= 2:
@@ -4673,7 +4681,7 @@ document.addEventListener('scroll', function(e){
                 ui.notify(f"已纳入当前部署版：{cur['task_name']} · Run {cur['run_uid']}")
 
             def _hyperparam_diff(items: list[dict]) -> None:
-                """超参 diff 三件套（M8 06）：基准列 + 只看差异 + 高亮；Run 固定色点。"""
+                """超参 diff 三件套（M8 06）：基准行 + 只看差异 + 高亮；行标签带 Run 固定色点。"""
                 if len(items) < 2:
                     return
                 keys: list[str] = []
@@ -4687,7 +4695,7 @@ document.addEventListener('scroll', function(e){
                     with ui.label("超参对比").classes("text-sm font-semibold"):
                         ui.tooltip("与基准任务不同的值标红")
                     base_sel = _labeled("基准", ui.select, w="w-52", label_w="w-10",
-                                        options={t["id"]: t["name"][:16] for t in items},
+                                        options={t["id"]: t["name"] for t in items},
                                         value=cmp_state["baseline"] or items[0]["id"],
                                         on_change=lambda e: (cmp_state.update(baseline=e.value),
                                                               _render_compare()))
@@ -4698,6 +4706,7 @@ document.addEventListener('scroll', function(e){
                     odsw.props("dense size=sm")
                 baseline_id = cmp_state["baseline"] or items[0]["id"]
                 ordered = sorted(items, key=lambda t: (t["id"] != baseline_id,))
+                rank_dot = {t["id"]: PALETTE9[i % 9] for i, t in enumerate(items)}
 
                 def _diff_vs_base(k: str) -> bool:
                     base = next((t for t in items if t["id"] == baseline_id), items[0])
@@ -4708,28 +4717,31 @@ document.addEventListener('scroll', function(e){
                 if not shown_keys:
                     ui.label("（全部超参与基准一致）").classes("text-xs opacity-40")
                     return
+                # 转置布局：任务做行（⭐ 基准 + 全名换行 + 曲线同源色点），超参做列——长任务名不再截断
+                base_task = next((t for t in items if t["id"] == baseline_id), items[0])
                 rows = []
-                for k in shown_keys:
-                    row = {"param": k}
-                    base_val = str((next(t for t in items if t["id"] == baseline_id)
-                                    .get("train_args") or {}).get(k)) if any(
-                        t["id"] == baseline_id for t in items) else None
-                    for i, t in enumerate(ordered):
+                for t in ordered:
+                    row = {"tid": str(t["id"]),
+                           "name": ("⭐ " if t["id"] == baseline_id else "") + t["name"],
+                           "dot": rank_dot[t["id"]]}
+                    for j, k in enumerate(shown_keys):
                         v = (t.get("train_args") or {}).get(k)
-                        row[f"t{i}"] = "—" if v is None else str(v)
-                        row[f"t{i}_diff"] = t["id"] != baseline_id and str(v) != base_val
+                        bv = str((base_task.get("train_args") or {}).get(k))
+                        row[f"p{j}"] = "—" if v is None else str(v)
+                        row[f"p{j}_diff"] = t["id"] != baseline_id and str(v) != bv
                     rows.append(row)
-                cols = [{"name": "param", "label": "参数", "field": "param", "align": "left"}] + [
-                    {"name": f"t{i}", "label": ("⭐ " if t["id"] == baseline_id else "") + t["name"][:12],
-                     "field": f"t{i}"} for i, t in enumerate(ordered)]
-                tbl = ui.table(columns=cols, rows=rows, row_key="param")
+                cols = [{"name": "name", "label": "任务", "field": "name", "align": "left"}] + [
+                    {"name": f"p{j}", "label": k, "field": f"p{j}",
+                     "headerStyle": "white-space: normal"} for j, k in enumerate(shown_keys)]
+                tbl = ui.table(columns=cols, rows=rows, row_key="tid")
                 _style_table(tbl)
                 tbl.classes("text-xs")
                 diff_cell = ('<q-td :props="props"><span :class="props.row[props.col.name + \'_diff\'] ? '
                              '\'text-red text-weight-medium\' : \'\'">'
                              "{{ props.value }}</span></q-td>")
-                for i in range(len(ordered)):
-                    tbl.add_slot(f"body-cell-t{i}", diff_cell)
+                for j in range(len(shown_keys)):
+                    tbl.add_slot(f"body-cell-p{j}", diff_cell)
+                tbl.add_slot("body-cell-name", _TASK_CELL)
 
             cmp_holder["btn"] = cmp_btn
 
