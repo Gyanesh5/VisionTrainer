@@ -430,6 +430,53 @@ def test_bulk_delete_tasks(training_client):
     assert not (left & set(uids)), "批量删除后不应残留勾选任务"
 
 
+def test_delete_single_run_keeps_other_rounds(training_client):
+    """删除单轮训练记录：只删该轮，其余轮次与任务保留（2026-10-31 用户反馈：
+    多轮任务删一轮不该连坐全部轮次）；任务被删空时连同任务移除。"""
+    c = training_client
+    task_uid = _create_task(c, epochs=1)
+    tid = next(t["id"] for t in c.get("/api/v1/tasks").json() if t["uid"] == task_uid)
+    r1 = c.get(f"/api/v1/tasks/{tid}").json()["runs"][0]
+    _wait_status(c, r1["uid"], {"done"})
+    r2 = c.post(f"/api/v1/runs/{r1['uid']}/resume").json()["new_run_uid"]
+    _wait_status(c, r2, {"done"})
+    run2_dir = Path(c.get(f"/api/v1/runs/{r2}").json()["run_dir"])
+    assert run2_dir.exists()
+
+    # 删轮 2（连磁盘产物）：轮 1 与任务保留，聚合回落轮 1 终态
+    assert c.delete(f"/api/v1/runs/{r2}", params={"delete_files": True}).status_code == 200
+    assert c.get(f"/api/v1/runs/{r1['uid']}").status_code == 200, "轮 1 不应被连坐删除"
+    assert c.get(f"/api/v1/runs/{r2}").status_code == 404
+    assert not run2_dir.exists(), "delete_files 应清理该轮 run_dir"
+    task = c.get(f"/api/v1/tasks/{tid}").json()
+    assert [x["uid"] for x in task["runs"]] == [r1["uid"]]
+    assert task["status"] == "done", "删除最新终态轮后聚合应回落轮 1"
+
+    # 删到最后一轮：任务已无记录可聚合，连任务移除
+    assert c.delete(f"/api/v1/runs/{r1['uid']}").status_code == 200
+    assert c.get(f"/api/v1/tasks/{tid}").status_code == 404
+    assert all(t["uid"] != task_uid for t in c.get("/api/v1/tasks").json())
+
+
+def test_delete_running_run_rejected(training_client):
+    """运行中的训练记录不可删除（409）；停止落到取消终态后可删，聚合回落前一轮 done
+    而不被历史取消轮压住。"""
+    c = training_client
+    task_uid = _create_task(c, epochs=3)
+    tid = next(t["id"] for t in c.get("/api/v1/tasks").json() if t["uid"] == task_uid)
+    r1 = c.get(f"/api/v1/tasks/{tid}").json()["runs"][0]
+    _wait_status(c, r1["uid"], {"done"})
+    r2 = c.post(f"/api/v1/runs/{r1['uid']}/resume").json()["new_run_uid"]
+    _wait_status(c, r2, {"running"})
+    assert c.delete(f"/api/v1/runs/{r2}").status_code == 409, "运行中的 Run 不可删除"
+    assert c.post(f"/api/v1/runs/{r2}/stop").status_code == 200
+    _wait_status(c, r2, {"cancelled"})
+    assert c.delete(f"/api/v1/runs/{r2}").status_code == 200
+    task = c.get(f"/api/v1/tasks/{tid}").json()
+    assert [x["uid"] for x in task["runs"]] == [r1["uid"]]
+    assert task["status"] == "done", "取消轮删除后聚合应回落轮 1 的 done"
+
+
 # ---------------------------------------------------------------- 2026-09-21 停止链三 bug 回归
 # 事故形态：停止请求落库后平台重启 → stopping Run 无人收养 → Task 聚合 running →
 # 删除 409 + UI 无停止按钮（按钮只认 queued/running）→ 死锁。

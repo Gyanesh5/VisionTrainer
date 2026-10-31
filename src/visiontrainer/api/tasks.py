@@ -112,6 +112,15 @@ def get_run(uid: str, request: Request):
     return tsvc.get_run(_manager(request), uid)
 
 
+@router.delete("/runs/{uid}")
+@_maps_errors
+def delete_run(uid: str, request: Request, delete_files: bool = False):
+    """删除单条训练记录（Run）：仅终态可删，其余轮次保留（2026-10-31 用户反馈：
+    多轮任务删一轮不该连坐全部轮次）；任务被删空时连任务本身移除。"""
+    tsvc.delete_run(_manager(request), uid, delete_files)
+    return {"deleted": uid}
+
+
 @router.get("/runs/{uid}/logs")
 @_maps_errors
 def run_logs(uid: str, request: Request, tail: int = 200):

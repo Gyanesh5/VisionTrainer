@@ -166,12 +166,22 @@ def get_task(manager, task_id: int) -> dict:
                 "agent_state": (t.agent_config or {}).get("state"), "runs": runs, "decisions": decisions}
 
 
+def _purge_run_children(s, run_ids: list[int]) -> None:
+    """删除 Run 行的子表数据（epoch 指标 / GPU 采样 / 逐框错误 / Agent 决策 / 部署登记）。
+    delete_task 与 delete_run 共用——此前只清 EpochMetric，其余四表留孤儿行。"""
+    from visiontrainer.db.models import (AgentDecision, Deployment, EpochMetric, GPUSample,
+                                         RunSampleError)
+
+    if not run_ids:
+        return
+    for model in (EpochMetric, GPUSample, RunSampleError, AgentDecision, Deployment):
+        s.query(model).filter(model.run_id.in_(run_ids)).delete(synchronize_session=False)
+
+
 def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
     import shutil
 
-    from sqlalchemy import text
-
-    from visiontrainer.db.models import EpochMetric, Run, Task
+    from visiontrainer.db.models import Run, Task
 
     with manager.Session() as s:
         t = s.get(Task, task_id)
@@ -180,13 +190,49 @@ def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
         if t.status in ("running", "stopping"):
             raise _http_err("state_conflict", "任务运行中，请先停止", 409)
         task_uid = t.uid
-        s.query(EpochMetric).filter(EpochMetric.run_id.in_(
-            s.query(Run.id).filter(Run.task_id == task_id))).delete(synchronize_session=False)
+        _purge_run_children(s, [rid for (rid,) in
+                                s.query(Run.id).filter(Run.task_id == task_id).all()])
         s.query(Run).filter(Run.task_id == task_id).delete()
         s.delete(t)
         s.commit()
     if delete_files:
         shutil.rmtree(manager.s.runs_dir / task_uid, ignore_errors=True)
+
+
+def delete_run(manager, uid: str, delete_files: bool = False) -> None:
+    """删除单条训练记录（Run）：仅终态可删，其余轮次保留（2026-10-31 用户反馈：
+    多轮任务删一轮不该连坐全部轮次）。任务被删空时连任务本身移除；存余轮次时
+    Task 聚合按剩余轮重算（删掉最新终态轮回落到前一轮，_aggregate 口径）。"""
+    import shutil
+
+    from visiontrainer.db.models import Run, Task
+
+    with manager.Session() as s:
+        r = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if r is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if r.status not in ("done", "failed", "cancelled"):
+            raise _http_err("state_conflict",
+                            "仅已结束的训练记录可删除（运行/排队中请先停止或取消）", 409)
+        task = s.get(Task, r.task_id)
+        task_uid = task.uid if task else None
+        _purge_run_children(s, [r.id])
+        s.query(Run).filter(Run.id == r.id).delete(synchronize_session=False)
+        manager.current_progress.pop(r.id, None)
+        if task is not None and s.query(Run).filter(Run.task_id == r.task_id).count() == 0:
+            s.delete(task)  # 最后一轮被删：任务已无记录可聚合，连任务移除
+            whole_task_dir = True
+        else:
+            if task is not None:
+                manager._aggregate(s, r.task_id)
+            whole_task_dir = False
+        run_dir = r.run_dir
+        s.commit()
+    if delete_files:
+        if whole_task_dir and task_uid:
+            shutil.rmtree(manager.s.runs_dir / task_uid, ignore_errors=True)
+        elif run_dir:
+            shutil.rmtree(Path(run_dir), ignore_errors=True)
 
 
 def get_run(manager, uid: str) -> dict:

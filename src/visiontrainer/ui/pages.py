@@ -2078,6 +2078,10 @@ document.addEventListener('scroll', function(e){
                                                    on_click=lambda: do_force_stop(uid)).props("outline dense")
                                 with fs_btn:
                                     ui.tooltip("跳过优雅停止直接 SIGKILL（stopping 卡死时的兜底出口）")
+                            if run["status"] in ("done", "failed", "cancelled"):
+                                ui.button("删除本轮", icon="delete_sweep", color="negative",
+                                          on_click=lambda: open_run_del(uid, task, run["round_no"])
+                                          ).props("outline dense")
                             ui.button("删除任务", icon="delete", color="negative",
                                       on_click=lambda: open_del(task, task_id)).props("outline dense")
                     if run.get("error"):
@@ -2566,7 +2570,7 @@ document.addEventListener('scroll', function(e){
                         poll.n = 0
                         ui.timer(1.0, poll)
 
-            # ── 批量删除（勾选归批量——跨数据集组聚合、按任务去重删；行点击归详情）
+            # ── 批量删除（勾选归批量——跨数据集组聚合、逐条删勾选轮次；行点击归详情）
             with ui.dialog() as bulk_del_dialog, ui.card().classes("w-96 gap-2"):
                 bulk_title = ui.label("").classes("font-bold")
                 bulk_names = ui.label("").classes("text-xs opacity-60 break-all")
@@ -2576,19 +2580,16 @@ document.addEventListener('scroll', function(e){
 
                     async def _do_bulk_del() -> None:
                         sel = _selected_runs()
-                        by_task: dict[int, str] = {}
-                        for r in sel:  # 勾选按训练记录（Run 行），删除按任务去重
-                            by_task.setdefault(r["task_id"], r["name"])
                         bulk_del_dialog.close()
                         ok, fails = 0, []
-                        for tid, _name in by_task.items():
+                        for r in sel:  # 勾的是哪轮删的是哪轮，其余轮次不受影响
                             try:
-                                await _io(tsvc.delete_task, get_manager(), tid, bulk_files.value)
+                                await _io(tsvc.delete_run, get_manager(), r["uid"], bulk_files.value)
                                 ok += 1
                             except Exception as exc:  # noqa: BLE001
-                                fails.append(f"{_name}：{exc}")
+                                fails.append(f"{r['name']} 轮{r['round_no']}：{exc}")
                         if ok:
-                            ui.notify(f"已删除 {ok} 个任务", type="positive")
+                            ui.notify(f"已删除 {ok} 条训练记录", type="positive")
                         for f in fails:
                             ui.notify(f"删除失败 {f}", type="negative")
                         records_tbl.selected = []
@@ -2604,12 +2605,16 @@ document.addEventListener('scroll', function(e){
                 sel = _selected_runs()
                 if not sel:
                     return
-                names: list[str] = []
+                by_task: dict[int, list[dict]] = {}
                 for r in sel:
-                    if r["name"] not in names:
-                        names.append(r["name"])
-                bulk_title.set_text(f"批量删除 {len(names)} 个任务（勾选 {len(sel)} 条记录）")
-                bulk_names.set_text("将连同各任务全部轮次记录一并删除：" + "；".join(names))
+                    by_task.setdefault(r["task_id"], []).append(r)
+                emptied = [rs[0]["name"] for tid, rs in by_task.items()
+                           if sum(1 for x in state["last_rows"] if x["task_id"] == tid) == len(rs)]
+                bulk_title.set_text(f"删除所选 {len(sel)} 条训练记录")
+                note = f"逐条删除勾选轮次（涉及 {len(by_task)} 个任务），其余轮次不受影响"
+                if emptied:
+                    note += "；" + "、".join(emptied) + " 将被删空并连同任务移除"
+                bulk_names.set_text(note)
                 bulk_del_dialog.open()
 
             state["open_bulk_del"] = open_bulk_del
@@ -2694,6 +2699,20 @@ document.addEventListener('scroll', function(e){
                 state["del_target"] = task_id
                 del_dialog.open()
 
+            def open_run_del(uid: str, task: dict, round_no: int) -> None:
+                run_del_title.set_text(f"删除训练记录 {task['name']} · 轮 {round_no}")
+                # 仅剩这一轮时任务会连坐移除（服务端 delete_run 语义），确认门须言明
+                n_rounds = sum(1 for r in state["last_rows"] if r.get("task_id") == task_id_of(uid))
+                run_del_note.set_text(
+                    "该轮记录将删除，其他轮次不受影响；磁盘产物默认保留。"
+                    if n_rounds > 1 else
+                    "这是该任务唯一一轮，删除后任务本身也将一并移除；磁盘产物默认保留。")
+                state["run_del_target"] = uid
+                run_del_dialog.open()
+
+            def task_id_of(uid: str) -> int | None:
+                return next((r["task_id"] for r in state["last_rows"] if r["uid"] == uid), None)
+
             with detail:
                 ui.label("点击训练记录行查看该次运行详情").classes("text-xs opacity-40")
 
@@ -2716,6 +2735,29 @@ document.addEventListener('scroll', function(e){
                         render_detail()
 
                     ui.button("删除", color="negative", icon="delete", on_click=_do_del).props("unelevated")
+
+            with ui.dialog() as run_del_dialog, ui.card().classes("w-96 gap-2"):
+                run_del_title = ui.label("").classes("font-bold")
+                run_del_note = ui.label("").classes("text-xs opacity-60")
+                run_del_files = ui.checkbox("同时删除磁盘产物（该轮 runs 目录）")
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=run_del_dialog.close).props("flat")
+
+                    async def _do_run_del() -> None:
+                        run_del_dialog.close()
+                        try:
+                            await _io(tsvc.delete_run, get_manager(),
+                                      state["run_del_target"], run_del_files.value)
+                            ui.notify("该轮训练记录已删除")
+                            state["selected"] = None
+                            state["rendered_id"] = None
+                        except Exception as exc:  # noqa: BLE001
+                            ui.notify(f"删除失败：{exc}", type="negative")
+                        refresh()
+                        render_detail()
+
+                    ui.button("删除", color="negative", icon="delete_sweep",
+                              on_click=_do_run_del).props("unelevated")
 
             with ui.dialog() as create_dialog:
               with ui.card().classes("w-[40rem] p-0 gap-0"):
