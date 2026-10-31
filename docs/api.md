@@ -112,7 +112,7 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 | GET | `/api/v1/tasks/{id}` | 详情（含 runs 概要、Agent 轮次时间线数据与 `decisions` 决策归档——changes/clamps/analysis/param_importance 快照，M7 06） |
 | DELETE | `/api/v1/tasks/{id}?delete_files=` | 删除（级联删行，磁盘默认保留） |
 | POST | `/api/v1/tasks/{id}/approve` | 审批门裁决。body: `{action: "continue" \| "stop"}`（manual 模式） |
-| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照：冻结的当轮参数/权重标识/切分清单副本/类别表哈希，早于该功能的 Run 为 null） |
+| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照：冻结的当轮参数/权重标识/切分清单副本/类别表哈希/派生标签聚合哈希 `labels`，早于该功能的 Run 为 null）；开训前派生新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
 | DELETE | `/api/v1/runs/{uid}?delete_files=` | 删除单条训练记录（2026-10-31）：仅终态（done/failed/cancelled）可删，queued/running/stopping 409；只删该轮，其余轮次不受影响；子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策/部署登记）一并清理；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；`delete_files=true` 另删该轮 run_dir（删空任务时整任务目录）；磁盘默认保留 |
 | GET | `/api/v1/runs/{uid}/logs?tail=200` | 日志尾读（配合日志页轮询） |
 | POST | `/api/v1/runs/{uid}/stop` | 优雅停止：SIGTERM → trainer.stop → killpg（04） |

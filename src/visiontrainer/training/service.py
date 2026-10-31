@@ -577,7 +577,10 @@ def _analysis_payload(manager, run, task) -> dict:
     if not best or not Path(best).exists():
         raise _http_err("state_conflict", "best.pt 不在（训练未产出权重），无法分析", 409)
     derived = Path(task.dataset_manifest_path).parent
-    labels_dir = derived / "labels" / "val"
+    # GT 口径：Run 启动时冻结的 val 标签副本（labels_frozen）——此后数据集改标/重建派生
+    # 不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；旧 Run（无副本）回退派生目录
+    frozen_val = Path(run.run_dir) / "labels_frozen" / "val" if run.run_dir else None
+    labels_dir = frozen_val if frozen_val and frozen_val.is_dir() else derived / "labels" / "val"
     if not labels_dir.is_dir():
         raise _http_err("state_conflict", f"派生 val 标签目录缺失：{labels_dir}", 409)
     classes = ((snap or {}).get("classes") or {}).get("list") or []

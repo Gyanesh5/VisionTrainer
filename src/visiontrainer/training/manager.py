@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import threading
 import time
@@ -22,6 +23,8 @@ from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..datasets import service as ds
+from ..datasets.service import DatasetError
 from ..ws import publish_threadsafe
 
 RUNNING_STATES = {"running", "stopping"}
@@ -279,12 +282,13 @@ class TrainingManager:
     def _launch(self, run_id: int) -> None:
         try:
             self._launch_inner(run_id)
-        except Exception as exc:  # 启动失败（解释器路径错/入口缺失等）→ run 转 failed，不永卡 running
+        except Exception as exc:  # 启动失败（含派生新鲜度门拒训）→ run 转 failed，queued/running 都回收
             with self.Session() as s:
                 run = s.get(Run, run_id)
-                if run and run.status == "running":
+                if run and run.status in ("queued", "running"):
                     run.status = "failed"
-                    run.error = f"训练进程启动失败：{exc}"
+                    run.error = (f"开训前检查未通过：{exc.message}" if isinstance(exc, DatasetError)
+                                 else f"训练进程启动失败：{exc}")
                     run.finished_at = _now()
                     s.commit()
                     task_id = run.task_id
@@ -299,6 +303,12 @@ class TrainingManager:
                 # 选中到启动之间被取消/任务被删：不复活、不启动
                 return
             task = s.get(Task, run.task_id)
+            # 派生新鲜度门（「派生遵从真源」）：出队即把任务钉住的派生 txt 对齐真源 JSON
+            # 当前投影——改完标注直接开训即正确用法，旧账训练在结构上不可能；标注损坏或
+            # 新增不可转形状 → DatasetError 拒训（_launch 转 failed）。此后快照/训练必是新账。
+            fresh = ds.ensure_fresh_derivation(task.dataset_manifest_path or "")
+            launch_note = (f"「{fresh['dataset']}」{len(fresh['refreshed'])} 张派生标签"
+                           "已按当前标注重转后再开训") if fresh["refreshed"] else None
             run.status = "running"
             run.run_dir = str(self.s.runs_dir / task.uid / run.uid)
             run.started_at = _now()
@@ -323,6 +333,16 @@ class TrainingManager:
             run_uid=run.uid, round_no=run.round_no, base_model=task.base_model,
             train_args=task.train_args or {}, data_yaml=task.dataset_manifest_path or ""))
 
+        # 冻结 val 标签副本：错误分析逐框对账永远对启动时点——派生目录此后改标/重建不影响旧 Run 口径
+        labels_src = (Path(task.dataset_manifest_path).parent / "labels" / "val"
+                      if task.dataset_manifest_path else None)
+        if labels_src and labels_src.is_dir():
+            frozen_val = run_dir / "labels_frozen" / "val"
+            frozen_val.mkdir(parents=True, exist_ok=True)
+            for lbl in labels_src.iterdir():
+                if lbl.is_file():
+                    shutil.copy2(lbl, frozen_val / lbl.name)
+
         log_f = (run_dir / "training.log").open("wb")
         proc = SubprocessHandle([self.s.training_python, self.s.trainer_entry, str(payload_path)], log_f)
 
@@ -340,6 +360,10 @@ class TrainingManager:
         w.start()
         self._publish_queue(s=None)
         publish_threadsafe({"type": "run.status", "run_uid": run.uid, "status": "running", "error": None})
+        if launch_note:  # 开训门重转过派生时告知（通知失败静默，不影响链路）
+            from ..core.notify import desktop_notify
+
+            desktop_notify("开训前标注更新", launch_note)
 
     # ------------------------------------------------------------ watchdog
 

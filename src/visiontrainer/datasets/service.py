@@ -859,6 +859,88 @@ def relabel_refresh(name: str, image: str | None = None, force: bool = False,
     return {"refreshed": refreshed, "drops": drops, "manifest": manifest["uid"]}
 
 
+# ---------------------------------------------------------------- 派生新鲜度门（2026-10-31 用户裁决「派生遵从真源」）
+
+def _expected_projection(label_path: str | None, task_type: str,
+                         classes: list[str]) -> tuple[str, list[dict], bool]:
+    """真源标注 JSON → 当前应有的派生 txt 内容（与 _derive/relabel_refresh 同一转换器，逐字节可比）。
+
+    返回 (内容, drops, 损坏)。负样本（无 JSON）→ 空串；classify 无尺寸键属正常；
+    非 classify 缺 imageWidth/imageHeight 视为损坏——按空串派生会静默丢光标注，必须红门。
+    """
+    if not label_path or not Path(label_path).exists():
+        return "", [], False
+    try:
+        data = json.loads(Path(label_path).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return "", [], True
+    if task_type != "classify" and (data.get("imageWidth") is None or data.get("imageHeight") is None):
+        return "", [], True
+    lines, _has, drops = json_to_yolo_lines(data, task_type, classes)
+    return "".join(lines), drops, False
+
+
+def ensure_fresh_derivation(data_yaml: str | Path) -> dict:
+    """开训前把任务钉住的派生 txt 对齐真源标注 JSON 的当前投影（消费点强制新鲜）。
+
+    data_yaml：Task 冻结的 <ds>/derived/<uid>/data.yaml（钉住清单版本，与运行快照同源）。
+    逐图内容比对（非 mtime——转换器规则升级也能查出），漂移文件就地重转换，使
+    「改完标注直接开训」成为唯一正确用法，不再依赖手动「重建派生标注」。
+
+    返回 {"checked", "refreshed"（漂移图片绝对路径名单）, "dataset"}。
+    外部数据集（平台零写入）no-op。Raises:
+        DatasetError: state_conflict——标注 JSON 损坏，或比对中转换出现丢弃
+        （unknown_class / 退化框等）：宁可拒训，不静默旧账、也不静默脏账。
+    """
+    data_yaml = Path(data_yaml)
+    manifest_dir = data_yaml.parent          # <ds>/derived/<uid>
+    ds_dir = manifest_dir.parent.parent      # <ds>
+    if not (ds_dir / "dataset.json").is_file():
+        return {"checked": 0, "refreshed": [], "dataset": ds_dir.name}  # 外部数据集
+    meta = _read_meta(ds_dir / "dataset.json")
+    if meta.get("form") != "managed":
+        return {"checked": 0, "refreshed": [], "dataset": ds_dir.name}
+    task_type, classes = meta["task_type"], meta["classes"]
+    if TASK_SHAPES[task_type][0] == "classify":  # classify 走类目录链接，无派生 txt 概念
+        return {"checked": 0, "refreshed": [], "dataset": ds_dir.name}
+    manifest_path = manifest_dir / "split_manifest.json"
+    if not manifest_path.is_file():
+        raise DatasetError("state_conflict",
+                           f"派生结构缺失（{manifest_dir.name}）——请重切分或重建任务")
+    manifest = _read_meta(manifest_path)
+    train_set = set(manifest["train"])
+    stale: list[str] = []
+    all_drops: list[dict] = []
+    for img, f in ((f["image"], f) for f in manifest["files"]):
+        p = Path(img)
+        split = "train" if img in train_set or str(p) in train_set else "val"
+        txt = manifest_dir / "labels" / split / f"{p.stem}.txt"
+        expected, drops, broken = _expected_projection(f.get("label"), task_type, classes)
+        if broken:
+            raise DatasetError("state_conflict",
+                               f"标注 JSON 损坏（{ds_dir.name} / {p.name}）——"
+                               "请到数据集页「重新校验」查看修复指引")
+        try:
+            actual = txt.read_text(encoding="utf-8") if txt.is_file() else None
+        except OSError:
+            actual = None
+        if actual != expected:
+            write_label(txt, expected)
+            stale.append(img)
+            all_drops.extend({"image": img, **d} for d in drops)
+    if all_drops:
+        reasons: dict[str, int] = {}
+        for d in all_drops:
+            reasons[d["reason"]] = reasons.get(d["reason"], 0) + 1
+        detail = "、".join(f"{k}×{v}" for k, v in sorted(reasons.items()))
+        raise DatasetError(
+            "state_conflict",
+            f"标注新增了无法进入训练的形状（{ds_dir.name}：{detail}，如 "
+            f"{Path(all_drops[0]['image']).name}）——请到数据集页「重新校验」查看问题清单，"
+            "修复标注或确认丢弃后再训")
+    return {"checked": len(manifest["files"]), "refreshed": stale, "dataset": ds_dir.name}
+
+
 # ---------------------------------------------------------------- 标注审查（M9 02 号票）
 
 def review_queue(name: str, root: Path | None = None) -> dict:

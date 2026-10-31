@@ -4,13 +4,15 @@ import json
 
 import pytest
 
-from conftest import make_annotation, make_image
+from conftest import JPG_MAGIC, make_annotation, make_image
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.service import DatasetError
 
 
 def test_import_lifecycle(datasets_root, detect_source):
+    make_image(detect_source, "broken.jpg", JPG_MAGIC)  # 有同名图片才构成 bad_json（否则当孤儿）
+    (detect_source / "broken.json").write_text("{not json", encoding="utf-8")
     meta = svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     assert meta["active_manifest"]
     assert meta["classes"] == ["car", "person"]
@@ -86,7 +88,7 @@ def test_api_datasets_flow(datasets_root, detect_source, client):
     assert r.status_code == 200 and r.json()["task_type"] == "detect"
 
     r = client.post("/api/v1/datasets/plate/validate")
-    assert r.status_code == 200 and r.json()["total_images"] == 10  # 8 标注 + 1 负样本 + 1 坏图
+    assert r.status_code == 200 and r.json()["total_images"] == 9  # 8 标注 + 1 负样本
 
     r = client.post("/api/v1/datasets/plate/resplit", json={"ratio": 0.7, "seed": 7})
     assert r.status_code == 200 and r.json()["uid"]

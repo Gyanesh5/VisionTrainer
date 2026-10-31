@@ -45,7 +45,8 @@ def rect(label: str, x0=10, y0=10, x1=110, y1=90) -> dict:
 
 @pytest.fixture()
 def detect_source(tmp_path: Path) -> Path:
-    """8 张 detect 标注（car/person 两类）+ 1 张负样本 + 1 张坏 JSON。"""
+    """8 张 detect 标注（car/person 两类）+ 1 张负样本。坏 JSON 场景各测试自建
+    （开训新鲜度门对清单内 bad_json 拒训，训练链路夹具须保持清单干净）。"""
     src = tmp_path / "annot"
     src.mkdir()
     for i in range(4):
@@ -56,8 +57,6 @@ def detect_source(tmp_path: Path) -> Path:
         make_annotation(src, f"person{i}", [rect("person", 20, 30, 200, 220)])
     make_image(src, "negative.png")
     make_annotation(src, "negative", [])
-    make_image(src, "broken.jpg", JPG_MAGIC)
-    (src / "broken.json").write_text("{not json", encoding="utf-8")
     return src
 
 

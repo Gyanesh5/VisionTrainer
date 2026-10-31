@@ -5,6 +5,7 @@
 - 基础权重标识：预训练权重名 +（本地文件时的 sha256；ultralytics 名字权重记「由训练端解析」）
 - 切分清单冻结副本（train/val 全量清单 + 种子/比例）
 - 类别表：内容 + sha256（此后改名/重排不影响旧 Run 查证）
+- 派生标签：逐文件 sha256 的聚合哈希（val 副本另落 run_dir/labels_frozen/，错误分析 GT 对账用）
 
 数据集此后重切/排除/改名/漂移，旧 Run 快照不受影响（跨 Run diff 完整）。
 """
@@ -55,6 +56,18 @@ def build_snapshot(*, run_uid: str, round_no: int, base_model: str,
     weight_identity = ({"kind": "file", "path": str(weight_path), "sha256": _file_sha256(weight_path)}
                        if weight_path.is_file() else {"kind": "resolved_by_trainer", "name": base_model})
 
+    # 派生标签逐文件 sha256 的聚合哈希：开训门重转后取值——此后派生目录改标/重建不回头改旧 Run 查证
+    labels_files: dict[str, str] = {}
+    labels_root = derived / "labels"
+    if labels_root.is_dir():
+        for p in sorted(labels_root.rglob("*.txt")):
+            digest = _file_sha256(p)
+            if digest:
+                labels_files[p.relative_to(labels_root).as_posix()] = digest
+    labels_sha = (hashlib.sha256(
+        json.dumps(labels_files, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+        if labels_files else None)
+
     return {
         "run_uid": run_uid,
         "round_no": round_no,
@@ -78,6 +91,7 @@ def build_snapshot(*, run_uid: str, round_no: int, base_model: str,
         },
         "classes": {"list": classes,
                     "sha256": hashlib.sha256("\n".join(classes).encode("utf-8")).hexdigest()},
+        "labels": {"sha256": labels_sha, "n_files": len(labels_files)},
     }
 
 
