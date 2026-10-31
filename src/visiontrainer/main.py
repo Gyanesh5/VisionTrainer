@@ -56,6 +56,10 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     session_factory = init_db(training.get("db_url", "sqlite:///data/visiontrainer.db"))
     manager = TrainingManager(session_factory, settings)
 
+    # MCP 接入（M10 06 号票，ADR 0006）：软依赖——fastmcp 未安装则平台零变化启动；
+    # 子应用在 app 装配完成后挂载，lifespan 闭包按运行时读值进入其会话管理器
+    mcp_sub = None
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         bind_loop(asyncio.get_running_loop())
@@ -69,13 +73,27 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         selfcheck_result = run_selfcheck(cfg)
         app.state.selfcheck = selfcheck_result
         log_summary(selfcheck_result)
-        yield
+        if mcp_sub is not None:
+            async with mcp_sub.lifespan(app):
+                yield
+        else:
+            yield
 
     app = FastAPI(title="VisionTrainer", version="0.1.0", lifespan=lifespan)
     app.include_router(api_router, prefix="/api")
     app.state.manager = manager
     app.state.cfg = cfg  # 自检等系统域按注入配置而非盘上 config.toml（测试可注入）
     set_manager(manager)
+
+    try:
+        from .agent.mcp_server import mount_mcp
+
+        mcp_sub = mount_mcp(app, manager)
+    except Exception:
+        import sys
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
 
     @app.websocket("/ws/events")
     async def ws_events(websocket: WebSocket):

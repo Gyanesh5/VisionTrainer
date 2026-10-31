@@ -174,3 +174,7 @@ UI 进程内 0.3~0.5s 读登记表刷新。`key` 幂等：同 key 已在进行�
 // llm_unavailable   — Agent LLM 端点不可达（502）
 // export_failed     — ONNX 导出/导出验证失败（500）
 ```
+
+## MCP 通道（M10 06 号票）
+
+平台作为 MCP 服务端挂载 `/mcp`（streamable HTTP，软依赖 fastmcp）：策展工具面 = 只读查询五件 + 提交类四件（create_task / submit_approval 四态 / grant·revoke_preapproval），与进程内调参循环共用同一工具实现与审批门。工具清单与调参纪律见 [docs/mcp.md](./mcp.md)。
