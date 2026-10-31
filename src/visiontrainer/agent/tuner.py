@@ -19,7 +19,10 @@ from datetime import datetime
 from pathlib import Path
 
 from .allowlist import clamp_changes
+from .decider import (deterministic_fallback, provider_unavailable_error,
+                      run_tool_loop, select_provider)
 from .llm import LLMError, _content_image, chat, llm_config, parse_json_loose
+from .tools import ToolLevel, build_default_registry
 
 NO_IMPROVE_EPS = 0.001
 NO_IMPROVE_ROUNDS = 2
@@ -220,8 +223,8 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             set_state("done", {"stop_reason": "达到最大轮数"})
             return
 
-        # 4) LLM 决策（多模态；失败 → paused 等人）；参数重要性上下文随决策归档（M7 05 号票）
-        decision, error, importance = _decide(Session, task_id, objective, history, best)
+        # 4) 决策（多模态 + 只读工具多步循环；端点失败 → paused，解析穷尽 → 确定性回退栈）
+        decision, error, importance, traces = _decide(Session, task_id, objective, history, best)
         if error is not None:
             set_state("paused", {"pause_reason": error})
             continue
@@ -251,7 +254,8 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             s.add(AgentDecision(run_id=run.id, round_no=run.round_no,
                                 input_summary={"objective": objective, "best_so_far": best,
                                                "analysis": decision.get("analysis", ""),
-                                               "param_importance": importance},
+                                               "param_importance": importance,
+                                               "tool_traces": traces},
                                 response=decision, changes=changes, clamps=clamps))
             s.commit()
             queued = run.uid
@@ -399,10 +403,19 @@ def _append_history(Session, task_id: int, decision: dict, changes: dict, clamps
 # ---------------------------------------------------------------- LLM 决策
 
 def _decide(Session, task_id: int, objective: str, history: list[dict], best: float | None):
-    """多模态决策：指标 JSON + 渲染图 + 参数重要性/剪枝证据 → LLM。返回 (decision, error, importance)。"""
+    """轮边界决策（M10 02）：多模态证据 + 只读工具多步循环 → 结构化 JSON 决策。
+
+    失败分级（decider.py 铁线）：端点不可达（chat 内 raise）→ 立即 paused 不烧卡（M4 ③）；
+    解析穷尽（带错重试 1 次后仍非法 / 工具步数耗尽）→ 确定性回退栈，栈也穷尽才 paused。
+    返回 (decision, error, importance, tool_traces)。
+    """
     from ..charts.render import confusion_matrix_png, render_run_charts
     from ..agent.importance import compute_importance, render_context
     from visiontrainer.db.models import EpochMetric, Run, Task
+
+    provider = select_provider()
+    if provider != "llm":
+        return None, str(provider_unavailable_error(provider)), None, []
 
     with Session() as s:
         t = s.get(Task, task_id)
@@ -410,6 +423,7 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
         metrics = [{"epoch": m.epoch, **(m.metrics or {})} for m in
                    s.query(EpochMetric).filter(EpochMetric.run_id == run.id)
                    .order_by(EpochMetric.epoch).all()]
+        train_args = dict(t.train_args or {})
         run_dir = run.run_dir
         dataset = (Path(t.dataset_manifest_path).parent.parent.parent.name
                    if t.dataset_manifest_path else None)
@@ -435,6 +449,7 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
         "pruned_rounds": pruned_rounds,
         "instruction": "输出 JSON：{analysis, action: 'tune'|'stop', hyperparameters: {...}}；"
                        "hyperparameters 只能包含白名单键；若无改进空间 action=stop。"
+                       "决策前可调用只读工具（query_*）查证据——指标摘要/错误分析/历史运行/数据集画像；"
                        "param_importance 是历史统计证据（相关非因果，样本少时弱参考），"
                        "pruned_rounds 是被早停剪掉的烂轮事实。",
     }, ensure_ascii=False)}]
@@ -442,21 +457,41 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
         content.append(_content_image(png))  # API 只认 base64 data URL，file:// 会 400
 
     messages = [
-        {"role": "system", "content": "你是 YOLO 训练超参调优 Agent。只输出 JSON。"},
+        {"role": "system", "content": "你是 YOLO 训练超参调优 Agent。只输出 JSON 决策。"},
         {"role": "user", "content": content},
     ]
-
-    text = ""
-    for attempt in range(2):  # 解析失败带错误重试 1 次（06 号票）
-        try:
-            text = chat(messages, cfg=llm_config())
-            decision = parse_json_loose(text)
-            decision.setdefault("action", "tune")
-            return decision, None, importance
-        except LLMError as exc:
-            if attempt == 0:
-                messages.append({"role": "assistant", "content": text})
-                messages.append({"role": "user", "content": f"上次输出不合法：{exc}。请重新只输出 JSON。"})
+    registry = build_default_registry(Session)
+    traces: list[dict] = []
+    parse_error = ""
+    try:
+        for attempt in range(2):  # 解析失败带错误重试 1 次（06 号票语义延续）
+            msgs = messages if attempt == 0 else messages + [
+                {"role": "user", "content": f"上次输出不合法：{parse_error}。请重新只输出 JSON 决策。"}]
+            try:
+                msg, tr = run_tool_loop(msgs, registry, levels={ToolLevel.READONLY},
+                                        audit=None, call=chat)
+                traces.extend(tr)
+            except LLMError as exc:  # 端点级失败 → paused（绝不静默烧卡）
+                return None, str(exc), importance, traces
+            if msg is None:
+                parse_error = "工具步数预算耗尽，未产出最终决策"
                 continue
-            return None, str(exc), importance
-    return None, "决策失败", importance
+            try:
+                decision = parse_json_loose(msg.get("content") or "")
+            except LLMError as exc:  # 解析失败 → 重试一轮，穷尽走回退栈
+                parse_error = str(exc)
+                continue
+            decision.setdefault("action", "tune")
+            return decision, None, importance, traces
+    except Exception as exc:  # 循环线程静默吞异常的兜底：决策失败必须落 paused 可见
+        return None, f"决策异常：{exc}", importance, traces
+
+    fb = deterministic_fallback(train_args=train_args, history=history,
+                                importance=importance, round_no=len(history) + 2)
+    if fb is not None:
+        changes, meta = fb
+        return {"analysis": f"确定性回退（{meta['desc']}）：LLM 决策穷尽后的数字可验探针",
+                "action": "tune", "hyperparameters": changes,
+                "source": "deterministic", "fallback_level": meta["level"]}, \
+            None, importance, traces
+    return None, f"决策失败：解析穷尽且回退栈无新探针（{parse_error}）", importance, traces

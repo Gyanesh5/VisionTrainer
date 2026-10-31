@@ -37,8 +37,13 @@ def build_client(transport: httpx.BaseTransport | None = None) -> httpx.Client:
 
 
 def chat(messages: list[dict], *, client: httpx.Client | None = None,
-         cfg: dict | None = None, temperature: float = 0.3) -> str:
-    """调用 chat/completions，返回助手文本。messages 支持多模态 content 数组。"""
+         cfg: dict | None = None, temperature: float = 0.3,
+         tools: list[dict] | None = None):
+    """调用 chat/completions。messages 支持多模态 content 数组。
+
+    返回：未传 tools → 助手文本 str（向后兼容，复盘/连通性测试沿用）；
+    传入 tools → 完整助手消息 dict（content 可为 None、含 tool_calls，多步工具循环用）。
+    """
     conf = cfg or llm_config()
     base = (conf.get("base_url") or "").rstrip("/")
     key = conf.get("api_key") or ""
@@ -47,15 +52,19 @@ def chat(messages: list[dict], *, client: httpx.Client | None = None,
         raise LLMError("LLM 未配置（config.toml [llm]）")
     own = client is None
     client = client or build_client()
+    payload: dict = {"model": model, "messages": messages, "temperature": temperature}
+    if tools:
+        payload["tools"] = tools
     try:
         resp = client.post(
             f"{base}/chat/completions",
             headers={"Authorization": f"Bearer {key}"} if key else {},
-            json={"model": model, "messages": messages, "temperature": temperature},
+            json=payload,
         )
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"] or ""
+        message = data["choices"][0]["message"]
+        return message if tools else (message.get("content") or "")
     except (httpx.HTTPError, KeyError, IndexError) as exc:
         raise LLMError(f"LLM 调用失败：{exc}") from exc
     finally:

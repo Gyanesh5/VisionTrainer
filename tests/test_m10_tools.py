@@ -101,7 +101,7 @@ def test_to_openai_tools_with_level_filter():
 
 # ---------------------------------------------------------------- 只读工具
 
-def test_query_metrics(manager, factory):
+def test_query_metrics(factory):
     _, rid, ruid = _seed_task_run(factory, primary=0.4)
     with factory() as s:
         for i, p in enumerate([0.3, 0.5, 0.4], start=1):
@@ -109,19 +109,19 @@ def test_query_metrics(manager, factory):
                               metrics={"epoch": i, "metrics": {"metrics/mAP50-95(B)": p,
                                                                "train/box_loss": 1.0 / i}}))
         s.commit()
-    out = build_default_registry(manager).dispatch("query_metrics", {"run_uid": ruid, "last_n": 2})
+    out = build_default_registry(factory).dispatch("query_metrics", {"run_uid": ruid, "last_n": 2})
     assert out["status"] == "done" and out["primary_metric"] == 0.4
     assert out["best_epoch"] == 2 and out["total_epochs"] == 3
     assert [e["epoch"] for e in out["epochs"]] == [2, 3]
     assert out["epochs"][0]["primary"] == 0.5
 
 
-def test_query_metrics_unknown_run(manager):
+def test_query_metrics_unknown_run(factory):
     with pytest.raises(ToolError, match="不存在"):
-        build_default_registry(manager).dispatch("query_metrics", {"run_uid": "ghost"})
+        build_default_registry(factory).dispatch("query_metrics", {"run_uid": "ghost"})
 
 
-def test_query_error_analysis(manager, factory, tmp_path: Path):
+def test_query_error_analysis(factory, tmp_path: Path):
     _, _, ruid = _seed_task_run(factory)
     run_dir = tmp_path / "runs" / "tk"
     (run_dir / "analysis").mkdir(parents=True)
@@ -136,52 +136,52 @@ def test_query_error_analysis(manager, factory, tmp_path: Path):
                                  cls_gt=gt, cls_pred=pred, conf=0.9 if kind in ("fp", "confusion") else None,
                                  box={}))
         s.commit()
-    out = build_default_registry(manager).dispatch("query_error_analysis", {"run_uid": ruid})
+    out = build_default_registry(factory).dispatch("query_error_analysis", {"run_uid": ruid})
     assert out["analyzed"] is True
     assert out["top_confusion"][0] == {"gt": "car", "pred": "person", "n": 3}
     assert {"gt": "背景", "pred": "car", "n": 2} in out["top_confusion"]
     assert out["worst_images"][0]["image"] == "a.jpg" and out["worst_images"][0]["score"] == 6
 
 
-def test_query_error_analysis_unanalyzed(manager, factory):
+def test_query_error_analysis_unanalyzed(factory):
     _, _, ruid = _seed_task_run(factory)
-    out = build_default_registry(manager).dispatch("query_error_analysis", {"run_uid": ruid})
+    out = build_default_registry(factory).dispatch("query_error_analysis", {"run_uid": ruid})
     assert out == {"run_uid": ruid, "analyzed": False}
 
 
-def test_query_history_runs_filter(manager, factory):
+def test_query_history_runs_filter(factory):
     _seed_task_run(factory, name="a", dataset="/dsm/good", primary=0.5)
     _seed_task_run(factory, name="b", dataset="/dsm/other", primary=0.3, pruned=True,
                    round_no=2, train_args={"epochs": 3, "lr0": 0.05})
-    out = build_default_registry(manager).dispatch("query_history_runs", {"dataset": "good"})
+    out = build_default_registry(factory).dispatch("query_history_runs", {"dataset": "good"})
     assert out["n"] == 1
     row = out["runs"][0]
     assert row["task"] == "a" and row["dataset"] == "good" and row["primary_metric"] == 0.5
     assert row["pruned"] is False
-    out_all = build_default_registry(manager).dispatch("query_history_runs", {"limit": 10})
+    out_all = build_default_registry(factory).dispatch("query_history_runs", {"limit": 10})
     assert out_all["n"] == 2
     b = next(r for r in out_all["runs"] if r["task"] == "b")
     assert b["pruned"] is True and b["round_no"] == 2 and b["train_args"]["lr0"] == 0.05
 
 
-def test_query_dataset_profile(manager, factory):
+def test_query_dataset_profile(factory):
     with factory() as s:
         s.add(DatasetStat(dataset="good", manifest_uid="m1", task_type="detect",
                           payload={"aggregates": {"n_images": 9}, "rows": [{"big": "row"}]}))
         s.commit()
-    out = build_default_registry(manager).dispatch("query_dataset_profile", {"dataset": "good"})
+    out = build_default_registry(factory).dispatch("query_dataset_profile", {"dataset": "good"})
     assert out["manifest_uid"] == "m1" and out["task_type"] == "detect"
     assert out["profile"]["aggregates"] == {"n_images": 9}
     assert "rows" not in out["profile"]  # 逐图行等大键截断
 
 
-def test_query_dataset_profile_missing(manager):
+def test_query_dataset_profile_missing(factory):
     with pytest.raises(ToolError, match="无画像"):
-        build_default_registry(manager).dispatch("query_dataset_profile", {"dataset": "ghost"})
+        build_default_registry(factory).dispatch("query_dataset_profile", {"dataset": "ghost"})
 
 
-def test_default_registry_all_readonly(manager):
-    reg = build_default_registry(manager)
+def test_default_registry_all_readonly(factory):
+    reg = build_default_registry(factory)
     for t in reg.to_openai_tools():
         assert t["function"]["name"].startswith("query_")
     assert {s.level for s in reg._tools.values()} == {ToolLevel.READONLY}

@@ -104,7 +104,7 @@ def prune_env(tmp_path: Path, datasets_root, detect_source, monkeypatch):
     def fake_decide(Session, task_id, objective, history, best):
         decisions["n"] += 1
         return ({"analysis": "测试决策", "action": "tune", "hyperparameters": {"lr0": 0.009 + 0.001 * decisions["n"]}},
-                None, None)
+                None, None, [])
 
     monkeypatch.setattr(tuner, "_decide", fake_decide)
     with TestClient(app) as c:
