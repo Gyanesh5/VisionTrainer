@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-HEATMAP_GRID = 20  # 标注中心热力图网格边长
+HEATMAP_GRID = 20  # 热力图网格边长（标注中心 / 标注尺寸共用）
 SMALL_AREA = 32 ** 2   # COCOeval 官方小目标线（px²）
 MEDIUM_AREA = 96 ** 2  # 中目标线
 OBJ_SIZE_REF = 640     # 尺寸分档基准尺度：COCO 阈值按 ~640 分辨率图像定义，
@@ -78,8 +78,8 @@ def _compose(dataset: str, task_type: str, classes: list[str],
     by_split = {"train": {"images": 0, "background": 0, "by_class": {}},
                 "val": {"images": 0, "background": 0, "by_class": {}}}
     obj_hist: dict[int, int] = {}
-    sizes: list[list] = []
     heat = [[0] * HEATMAP_GRID for _ in range(HEATMAP_GRID)]
+    size_heat = [[0] * HEATMAP_GRID for _ in range(HEATMAP_GRID)]
 
     for r in per_image:
         sp = by_split[r["split"]]
@@ -95,12 +95,18 @@ def _compose(dataset: str, task_type: str, classes: list[str],
             for c in hit:
                 sp["by_class"][c] = sp["by_class"].get(c, 0) + 1
             obj_hist[r["n"]] = obj_hist.get(r["n"], 0) + 1
-            if r.get("w") and r.get("h"):
-                sizes.append([r["w"], r["h"]])
         for cx, cy in r.get("centers") or []:
             ix = min(int(cx * HEATMAP_GRID), HEATMAP_GRID - 1)
             iy = min(int(cy * HEATMAP_GRID), HEATMAP_GRID - 1)
             heat[iy][ix] += 1
+        rw, rh = r.get("w"), r.get("h")
+        for o in r.get("objs") or []:
+            bw, bh = o.get("w"), o.get("h")
+            if rw and rh and bw and bh:
+                # 标注尺寸按归一化宽×高入格（与中心热力图同网格口径）
+                jx = min(int(bw / rw * HEATMAP_GRID), HEATMAP_GRID - 1)
+                jy = min(int(bh / rh * HEATMAP_GRID), HEATMAP_GRID - 1)
+                size_heat[jy][jx] += 1
 
     labeled = sum(1 for r in per_image if r.get("labels") or r.get("cls"))
     # M9 E：目标尺寸画像——小/中/大按 COCO 32²/96² 阈值在 640 基准尺度分档
@@ -148,7 +154,7 @@ def _compose(dataset: str, task_type: str, classes: list[str],
         "agg": {
             "by_split": by_split,
             "obj_hist": sorted(obj_hist.items()),
-            "sizes": sizes,
+            "size_heat": size_heat,  # 标注尺寸热力图（归一化宽×高；旧画像无 objs 时为空网格，重校验补全）
             "heatmap": heat,
             "obj_size": obj_size,  # M9：小目标占比（无目标数据时 null）
         },

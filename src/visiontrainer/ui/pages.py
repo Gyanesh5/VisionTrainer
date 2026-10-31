@@ -411,18 +411,37 @@ def _obj_hist_options(payload: dict) -> dict:
     }
 
 
-def _size_scatter_options(payload: dict) -> dict:
-    """图像尺寸散点（宽×高，标注 JSON 声明值）。"""
-    sizes = payload.get("agg", {}).get("sizes") or []
+def _size_heat_options(payload: dict) -> dict:
+    """标注尺寸热力图（归一化宽×高 20×20 网格，格值 = 落入该尺寸区间的标注数）。
+
+    与中心热力图同构（category 轴 + 「:formatter」百分比刻度），但 y 轴不反转：
+    尺寸分布按常规坐标方向读（左下小、右上大）。
+    """
+    heat = payload.get("agg", {}).get("size_heat") or []
+    data = [[j, i, c] for i, row in enumerate(heat) for j, c in enumerate(row) if c]
+    mx = max((d[2] for d in data), default=0)
+    bins = [str(k) for k in range(HEAT_GRID)]
     return {
         "backgroundColor": "transparent",
         "textStyle": {"color": CHART_TEXT},
-        "grid": _base_grid(),
-        "tooltip": {"trigger": "item", "formatter": "{c}"},
-        "xAxis": _axis_text({"type": "value", "name": "宽 px", "scale": True}),
-        "yAxis": _axis_text({"type": "value", "name": "高 px", "scale": True}),
-        "series": [{"name": "图像", "type": "scatter", "symbolSize": 4, "data": sizes,
-                    "itemStyle": {"color": CHART_PALETTE[5], "opacity": 0.55}}],
+        "grid": {"left": 44, "right": 90, "top": 30, "bottom": 34},
+        "tooltip": {":formatter": "(p) => '宽 ' + p.value[0] * 5 + '–' + (p.value[0] + 1) * 5 + '% · 高 '"
+                                 "+ p.value[1] * 5 + '–' + (p.value[1] + 1) * 5 + '%<br/>' + p.value[2] + ' 个标注'"},
+        "xAxis": {"type": "category", "data": bins, "name": "宽", "nameLocation": "middle",
+                  "nameGap": 22, "axisTick": {"show": False},
+                  "axisLabel": {"color": CHART_TEXT, "fontSize": 9, "interval": 4,
+                                ":formatter": "(idx) => idx * 5 + '%'"},
+                  "nameTextStyle": {"color": CHART_TEXT}, "axisLine": {"lineStyle": {"color": "#64748b"}}},
+        "yAxis": {"type": "category", "data": bins, "name": "高",
+                  "axisTick": {"show": False}, "splitLine": {"show": False},
+                  "axisLabel": {"color": CHART_TEXT, "fontSize": 9, "interval": 4,
+                                ":formatter": "(idx) => idx * 5 + '%'"},
+                  "nameTextStyle": {"color": CHART_TEXT}, "axisLine": {"lineStyle": {"color": "#64748b"}}},
+        "visualMap": {"min": 0, "max": mx or 1, "calculable": False, "orient": "vertical",
+                      "right": 0, "bottom": "center", "textStyle": {"color": CHART_TEXT, "fontSize": 9},
+                      "inRange": {"color": ["#1e3a8a", "#3b82f6", "#22d3ee", "#fde047"]}},
+        "series": [{"name": "标注尺寸", "type": "heatmap", "data": data,
+                    "emphasis": {"itemStyle": {"borderColor": "#fff"}}}],
     }
 
 
@@ -4160,8 +4179,10 @@ document.addEventListener('scroll', function(e){
                 if boxable:
                     with ui.row().classes("w-full gap-4 items-start flex-wrap"):
                         with ui.column().classes("flex-1 min-w-[17rem]"):
-                            ui.label("图像尺寸散点").classes("text-xs font-semibold opacity-70")
-                            ui.echart(_size_scatter_options(payload)).classes("w-full h-56")
+                            with ui.label("标注尺寸热力图").classes("text-xs font-semibold opacity-70"):
+                                ui.tooltip("每个标注的宽×高占整图比例分布；颜色越亮该尺寸区间标注越多")
+                            # SVG 渲染器同中心热力图：canvas 渲染器渐进分层会让 heatmap 空层置顶
+                            ui.echart(_size_heat_options(payload), renderer="svg").classes("w-full h-56")
                         with ui.column().classes("flex-1 min-w-[17rem]"):
                             with ui.label("标注中心热力图").classes("text-xs font-semibold opacity-70"):
                                 ui.tooltip("点格或右上角矩形工具框选，筛出图片清单")
@@ -4182,7 +4203,7 @@ document.addEventListener('scroll', function(e){
                                 ui.badge(f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
                                          ).props(f"color={c} outline").style("font-size:10px")
                 else:
-                    ui.label("分类任务无目标框：直方图 / 尺寸散点 / 中心热力图不适用").classes("text-xs opacity-40")
+                    ui.label("分类任务无目标框：直方图 / 尺寸热力图 / 中心热力图不适用").classes("text-xs opacity-40")
                 rerender_drill()
 
             def _render_drill_list(payload: dict, box) -> None:

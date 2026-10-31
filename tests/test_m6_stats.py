@@ -21,8 +21,9 @@ A, B, NEG = "/x/a.png", "/x/b.png", "/x/neg.png"
 
 def test_build_stats_detect():
     entries = [
-        _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5}], primary="car"),
-        _entry(B, [{"label": "car", "cx": 0.1, "cy": 0.9}, {"label": "person", "cx": 0.2, "cy": 0.8}],
+        _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5, "w": 64, "h": 48}], primary="car"),
+        _entry(B, [{"label": "car", "cx": 0.1, "cy": 0.9, "w": 32, "h": 24},
+                   {"label": "person", "cx": 0.2, "cy": 0.8, "w": 6.4, "h": 4.8}],
                primary="car"),
         _entry(NEG, []),
     ]
@@ -34,10 +35,13 @@ def test_build_stats_detect():
     assert agg["by_split"]["val"]["by_class"] == {"car": 1, "person": 1}
     assert agg["by_split"]["val"]["background"] == 1
     assert dict(agg["obj_hist"]) == {0: 1, 1: 1, 2: 1}  # 负样本（0 目标）也入直方图
-    assert agg["sizes"] == [[640, 480]] * 3
     heat = agg["heatmap"]
     assert heat[10][10] == 1  # (0.5, 0.5) → 第 10 格
     assert sum(sum(row) for row in heat) == 3  # 三个中心点全入格
+    # 标注尺寸热力图：归一化 (0.1,0.1)/(0.05,0.05)/(0.01,0.01)（640×480 图）各落一格
+    sh = agg["size_heat"]
+    assert sh[2][2] == 1 and sh[1][1] == 1 and sh[0][0] == 1
+    assert sum(sum(row) for row in sh) == 3
     assert payload["summary"] == {"images": 3, "labeled": 2, "train": 1, "val": 2,
                                   "background": 1, "boxable": True}
 
@@ -66,7 +70,7 @@ def test_classify_no_centers_flag_classes():
 
 def test_recompose_after_exclusion():
     entries = [
-        _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5}]),
+        _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5, "w": 64, "h": 48}]),
         _entry(B, [{"label": "person", "cx": 0.5, "cy": 0.5}]),
         _entry(NEG, []),
     ]
@@ -81,6 +85,7 @@ def test_recompose_after_exclusion():
     assert p2["manifest_uid"] == "m2"
     assert p2["agg"]["by_split"]["val"]["by_class"] == {}  # person 图已排除
     assert p2["summary"]["labeled"] == 1
+    assert sum(sum(r) for r in p2["agg"]["size_heat"]) == 1  # 尺寸热力图跟清单重组
 
 
 def test_recompose_after_resplit_reassigns():
