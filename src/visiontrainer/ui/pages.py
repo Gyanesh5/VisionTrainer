@@ -9,6 +9,7 @@
 
 import asyncio
 import json
+import time
 from base64 import b64encode
 from collections.abc import Callable
 from datetime import datetime
@@ -20,6 +21,7 @@ from nicegui import app, ui
 
 from .. import thumbs
 from .. import ws
+from .. import progress as ops
 from ..config import load_config, update_config
 from ..datasets import service as ds
 from ..training.params import GROUPS as PARAM_GROUPS
@@ -1074,17 +1076,112 @@ def _fmt_metric(v) -> str:
 
 
 def _busy(btn, msg: str | None = None):
-    """按钮忙碌态上下文（禁用 + 完成恢复）。"""
+    """按钮忙碌态上下文（Quasar loading：转圈 + 禁点，完成恢复；btn 可空——重建竞态下静默跳过）。"""
     class _Ctx:
         def __enter__(self):
-            btn.props("disabled")
+            if btn is not None:
+                btn.props("loading")
             if msg:
                 ui.notify(msg, type="info")
 
         def __exit__(self, *exc):
-            btn.props(remove="disabled")
+            if btn is not None:
+                btn.props(remove="loading")
             return False
     return _Ctx()
+
+
+def _fmt_elapsed(started: float) -> str:
+    seconds = int(time.time() - started)
+    return f"{seconds // 60} 分 {seconds % 60:02d} 秒" if seconds >= 60 else f"{seconds} 秒"
+
+
+def _op_row(o: dict) -> None:
+    """登记表条目 → 一行进行中反馈（区域进度行与全局清单共用）。"""
+    with ui.row().classes("w-full items-center gap-2 no-wrap min-w-0"):
+        ui.spinner(size="xs")
+        text = o["label"] + (f" · {o['phase']}" if o.get("phase") else "")
+        if o.get("total"):
+            text += f" {min(o.get('cur', 0), o['total'])}/{o['total']}"
+        ui.label(text).classes("text-xs flex-1 min-w-0 truncate")
+        if o.get("total"):
+            frac = min(o.get("cur", 0) / o["total"], 1.0)
+            ui.linear_progress(frac, show_value=False
+                               ).props("size=6px color=blue track-color=grey-4").classes("w-20 shrink-0")
+        if o.get("error"):
+            ui.label(o["error"]).classes("text-[11px] text-red-500 truncate max-w-48")
+        ui.label(_fmt_elapsed(o["started"])).classes("text-[10px] opacity-40 shrink-0")
+
+
+def _op_region_timer(state: dict) -> None:
+    """区域进度行 tick：0.3s 重放 state["op_scope"] 的进行中操作进 state["op_box"]。
+
+    render_detail 重建卡片时只需重挂 op_box / op_scope，timer 单实例不随卡片重建。
+    """
+    def _tick() -> None:
+        box = state.get("op_box")
+        if box is None or getattr(box, "is_deleted", False):
+            return
+        running = [o for o in ops.snapshot()["running"] if o.get("scope") == state.get("op_scope")]
+        sig = json.dumps([[o["key"], o["phase"], o["cur"], o["total"]] for o in running])
+        if sig == state.get("op_rows_sig"):
+            return
+        state["op_rows_sig"] = sig
+        box.clear()
+        with box:
+            for o in running:
+                _op_row(o)
+    ui.timer(0.3, _tick)
+
+
+def _op_chip() -> None:
+    """页头全局进行中指示：无进行中不渲染；有则「⟳ N 项进行中」，点开逐条清单（含最近失败）。
+
+    读进程内登记表（0.5s tick + 签名守卫），不依赖 WS 订阅生命周期——
+    operation.updated 事件是对外契约，UI 呈现以登记表为准。
+    """
+    holder: dict = {}
+
+    def _render() -> None:
+        snap = ops.snapshot()
+        running, last = snap["running"], snap["last"]
+        chip_sig = json.dumps([o["key"] for o in running])
+        if chip_sig != holder.get("chip_sig"):
+            holder["chip_sig"] = chip_sig
+            holder["rows"] = None
+            box: ui.element = holder["box"]
+            box.clear()
+            if running:
+                with box:
+                    with ui.button().props("flat dense size=sm color=primary"):
+                        ui.spinner(size="xs")
+                        ui.label(f"{len(running)} 项进行中").classes("text-xs")
+                        with ui.menu().props("fit"):
+                            holder["rows"] = ui.column().classes("q-pa-sm gap-1 min-w-80 max-w-96")
+                            holder["rows_sig"] = None
+        rows = holder.get("rows")
+        if rows is None or getattr(rows, "is_deleted", False):
+            return
+        rows_sig = json.dumps([[o["key"], o["phase"], o["cur"], o["total"]] for o in running]
+                              + ([[last["key"], last["status"], last.get("error")]] if last else []))
+        if rows_sig == holder.get("rows_sig"):
+            return
+        holder["rows_sig"] = rows_sig
+        rows.clear()
+        with rows:
+            for o in running:
+                _op_row(o)
+            if last and last["status"] == "failed":
+                with ui.row().classes("w-full items-center gap-2 no-wrap min-w-0 opacity-80"):
+                    ui.icon("error", size="14px").classes("text-red-500")
+                    ui.label(f"刚才失败：{last['label']}" + (f"——{last['error']}" if last.get("error") else "")
+                             ).classes("text-[11px] text-red-500 flex-1 min-w-0 truncate")
+
+    with ui.row().classes("items-center") as box:
+        pass
+    holder["box"] = box
+    _render()
+    ui.timer(0.5, _render)
 
 
 def _style_table(table) -> None:
@@ -1735,6 +1832,7 @@ def _page_frame(active: str, title: str, actions=None, body=None, subtitle: str 
                 ui.space()
                 if actions:
                     actions()
+                _op_chip()
             if body:
                 body()
 
@@ -1937,6 +2035,7 @@ document.addEventListener('scroll', function(e){
                         "dense outline " + ("color=red-8" if errs else "color=amber-8"))
 
             ui.timer(0.1, _load_selfcheck, once=True)
+            _op_region_timer(state)
 
             run_columns = [
                 {"name": "name", "label": "任务", "field": "name", "align": "left"},
@@ -1969,6 +2068,15 @@ document.addEventListener('scroll', function(e){
             def _selected_runs() -> list[dict]:
                 """勾选的训练记录行（Run 行）——组头行（__group）不进勾选口径。"""
                 return [r for r in (records_tbl.selected or []) if not r.get("__group")]
+
+            def _run_exporting(uid: str) -> bool:
+                """该 Run 的部署导出是否仍在后台验证中（导出线程异步完成，UI 只能靠登记表/部署记录探）。"""
+                try:
+                    deps = tsvc.list_deployments(get_manager())["deployments"]
+                except Exception:  # noqa: BLE001
+                    return False
+                return any((d.get("verification") or {}).get("status") == "exporting" and d["run_uid"] == uid
+                           for d in deps)
 
             def sync_bulk_btn() -> None:
                 n = len(_selected_runs())
@@ -2031,6 +2139,7 @@ document.addEventListener('scroll', function(e){
                 detail.clear()
                 uid = state["selected"]
                 if not uid:
+                    state["op_box"] = None
                     with detail:
                         ui.label("点击训练记录行查看该次运行详情").classes("text-xs opacity-40")
                     return
@@ -2040,6 +2149,7 @@ document.addEventListener('scroll', function(e){
                     # 选中记录已不存在（任务被删）：回空态，别让详情区卡在残影
                     state["selected"] = None
                     state["rendered_id"] = None
+                    state["op_box"] = None
                     with detail:
                         ui.label("该记录已不存在（任务被删除）").classes("text-xs opacity-40")
                     return
@@ -2050,6 +2160,8 @@ document.addEventListener('scroll', function(e){
                 task_id = run["task_id"]
                 status_label, status_color = RUN_STATUS.get(run["status"], (run["status"], "grey"))
                 with detail, ui.card().classes("w-full gap-2"):
+                    state["op_box"] = ui.column().classes("w-full gap-1")
+                    state["op_scope"] = uid
                     with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                         with ui.row().classes("items-center gap-2 flex-1 min-w-56 flex-wrap"):
                             ui.label(f"Run {uid}").classes("text-lg font-bold")
@@ -2060,8 +2172,14 @@ document.addEventListener('scroll', function(e){
                         # 操作按钮独立分组：右对齐、窄视口允许换行；危险动作最右（gap 分隔）
                         with ui.row().classes("items-center gap-2 flex-wrap justify-end"):
                             if run["status"] == "done":
-                                ui.button("部署到标注端", icon="rocket_launch",
-                                          on_click=lambda: do_deploy(uid)).props("unelevated dense")
+                                if _run_exporting(uid):
+                                    ui.button("部署导出中…", icon="rocket_launch").props(
+                                        "unelevated dense disabled").tooltip(
+                                        "导出验证在后台进行，完成后自动出现在部署区；可在页头「进行中」清单里看进度")
+                                else:
+                                    dep_btn = ui.button("部署到标注端", icon="rocket_launch",
+                                                        on_click=lambda: do_deploy(uid, dep_btn)
+                                                        ).props("unelevated dense")
                             if run["status"] in ("done", "failed", "cancelled"):
                                 ui.button("续训", icon="replay", on_click=lambda: do_resume(uid)).props("outline dense")
                             if run["status"] in ("failed", "cancelled"):
@@ -2193,21 +2311,28 @@ document.addEventListener('scroll', function(e){
                             except Exception:  # noqa: BLE001
                                 analysis = None
 
-                            async def do_analysis(_uid: str, _conf: float) -> None:
-                                ui.notify(f"错误分析中（conf {_conf}）：best.pt 对 val 逐图推理 + IoU 匹配"
-                                          "（已推理过则复用，仅平台侧重算）…")
+                            async def do_analysis(_uid: str, _conf: float, _btn=None) -> None:
+                                op = ops.begin(f"run:{_uid}:analysis", f"错误分析 · {_uid}", scope=_uid)
                                 try:
-                                    r = await _io(tsvc.run_error_analysis, get_manager(), _uid, _conf)
+                                    with _busy(_btn):
+                                        r = await _io(tsvc.run_error_analysis, get_manager(), _uid, _conf, op.tick)
                                     c = (r.get("summary") or {}).get("counts") or {}
+                                    op.finish()
                                     ui.notify(f"分析完成：TP {c.get('tp', 0)} / FP {c.get('fp', 0)} / "
                                               f"FN {c.get('fn', 0)} / 混淆 {c.get('confusion', 0)}", type="positive")
                                 except Exception as exc:  # noqa: BLE001
+                                    op.fail(str(exc))
                                     ui.notify(f"分析失败：{exc}", type="negative")
                                 render_detail()
 
-                            async def do_export_list(_uid: str) -> None:
+                            ex_btn: dict = {"b": None}
+
+                            async def do_export_list(_uid: str, _btn=None) -> None:
+                                op = ops.begin(f"run:{_uid}:relabel_list", "导出改标清单", scope=_uid)
                                 try:
-                                    r = await _io(tsvc.export_relabel_list, get_manager(), _uid)
+                                    with _busy(_btn):
+                                        r = await _io(tsvc.export_relabel_list, get_manager(), _uid)
+                                    op.finish()
                                     ui.notify(f"清单已导出：{r['path']}（{len(r['entries'])} 项）", type="positive")
                                     ex_list.clear()
                                     with ex_list:
@@ -2229,6 +2354,7 @@ document.addEventListener('scroll', function(e){
                                                 with ob:
                                                     ui.tooltip("在 X-AnyLabeling 中打开修复")
                                 except Exception as exc:  # noqa: BLE001
+                                    op.fail(str(exc))
                                     ui.notify(f"导出失败：{exc}", type="negative")
 
                             def _show_overlay(e_img: str, e_overlay: str, e_score: dict) -> None:
@@ -2254,9 +2380,9 @@ document.addEventListener('scroll', function(e){
                                                        value=0.25, min=0.01, max=1.0, step=0.05)
                                     with ea_conf:
                                         ui.tooltip("分析口径：低于该 conf 的预测框视同未检出")
-                                    ui.button("运行错误分析", icon="biotech",
-                                              on_click=lambda: do_analysis(uid, float(ea_conf.value or 0.25))
-                                              ).props("unelevated dense")
+                                    ana_btn = ui.button("运行错误分析", icon="biotech",
+                                                        on_click=lambda: do_analysis(uid, float(ea_conf.value or 0.25), ana_btn)
+                                                        ).props("unelevated dense")
                             else:
                                 sm = analysis.get("summary") or {}
                                 c = sm.get("counts") or {}
@@ -2284,9 +2410,9 @@ document.addEventListener('scroll', function(e){
                                                        min=0.01, max=1.0, step=0.05)
                                     with ea_conf:
                                         ui.tooltip("分析口径：低于该 conf 的预测框视同未检出；重算复用已推理结果")
-                                    ui.button("重算", icon="refresh",
-                                              on_click=lambda: do_analysis(uid, float(ea_conf.value or 0.25))
-                                              ).props("outline dense")
+                                    rea_btn = ui.button("重算", icon="refresh",
+                                                        on_click=lambda: do_analysis(uid, float(ea_conf.value or 0.25), rea_btn)
+                                                        ).props("outline dense")
                                 for tc in (sm.get("top_confusions") or [])[:4]:
                                     ui.chip(f"混淆 {tc['gt']}→{tc['pred']} ×{tc['count']}"
                                             ).props("dense square outline color=purple").classes("text-[11px]")
@@ -2358,8 +2484,9 @@ document.addEventListener('scroll', function(e){
                                                       on_click=_clear_cell_filter
                                                       ).props("flat dense size=xs")
                                         exb = ui.button("导出 FN/FP 改标清单", icon="fact_check",
-                                                        on_click=lambda: do_export_list(uid))
+                                                        on_click=lambda: do_export_list(uid, exb))
                                         exb.props("outline dense")
+                                        ex_btn["b"] = exb
                                     with err_box:
                                         if cell is None:
                                             wrows = analysis.get("per_image") or []
@@ -2466,10 +2593,12 @@ document.addEventListener('scroll', function(e){
                                     ui.notify("请填写图片/目录/视频路径", type="warning")
                                     return
                                 state["ti_path"] = p
-                                with _busy(tib, "推理中…"):
+                                op = ops.begin(f"run:{uid}:test_infer", f"试跑 · {uid}", scope=uid)
+                                with _busy(tib):
                                     try:
                                         r = await _io(tsvc.test_infer, get_manager(), uid, p,
                                                       float(ti_conf.value or 0.25))
+                                        op.finish()
                                         ti_out.clear()
                                         with ti_out:
                                             if r.get("dir_total", 0) > len(r.get("images") or []):
@@ -2514,6 +2643,7 @@ document.addEventListener('scroll', function(e){
                                             ui.label(f"ONNX：{r.get('onnx')}").classes(
                                                 "text-[11px] opacity-45 break-all")
                                     except Exception as exc:  # noqa: BLE001
+                                        op.fail(str(exc))
                                         ui.notify(f"试跑失败：{exc}", type="negative")
 
                     with ui.expansion("System", icon="monitor").classes("w-full"):
@@ -2581,6 +2711,7 @@ document.addEventListener('scroll', function(e){
                     async def _do_bulk_del() -> None:
                         sel = _selected_runs()
                         bulk_del_dialog.close()
+                        op = ops.begin("runs:bulk_del", f"删除训练记录 ×{len(sel)}", total=len(sel))
                         ok, fails = 0, []
                         for r in sel:  # 勾的是哪轮删的是哪轮，其余轮次不受影响
                             try:
@@ -2588,6 +2719,8 @@ document.addEventListener('scroll', function(e){
                                 ok += 1
                             except Exception as exc:  # noqa: BLE001
                                 fails.append(f"{r['name']} 轮{r['round_no']}：{exc}")
+                            op.tick(ok + len(fails))
+                        op.finish()
                         if ok:
                             ui.notify(f"已删除 {ok} 条训练记录", type="positive")
                         for f in fails:
@@ -2661,12 +2794,17 @@ document.addEventListener('scroll', function(e){
                     ui.notify(f"强制终止失败：{exc}", type="negative")
                 render_detail()
 
-            def do_deploy(uid: str) -> None:
+            def do_deploy(uid: str, _btn=None) -> None:
+                op = ops.begin(f"run:{uid}:deploy", f"部署导出 · {uid}", scope=uid)
                 try:
-                    r = tsvc.deploy_run(get_manager(), uid)
-                    ui.notify(f"导出部署已启动：{Path(r['target']).name}（完成时本页与结果页都会提示）")
+                    with _busy(_btn):
+                        r = tsvc.deploy_run(get_manager(), uid)
+                    op.finish()
+                    ui.notify(f"导出部署已启动：{Path(r['target']).name}（验证落定与完成提示走部署区/通知）")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"部署失败：{exc}", type="negative")
+                render_detail()
 
             def do_clear_last(uid: str) -> None:
                 try:
@@ -2725,11 +2863,14 @@ document.addEventListener('scroll', function(e){
 
                     async def _do_del() -> None:
                         del_dialog.close()
+                        op = ops.begin(f"task:{state['del_target']}:delete", "删除训练任务")
                         try:
                             await _io(tsvc.delete_task, get_manager(), state["del_target"], del_files.value)
+                            op.finish()
                             ui.notify("任务已删除")
                             state["selected"] = None
                         except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
                             ui.notify(f"删除失败：{exc}", type="negative")
                         refresh()
                         render_detail()
@@ -2745,13 +2886,16 @@ document.addEventListener('scroll', function(e){
 
                     async def _do_run_del() -> None:
                         run_del_dialog.close()
+                        op = ops.begin(f"run:{state['run_del_target']}:delete", "删除训练记录")
                         try:
                             await _io(tsvc.delete_run, get_manager(),
                                       state["run_del_target"], run_del_files.value)
+                            op.finish()
                             ui.notify("该轮训练记录已删除")
                             state["selected"] = None
                             state["rendered_id"] = None
                         except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
                             ui.notify(f"删除失败：{exc}", type="negative")
                         refresh()
                         render_detail()
@@ -3200,6 +3344,7 @@ document.addEventListener('scroll', function(e){
                 detail.clear()
                 name = state["selected"]
                 if not name:
+                    state["op_box"] = None
                     with detail:
                         ui.label("点击表格行查看详情").classes("text-xs opacity-40")
                     return
@@ -3209,6 +3354,8 @@ document.addEventListener('scroll', function(e){
                 task_zh = TASK_TYPE_ZH.get(meta["task_type"], meta["task_type"])
                 ok = (meta.get("last_validation") or {}).get("ok")
                 with detail, ui.card().classes("w-full gap-2"):
+                    state["op_box"] = ui.column().classes("w-full gap-1")
+                    state["op_scope"] = name
                     with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                         with ui.row().classes("items-center gap-2 flex-1 min-w-56 flex-wrap"):
                             ui.label(meta["name"]).classes("text-lg font-bold")
@@ -3221,22 +3368,28 @@ document.addEventListener('scroll', function(e){
                             if meta["form"] == "managed":
                                 ui.button("用此数据集训练", icon="model_training",
                                           on_click=lambda: ui.navigate.to(f"/?dataset={name}")).props("unelevated dense")
-                                val_btn = ui.button("重新校验", icon="fact_check", on_click=lambda: do_validate(name))
+                                val_btn = ui.button("重新校验", icon="fact_check",
+                                                    on_click=lambda: do_validate(name, val_btn))
                                 val_btn.props("outline dense")
 
-                                async def _do_relabel_refresh(ds_name: str) -> None:
-                                    ui.notify("重转换派生中…")
+                                async def _do_relabel_refresh(ds_name: str, _btn=None) -> None:
+                                    op = ops.begin(f"ds:{ds_name}:relabel", f"重建派生标注 · {ds_name}",
+                                                   scope=ds_name)
                                     try:
-                                        r = await _io(ds.relabel_refresh, ds_name, None, True)
+                                        with _busy(_btn):
+                                            r = await _io(ds.relabel_refresh, ds_name, None, True, None,
+                                                          op.progress)
+                                        op.finish()
                                         n_drop = len(r.get("drops") or [])
                                         ui.notify(f"已重转换 {r['refreshed']} 个派生标注"
                                                   + (f"（丢弃 {n_drop} 条，明细见重新校验）" if n_drop else ""),
                                                   type="positive")
                                     except Exception as exc:  # noqa: BLE001
+                                        op.fail(str(exc))
                                         ui.notify(f"重转换失败：{exc}", type="negative")
 
                                 rfr_btn = ui.button("重建派生标注", icon="sync_alt",
-                                                    on_click=lambda: _do_relabel_refresh(name))
+                                                    on_click=lambda: _do_relabel_refresh(name, rfr_btn))
                                 rfr_btn.props("outline dense").tooltip(
                                     "全量重转换派生 YOLO 标注（转换器规则变更后的恢复通道；日常标注修改自动增量刷新）")
                                 res_btn = ui.button("重切分", icon="call_split", on_click=lambda: open_resplit(meta))
@@ -3305,8 +3458,32 @@ document.addEventListener('scroll', function(e){
                                         _render_audit(name, meta)
                                 if tab == "review" and not state.get("review_built"):
                                     state["review_built"] = True
+                                    # 队列解析全量读 JSON 状态与可疑度，大清单秒级——骨架先行，
+                                    # 解析放 _io 线程（同步 _render_review 曾冻结整个页面）
                                     with review_box:
-                                        _render_review(meta)
+                                        with ui.row().classes("w-full items-center gap-2 q-pa-sm"):
+                                            ui.spinner(size="sm")
+                                            ui.label("解析审查队列中…（全量标注逐个读状态与可疑度）"
+                                                     ).classes("text-xs opacity-60")
+
+                                    async def _build_review() -> None:
+                                        try:
+                                            q = await _io(ds.review_queue, meta["name"])
+                                        except Exception as exc:  # noqa: BLE001
+                                            if getattr(review_box, "is_deleted", False):
+                                                return
+                                            review_box.clear()
+                                            with review_box:
+                                                ui.label(f"审查队列加载失败：{exc}").classes(
+                                                    "text-rose-400 text-xs")
+                                            return
+                                        if getattr(review_box, "is_deleted", False):
+                                            return  # 解析期间详情已切换到别的数据集
+                                        review_box.clear()
+                                        with review_box:
+                                            _render_review(meta, q)
+
+                                    asyncio.get_running_loop().create_task(_build_review())
 
                             def _on_ds_tab(e) -> None:
                                 state["ds_tab"] = e.value
@@ -3442,8 +3619,11 @@ document.addEventListener('scroll', function(e){
 
                                 async def _do_autofix(ds_name: str, dlg) -> None:
                                     dlg.close()
+                                    op = ops.begin(f"ds:{ds_name}:autofix", f"一键修复 · {ds_name}",
+                                                   scope=ds_name)
                                     try:
-                                        r = await _io(ds.auto_fix_dataset, ds_name)
+                                        r = await _io(ds.auto_fix_dataset, ds_name, None, op.progress)
+                                        op.finish()
                                         v = r.get("validation") or {}
                                         msg = f"已修复 {r.get('fixed_files', 0)} 个标注文件"
                                         if r.get("orphans_moved"):
@@ -3451,6 +3631,7 @@ document.addEventListener('scroll', function(e){
                                         msg += f"——重校验{'通过' if v.get('ok') else '仍有需人工项'}"
                                         ui.notify(msg, type="positive" if v.get("ok") else "warning")
                                     except Exception as exc:  # noqa: BLE001
+                                        op.fail(str(exc))
                                         ui.notify(f"修复失败：{exc}", type="negative")
                                     refresh()
                                     render_detail()
@@ -3573,11 +3754,12 @@ document.addEventListener('scroll', function(e){
                                             ui.tooltip("恢复此图（回最近一次 train/val 归属）")
 
             # ── 标注审查页签（M9 02 号票）：键盘流判定 + 可疑度排序胶片条（ADR 0003 状态寄生 JSON）
-            def _render_review(meta: dict) -> None:
+            def _render_review(meta: dict, queue: dict | None = None) -> None:
                 from ..datasets.review import REVIEW_REASONS
 
                 try:
-                    queue = ds.review_queue(meta["name"])
+                    if queue is None:  # 兼容同步路径；正常入口由 _ensure_audit_panel 预取后传入
+                        queue = ds.review_queue(meta["name"])
                 except Exception as exc:  # noqa: BLE001
                     ui.label(f"审查队列加载失败：{exc}").classes("text-rose-400 text-xs")
                     return
@@ -3690,21 +3872,29 @@ document.addEventListener('scroll', function(e){
                     refresh()
                     render_detail()
 
-                async def _reload() -> None:
+                async def _reload(_btn=None) -> None:
+                    op = ops.begin(f"ds:{meta['name']}:review_queue", "解析审查队列", scope=meta["name"])
                     try:
-                        q = await _io(ds.review_queue, meta["name"])
+                        with _busy(_btn):
+                            q = await _io(ds.review_queue, meta["name"])
+                        op.finish()
                     except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
                         ui.notify(f"刷新失败：{exc}", type="negative")
                         return
                     rst["items"] = q["items"]
                     rst["i"] = min(rst["i"], max(len(_fl()) - 1, 0))
                     _view.refresh()
 
-                async def _export_rejects() -> None:
+                async def _export_rejects(_btn=None) -> None:
+                    op = ops.begin(f"ds:{meta['name']}:rejects", "导出驳回清单", scope=meta["name"])
                     try:
-                        r = await _io(ds.export_review_rejects, meta["name"])
+                        with _busy(_btn):
+                            r = await _io(ds.export_review_rejects, meta["name"])
+                        op.finish()
                         ui.notify(f"驳回清单已导出：{r['path']}（{r['count']} 张）", type="positive")
                     except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
                         ui.notify(f"导出失败：{exc}", type="negative")
 
                 @ui.refreshable
@@ -3731,9 +3921,11 @@ document.addEventListener('scroll', function(e){
                                  ).props("outline color=teal").style("font-size:10px").tooltip(
                             "判定即时写回标注 JSON，X-AnyLabeling 图标即时同步——无「未保存」态")
                         ui.space()
-                        ui.button("导出驳回清单", icon="fact_check").props("flat dense size=xs").tooltip(
-                            "驳回图 markdown 清单落数据集目录（与改标清单同构）").on_click(_export_rejects)
-                        ui.button("刷新队列", icon="refresh").props("flat dense size=xs").on_click(_reload)
+                        erj_btn = ui.button("导出驳回清单", icon="fact_check").props("flat dense size=xs").tooltip(
+                            "驳回图 markdown 清单落数据集目录（与改标清单同构）")
+                        erj_btn.on_click(lambda: _export_rejects(erj_btn))
+                        rqq_btn = ui.button("刷新队列", icon="refresh").props("flat dense size=xs")
+                        rqq_btn.on_click(lambda: _reload(rqq_btn))
                     with ui.row().classes("w-full gap-1 flex-wrap text-[10px]"):
                         for key, zh in (("pending", "待审"), ("modified", "已修改"), ("rejected", "驳回"),
                                         ("approved", "通过"), ("skipped", "跳过"), ("all", "全部")):
@@ -3891,8 +4083,8 @@ document.addEventListener('scroll', function(e){
                         ui.icon("monitor_heart", size="28px").classes("opacity-30")
                         ui.label("暂无健康报告画像").classes("text-sm opacity-60")
                         ui.label("重新校验即可顺带生成（同一遍历，不额外扫盘）").classes("text-xs opacity-40")
-                        ui.button("重新校验并生成", icon="fact_check",
-                                  on_click=lambda: do_validate(name)).props("outline dense")
+                        valh_btn = ui.button("重新校验并生成", icon="fact_check",
+                                             on_click=lambda: do_validate(name, valh_btn)).props("outline dense")
                     return
                 s = payload.get("summary", {})
                 boxable = s.get("boxable")
@@ -4308,26 +4500,30 @@ document.addEventListener('scroll', function(e){
                                  ).classes("text-[11px] opacity-50")
 
             async def do_audit(name: str) -> None:
-                state["audit_prog"] = {"active": True, "cur": 0, "total": 1}
                 state["ds_tab"] = "audit"
+                op = ops.begin(f"ds:{name}:audit", f"体检 · {name}", scope=name)
                 try:
-                    audit = await _io(ds.run_quality_audit, name, progress=_audit_prog)
+                    audit = await _io(ds.run_quality_audit, name, op.tick)
+                    op.finish()
                     sm = audit.get("summary", {})
                     ui.notify(f"体检完成：精确 {sm.get('exact')} 组 · 近似 {sm.get('near')} 组 · "
                               f"泄漏 {sm.get('leaks')} 对"
                               + ("" if sm.get("imbalance_ok") else " · 存在类别失衡"), type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"体检失败：{exc}", type="negative")
-                finally:
-                    state["audit_prog"] = {"active": False, "cur": 0, "total": 0}
                 render_detail()
 
             async def do_restore(files: list[str]) -> None:
                 """排除恢复（单图/多图）：回最近一次归属，重建派生与画像后刷新页面。"""
+                op = ops.begin(f"ds:{state['selected']}:restore",
+                               f"恢复 {len(files)} 个文件 · {state['selected']}", scope=state["selected"])
                 try:
                     m = await _io(ds.restore_files, state["selected"], files)
+                    op.finish()
                     ui.notify(f"已恢复 {len(files)} 个文件 → 清单 {m['uid']}", type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"恢复失败：{exc}", type="negative")
                 refresh()
                 render_detail()
@@ -4342,11 +4538,16 @@ document.addEventListener('scroll', function(e){
 
                     async def _do_switch() -> None:
                         switch_dlg.close()
+                        op = ops.begin(f"ds:{state['selected']}:switch",
+                                       f"切回清单 {state['switch_uid']} · {state['selected']}",
+                                       scope=state["selected"])
                         try:
                             m = await _io(ds.switch_manifest, state["selected"], state["switch_uid"])
+                            op.finish()
                             ui.notify(f"已切回清单 {m['uid']}（train {len(m['train'])} / val {len(m['val'])}）",
                                       type="positive")
                         except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
                             ui.notify(f"切回失败：{exc}", type="negative")
                         refresh()
                         render_detail()
@@ -4357,9 +4558,6 @@ document.addEventListener('scroll', function(e){
                 state["switch_uid"] = uid
                 sw_title.set_text(f"切回清单 {uid}")
                 switch_dlg.open()
-
-            def _audit_prog(cur: int, total: int) -> None:
-                state["audit_prog"].update(cur=cur, total=total)
 
             def open_excluding(name: str, file: str) -> None:
                 state["ex_target"] = (name, file)
@@ -4384,12 +4582,15 @@ document.addEventListener('scroll', function(e){
                 name, files = target
                 state["ds_tab"] = "audit"
                 state["audit_sel"] = set()
+                op = ops.begin(f"ds:{name}:exclude", f"批量排除 {len(files)} 个文件 · {name}", scope=name)
                 try:
                     m = await _io(ds.exclude_files, name, files, "质量审计处置")
+                    op.finish()
                     ui.notify(f"已排除 {len(files)} 个文件：新清单 {m['uid']}"
                               f"（train {len(m['train'])} / val {len(m['val'])}）；重新体检可见新结果",
                               type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"批量排除失败：{exc}", type="negative")
                 refresh()
                 render_detail()
@@ -4401,11 +4602,14 @@ document.addEventListener('scroll', function(e){
                     return
                 name, file = target
                 state["ds_tab"] = "audit"
+                op = ops.begin(f"ds:{name}:exclude", f"排除 {Path(file).name} · {name}", scope=name)
                 try:
                     m = await _io(ds.exclude_files, name, [file], "质量审计处置")
+                    op.finish()
                     ui.notify(f"已排除：新清单 {m['uid']}（train {len(m['train'])} / val {len(m['val'])}）；"
                               "重新体检可见新结果", type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"排除失败：{exc}", type="negative")
                 refresh()
                 render_detail()
@@ -4429,20 +4633,18 @@ document.addEventListener('scroll', function(e){
                     ui.button(f"批量排除", color="negative", icon="remove_circle_outline",
                               on_click=do_batch_exclude).props("unelevated")
 
-            state["audit_prog"] = {"active": False, "cur": 0, "total": 0}
-
             def _audit_tick() -> None:
-                p = state.get("audit_prog") or {}
                 els = state.get("audit_prog_els")
                 if not els:
                     return
                 aprog, alabel = els
-                if p.get("active"):
+                o = ops.get(f"ds:{state['selected']}:audit") if state.get("selected") else None
+                if o and o["status"] == "running":
                     aprog.set_visibility(True)
                     alabel.set_visibility(True)
-                    total = max(p.get("total", 1), 1)
-                    alabel.set_text(f"体检中 {p.get('cur', 0)}/{p.get('total', 0)}（sha256 + 感知哈希逐张）")
-                    aprog.set_value(min(p.get("cur", 0) / total, 1.0))
+                    total = max(o.get("total") or 1, 1)
+                    alabel.set_text(f"体检中 {o.get('cur', 0)}/{o.get('total', 0)}（sha256 + 感知哈希逐张）")
+                    aprog.set_value(min(o.get("cur", 0) / total, 1.0))
                 else:
                     aprog.set_visibility(False)
                     alabel.set_visibility(False)
@@ -4469,6 +4671,7 @@ document.addEventListener('scroll', function(e){
                     async def _do_bulk_del() -> None:
                         targets = [r["name"] for r in (table.selected or [])]
                         bulk_del_dialog.close()
+                        op = ops.begin("datasets:bulk_del", f"删除数据集 ×{len(targets)}", total=len(targets))
                         ok, fails = 0, []
                         for name in targets:
                             try:
@@ -4479,6 +4682,8 @@ document.addEventListener('scroll', function(e){
                                 ok += 1
                             except Exception as exc:  # noqa: BLE001
                                 fails.append(f"{name}：{exc}")
+                            op.tick(ok + len(fails))
+                        op.finish()
                         if ok:
                             ui.notify(f"已删除 {ok} 个数据集（标注源目录永不触碰）", type="positive")
                         for f in fails:
@@ -4500,26 +4705,32 @@ document.addEventListener('scroll', function(e){
 
             state["open_bulk_del"] = open_bulk_del
 
-            async def do_validate(name: str) -> None:
-                ui.notify("校验中…")
+            async def do_validate(name: str, _btn=None) -> None:
+                op = ops.begin(f"ds:{name}:validate", f"重新校验 · {name}", scope=name)
                 try:
-                    report = await _io(ds.validate_dataset_by_name, name)
+                    with _busy(_btn):
+                        report = await _io(ds.validate_dataset_by_name, name, None, op.progress)
+                    op.finish()
                     ui.notify(f"校验完成：{report['total_images']} 图，问题 {len(report['problems'])} 个",
                               type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"校验失败：{exc}", type="negative")
                 refresh()
                 render_detail()
 
             async def do_delete(meta: dict) -> None:
                 del_dialog.close()
+                op = ops.begin(f"ds:{meta['name']}:delete", f"删除数据集 · {meta['name']}")
                 try:
                     await _io(ds.delete_dataset, meta["name"])
+                    op.finish()
                     if state["selected"] == meta["name"]:
                         state["selected"] = None
                         state["rendered_id"] = None
                     ui.notify(f"已删除 {meta['name']}（标注源目录永不触碰）", type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"删除失败：{exc}", type="negative")
                 refresh()
                 render_detail()
@@ -4580,17 +4791,18 @@ document.addEventListener('scroll', function(e){
                     i_seed = _labeled("随机种子", ui.number, w="flex-1", label_w="w-20",
                                       value=42, precision=0)
                 i_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
-                i_progress = {"phase": "", "cur": 0, "total": 0, "active": False}
+                i_op: dict = {"key": None}  # 进行中操作键：进度真源在登记表（页面级，关页签不丢）
                 prog_label = ui.label("").classes("text-xs opacity-70").set_visibility(False)
                 prog_bar = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
 
                 def _prog_tick() -> None:
-                    if i_progress["active"]:
+                    o = ops.get(i_op["key"]) if i_op["key"] else None
+                    if o and o["status"] == "running":
                         prog_label.set_visibility(True)
                         prog_bar.set_visibility(True)
-                        total = max(i_progress["total"], 1)
-                        prog_label.set_text(f"{i_progress['phase']} {i_progress['cur']}/{i_progress['total']}")
-                        prog_bar.set_value(min(i_progress["cur"] / total, 1.0))
+                        total = max(o.get("total") or 1, 1)
+                        prog_label.set_text(f"{o.get('phase', '')} {o.get('cur', 0)}/{o.get('total', 0)}")
+                        prog_bar.set_value(min(o.get("cur", 0) / total, 1.0))
                     else:
                         prog_label.set_visibility(False)
                         prog_bar.set_visibility(False)
@@ -4631,16 +4843,15 @@ document.addEventListener('scroll', function(e){
                     if not (i_src.value or "").strip():
                         ui.notify("请填写标注目录路径", type="warning")
                         return
-                    i_ok.props("disabled")
-                    i_progress.update(active=True, phase="准备中", cur=0, total=1)
-
-                    def _cb(phase: str, cur: int, total: int) -> None:
-                        i_progress.update(phase=phase, cur=cur, total=total)
-
+                    i_ok.props("loading")
+                    name = i_name.value.strip()
+                    op = ops.begin(f"ds:{name}:import", f"导入 · {name}", scope=name)
+                    i_op["key"] = op.key
                     try:
-                        meta = await _io(ds.import_dataset, i_name.value.strip(), i_task.value, i_src.value,
+                        meta = await _io(ds.import_dataset, name, i_task.value, i_src.value,
                                          i_ratio.value or 0.8, int(i_seed.value or 42), i_strat.value,
-                                         progress_cb=_cb)
+                                         progress_cb=op.progress)
+                        op.finish()
                         import_dialog.close()
                         lv = meta.get("last_validation") or {}
                         ui.notify(f"导入成功：{lv.get('total_images', '?')} 图 "
@@ -4648,10 +4859,10 @@ document.addEventListener('scroll', function(e){
                                   type="positive")
                         state["selected"] = meta["name"]
                     except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
                         ui.notify(f"导入失败：{exc}", type="negative")
                     finally:
-                        i_progress.update(active=False)
-                        i_ok.props(remove="disabled")
+                        i_ok.props(remove="loading")
                     refresh()
                     row = next((r for r in table.rows if r["name"] == state["selected"]), None)
                     if row is not None:
@@ -4702,16 +4913,19 @@ document.addEventListener('scroll', function(e){
                     name = state["selected"]
                     if not name:
                         return
+                    op = ops.begin(f"ds:{name}:resplit", f"重切分 · {name}", scope=name)
                     with _busy(r_ok, "重切分中…"):
                         try:
                             m = await _io(ds.resplit_dataset, name, r_ratio.value or 0.8,
                                           int(r_seed.value or 42), r_strat.value, r_appr.value)
+                            op.finish()
                             resplit_dialog.close()
                             extra = f" · 只训已审（滤除未通过 {m.get('approved_dropped', 0)} 图）" \
                                 if m.get("approved_only") else ""
                             ui.notify(f"新清单 {m['uid']}：train {len(m['train'])} / val {len(m['val'])}{extra}",
                                       type="positive")
                         except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
                             ui.notify(f"重切失败：{exc}", type="negative")
                     refresh()
                     render_detail()
@@ -4740,17 +4954,18 @@ document.addEventListener('scroll', function(e){
                 tl_strat = ui.checkbox("按类别分层").tooltip(
                     "随机单位是源图：同源小图永不跨侧（防 val 泄漏）；分层按源图主类")
                 tl_prev = ui.column().classes("w-full gap-0.5").set_visibility(False)
-                tl_prog = {"phase": "", "cur": 0, "total": 0, "active": False}
+                tl_op: dict = {"key": None}  # 进行中操作键：进度真源在登记表（页面级，关页签不丢）
                 tl_prog_label = ui.label("").classes("text-xs opacity-70").set_visibility(False)
                 tl_prog_bar = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
 
                 def _tl_prog_tick() -> None:
-                    if tl_prog["active"]:
+                    o = ops.get(tl_op["key"]) if tl_op["key"] else None
+                    if o and o["status"] == "running":
                         tl_prog_label.set_visibility(True)
                         tl_prog_bar.set_visibility(True)
-                        total = max(tl_prog["total"], 1)
-                        tl_prog_label.set_text(f"{tl_prog['phase']} {tl_prog['cur']}/{tl_prog['total']}")
-                        tl_prog_bar.set_value(min(tl_prog["cur"] / total, 1.0))
+                        total = max(o.get("total") or 1, 1)
+                        tl_prog_label.set_text(f"{o.get('phase', '')} {o.get('cur', 0)}/{o.get('total', 0)}")
+                        tl_prog_bar.set_value(min(o.get("cur", 0) / total, 1.0))
                     else:
                         tl_prog_label.set_visibility(False)
                         tl_prog_bar.set_visibility(False)
@@ -4787,12 +5002,16 @@ document.addEventListener('scroll', function(e){
                                       on_click=lambda: do_tile()).props("unelevated dense disabled")
 
                 async def do_tile_preview() -> None:
-                    with _busy(tl_prev_btn, "预览中…"):
+                    src = state["selected"]
+                    op = ops.begin(f"ds:{src}:tile_preview", f"切片预览 · {src}", scope=src)
+                    with _busy(tl_prev_btn):
                         try:
-                            s = await _io(ds.tile_dataset_preview, state["selected"],
+                            s = await _io(ds.tile_dataset_preview, src,
                                           int(tl_rows.value or 2), int(tl_cols.value or 2),
                                           float(tl_ov.value or 0.2), bool(tl_empty.value))
+                            op.finish()
                         except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
                             ui.notify(f"预览失败：{exc}", type="negative")
                             return
                     with tl_prev:
@@ -4815,30 +5034,29 @@ document.addEventListener('scroll', function(e){
 
                 async def do_tile() -> None:
                     name_new = (tl_name.value or "").strip() or _tl_default_name()
-                    tl_ok.props("disabled")
-                    tl_prev_btn.props("disabled")
-                    tl_prog.update(active=True, phase="准备中", cur=0, total=1)
-
-                    def _cb(phase: str, cur: int, total: int) -> None:
-                        tl_prog.update(phase=phase, cur=cur, total=total)
-
+                    tl_ok.props("loading")
+                    tl_prev_btn.props("loading")
+                    src = state["selected"]
+                    op = ops.begin(f"ds:{src}:tile", f"切片 · {src} → {name_new}", scope=src)
+                    tl_op["key"] = op.key
                     try:
-                        r = await _io(ds.tile_dataset, state["selected"],
+                        r = await _io(ds.tile_dataset, src,
                                       int(tl_rows.value or 2), int(tl_cols.value or 2),
                                       float(tl_ov.value or 0.2), name_new, bool(tl_empty.value),
                                       tl_ratio.value or 0.8, int(tl_seed.value or 42), tl_strat.value,
-                                      progress_cb=_cb)
+                                      progress_cb=op.progress)
+                        op.finish()
                         tiling_dialog.close()
                         s = r["summary"]
                         ui.notify(f"切片完成 {r['meta']['name']}：产片 {s['tiles_written']} · "
                                   f"复审 {s['re_review']} 片（源集不动）", type="positive")
                         state["selected"] = r["meta"]["name"]
                     except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
                         ui.notify(f"切片失败：{exc}", type="negative")
                     finally:
-                        tl_prog.update(active=False)
-                        tl_ok.props(remove="disabled")
-                        tl_prev_btn.props(remove="disabled")
+                        tl_ok.props(remove="loading")
+                        tl_prev_btn.props(remove="loading")
                     refresh()
                     row = next((rr for rr in table.rows if rr["name"] == state["selected"]), None)
                     if row is not None:
@@ -4853,6 +5071,7 @@ document.addEventListener('scroll', function(e){
             state["open_import"] = import_dialog.open
             state["open_external"] = external_dialog.open
             ui.timer(0.3, _audit_tick)  # 体检进度条（单实例 timer，render_detail 重建元素也不叠 timer）
+            _op_region_timer(state)
             refresh()
 
         _page_frame("数据集", "数据集", actions, body,
@@ -5012,12 +5231,20 @@ document.addEventListener('scroll', function(e){
 
                     _hyperparam_diff(items)
 
-            def do_cross() -> None:
+            async def do_cross() -> None:
                 uids = [r["id"] for r in (cross.selected or [])]
                 if not uids:
                     ui.notify("请先勾选任务（点行首复选框）", type="warning")
                     return
-                data = tsvc.compare_tasks(get_manager(), uids)
+                op = ops.begin("results:compare", "跨任务对比")
+                try:
+                    with _busy(cmp_btn):
+                        data = await _io(tsvc.compare_tasks, get_manager(), uids)
+                    op.finish()
+                except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
+                    ui.notify(f"对比失败：{exc}", type="negative")
+                    return
                 cmp_state.update(data=data, baseline=None, mode=cmp_state["mode"],
                                  only_diff_cols=cmp_state["only_diff_cols"],
                                  only_diff_rows=cmp_state["only_diff_rows"])
@@ -5025,23 +5252,24 @@ document.addEventListener('scroll', function(e){
                     f"history.replaceState(null, '', '/results?cmp={','.join(str(u) for u in uids)}')")
                 _render_compare()
 
-            def do_with_deployed() -> None:
+            async def do_with_deployed() -> None:
                 """一键把「当前部署版」对应任务纳入对比（M8 06 六件套之六）。"""
-                try:
-                    deps = tsvc.list_deployments(get_manager())["deployments"]
-                    cur = next((d for d in deps if d["verified"]), None) or (deps[0] if deps else None)
-                except Exception:  # noqa: BLE001
-                    cur = None
-                if not cur:
-                    ui.notify("还没有部署记录——先在训练详情页部署一个模型", type="warning")
-                    return
-                ids = {r["id"] for r in (cross.selected or [])}
-                ids.add(cur["task_id"])
-                sel = [r for r in cross_rows if r["id"] in ids]
-                cross.selected = sel
-                _sync_cmp_btn()
-                do_cross()
-                ui.notify(f"已纳入当前部署版：{cur['task_name']} · Run {cur['run_uid']}")
+                with _busy(dep_btn):
+                    try:
+                        deps = tsvc.list_deployments(get_manager())["deployments"]
+                        cur = next((d for d in deps if d["verified"]), None) or (deps[0] if deps else None)
+                    except Exception:  # noqa: BLE001
+                        cur = None
+                    if not cur:
+                        ui.notify("还没有部署记录——先在训练详情页部署一个模型", type="warning")
+                        return
+                    ids = {r["id"] for r in (cross.selected or [])}
+                    ids.add(cur["task_id"])
+                    sel = [r for r in cross_rows if r["id"] in ids]
+                    cross.selected = sel
+                    _sync_cmp_btn()
+                    await do_cross()
+                    ui.notify(f"已纳入当前部署版：{cur['task_name']} · Run {cur['run_uid']}")
 
             def _hyperparam_diff(items: list[dict]) -> None:
                 """超参 diff 三件套（M8 06）：基准行 + 只看差异 + 高亮；行标签带 Run 固定色点。"""
@@ -5202,10 +5430,12 @@ document.addEventListener('scroll', function(e){
                     ui.notify("请先在轮次表中选择一个 Run", type="warning")
                     return
                 btn = rep_btn_holder.get("btn")
+                op = ops.begin(f"run:{uid}:report", f"复盘报告 · {uid}", scope=uid)
                 ctx = _busy(btn, "报告生成中（约 1–2 分钟）…")
                 try:
                     ctx.__enter__()
                     result = await _io(tsvc.generate_report, get_manager(), uid)
+                    op.finish()
                     content = Path(result["report"]).read_text(encoding="utf-8")
                     with ui.dialog() as dlg, ui.card().classes("w-3xl max-w-[90vw]"):
                         with ui.row().classes("w-full items-center"):
@@ -5217,6 +5447,7 @@ document.addEventListener('scroll', function(e){
                     dlg.open()
                     ui.notify(f"报告已生成并写入 {result['report']}（{result['chars']} 字）", type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"报告生成失败：{exc}", type="negative")
                 finally:
                     ctx.__exit__(None, None, None)
@@ -5366,11 +5597,14 @@ document.addEventListener('scroll', function(e){
             async def do_purge() -> None:
                 name = purge_name.text
                 purge_dialog.close()
+                op = ops.begin("lib:purge", f"删除模型目录 · {name}")
                 try:
                     r = await _io(tsvc.delete_model_dir, get_manager(), name)
+                    op.finish()
                     ui.notify(f"已删除 {r['deleted']}（同步移除 {r['removed_deployments']} 条部署记录）",
                               type="positive")
                 except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
                     ui.notify(f"删除失败：{exc}", type="negative")
                 render_library()
                 render_deployments()
@@ -5395,6 +5629,7 @@ document.addEventListener('scroll', function(e){
                     async def _do_lib_bulk() -> None:
                         targets = list(state.get("lib_sel") or [])
                         lib_bulk_dialog.close()
+                        op = ops.begin("lib:bulk_del", f"删除模型目录 ×{len(targets)}", total=len(targets))
                         ok, dep, fails = 0, 0, []
                         for n in targets:
                             try:
@@ -5403,6 +5638,8 @@ document.addEventListener('scroll', function(e){
                                 dep += r["removed_deployments"]
                             except Exception as exc:  # noqa: BLE001
                                 fails.append(f"{n}：{exc}")
+                            op.tick(ok + len(fails))
+                        op.finish()
                         if ok:
                             ui.notify(f"已删除 {ok} 个模型目录（同步移除 {dep} 条部署记录）",
                                       type="positive")
@@ -5433,7 +5670,7 @@ document.addEventListener('scroll', function(e){
                 if sel_rows:
                     cross.selected = sel_rows
                     _sync_cmp_btn()
-                    do_cross()
+                    asyncio.get_running_loop().create_task(do_cross())
 
         _page_frame("结果", "结果复盘", None, body,
                     subtitle="对比 · 错误分析 · 复盘")
@@ -6077,11 +6314,14 @@ document.addEventListener('scroll', function(e){
                         finally:
                             client.close()
 
+                    op = ops.begin("llm:test", "LLM 连通性测试")
                     with _busy(test_btn, "请求中（多模态链路可能需要数十秒）…"):
                         try:
                             text = await _io(_test)
+                            op.finish()
                             ui.notify(f"LLM 连通正常，回复：{text[:40]}", type="positive")
                         except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
                             ui.notify(f"LLM 不可达：{exc}", type="negative")
 
             with ui.card().classes("w-full gap-2"):

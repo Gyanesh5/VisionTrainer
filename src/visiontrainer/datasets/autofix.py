@@ -163,13 +163,14 @@ def _backup_file(j: Path, source_dir: Path, backup_dir: Path) -> None:
     shutil.copy2(j, dest)
 
 
-def apply_autofix(source_dir: Path, task_type: str, run_dir: Path) -> dict:
+def apply_autofix(source_dir: Path, task_type: str, run_dir: Path, progress=None) -> dict:
     """扫描源目录执行全部可自动修复项（以源目录现状为准，不信任旧报告快照）。
 
     Args:
         source_dir: 托管数据集的标注源目录（labelme JSON + 图片同目录）。
         task_type: 数据集任务类型（决定启用的修复谓词）。
         run_dir: 本次运行落盘目录（数据集侧 autofix/<时间戳>/），backup/ 与 orphans/ 在其下。
+        progress: 可选 (cur, total) 回调，按扫描序逐 20 个 JSON 上报。
 
     Returns:
         {fixed_files, orphans_moved, fixes: {码: 数}, backup_dir, quarantine_dir, skipped}。
@@ -181,7 +182,10 @@ def apply_autofix(source_dir: Path, task_type: str, run_dir: Path) -> dict:
     fixes: dict[str, int] = {}
     skipped: list[dict] = []
     fixed_files = 0
-    for j in sorted(source_dir.rglob("*.json")):
+    jsons = sorted(source_dir.rglob("*.json"))
+    for i, j in enumerate(jsons):
+        if progress is not None and (i % 20 == 0 or i == len(jsons) - 1):
+            progress(i + 1, len(jsons))
         if (j.parent, j.stem) not in image_keys:
             continue  # 孤儿在下面统一隔离，不做无谓的修复+备份
         try:

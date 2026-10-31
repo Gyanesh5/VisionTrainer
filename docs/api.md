@@ -128,7 +128,7 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 
 ## WebSocket
 
-**`/ws/events`** — 六种增量事件（07 号票五事件定稿 + `deployment.updated`；JSON 帧，`type` 判别）：
+**`/ws/events`** — 七种增量事件（07 号票五事件定稿 + `deployment.updated` + `operation.updated`；JSON 帧，`type` 判别）：
 
 ```jsonc
 {"type": "run.metrics",  "run_uid": "3f9a2c1b", "epoch": 12,
@@ -145,7 +145,14 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
  "queued_uids": ["a1b2c3d4"], "block_reason": null}           // 外部占用时填原因
 {"type": "deployment.updated", "deployment_id": 3,
  "action": "verified"}                                        // created 登记 / updated 验证落定 / removed 清理删除
+{"type": "operation.updated", "op_id": 12, "key": "ds:plate:validate",
+ "label": "重新校验 · plate", "scope": "plate", "phase": "扫描校验",
+ "cur": 240, "total": 1200, "status": "running", "error": null}
 ```
+
+`operation.updated` —— 进行中操作生命周期（进度登记表登记 / 换阶段 / 终态 done|failed）。
+载荷即全量状态（无对应 REST 端点）；细粒度进度不进事件（防刷爆队列），消费方逢事件读载荷、
+UI 进程内 0.3~0.5s 读登记表刷新。`key` 幂等：同 key 已在进行中时重复登记返回既有实例（重复提交闸）。
 
 - 断线补齐：**REST 拉全量**（`GET /runs/{uid}`），WS 不回放。
 - 自带 UI 的训练页与部署区以此通道事件驱动刷新（事件当门铃、REST 取数据 + 低频兜底），不周期轮询；`deployment.updated` 补齐部署记录后台落定（导出验证异步）与清理删除的即时通知。

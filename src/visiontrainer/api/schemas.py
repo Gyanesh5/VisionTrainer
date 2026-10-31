@@ -74,6 +74,25 @@ class DeploymentUpdatedEvent(BaseModel):
     action: Literal["created", "updated", "removed"]
 
 
+class OperationUpdatedEvent(BaseModel):
+    """进行中操作生命周期（进度登记表：登记 / 换阶段 / 终态）。
+
+    细粒度进度不进事件（防刷爆队列）；载荷即全量状态。
+    key 幂等——同 key 已在进行中时登记返回既有实例（重复提交闸）。
+    """
+
+    type: Literal["operation.updated"] = "operation.updated"
+    op_id: int
+    key: str
+    label: str
+    scope: str | None = None
+    phase: str = ""
+    cur: int = 0
+    total: int | None = None
+    status: Literal["running", "done", "failed"]
+    error: str | None = None
+
+
 WSEvent = (
     RunMetricsEvent
     | RunProgressEvent
@@ -81,6 +100,7 @@ WSEvent = (
     | TaskUpdatedEvent
     | QueueUpdatedEvent
     | DeploymentUpdatedEvent
+    | OperationUpdatedEvent
 )
 
 

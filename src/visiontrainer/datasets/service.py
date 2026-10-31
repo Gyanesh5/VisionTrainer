@@ -237,13 +237,22 @@ def delete_dataset(name: str, root: Path | None = None) -> None:
 
 # ---------------------------------------------------------------- 校验/切分/类别
 
-def validate_dataset_by_name(name: str, root: Path | None = None) -> dict:
+def validate_dataset_by_name(name: str, root: Path | None = None,
+                             progress_cb=None) -> dict:
+    """重新校验托管数据集（扫描标注 → 规则校验 → 刷新丢弃账目与健康画像）。
+
+    progress_cb(phase, cur, total)：扫描阶段逐 20 张回调（UI 进度条用）。
+    """
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不做平台校验")
     ds_dir = _ds_dir(name, root)
     src = Path(meta["source_dir"])
-    scan = scan_entries(src, meta["task_type"], meta["classes"])
+
+    def _cb(phase: str):
+        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
+
+    scan = scan_entries(src, meta["task_type"], meta["classes"], progress=_cb("扫描校验"))
     report = validate_dataset(src, meta["task_type"], meta["classes"], scan=scan)
     (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     meta["last_validation"] = report
@@ -692,22 +701,28 @@ def ack_drops(name: str, root: Path | None = None) -> dict:
     return {"name": name, "drops_acked": True, "pending": False}
 
 
-def auto_fix_dataset(name: str, root: Path | None = None) -> dict:
+def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> dict:
     """一键自动修复（ADR 0005）：修源标注 → 增量重转派生 → 全量重校验刷新画像与丢弃账目。
 
     修复以源目录现状为准（不信任旧报告快照）；原文件备份与孤儿隔离落
     `<root>/<name>/autofix/<时间戳>/`。返回修复摘要 + 重校验摘要（完整报告读
     validation_report.json 或经 get_dataset）。
+    progress_cb(phase, cur, total)：三阶段（修复写回/重转派生/扫描校验）进度回调。
     """
     from .autofix import apply_autofix
 
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集只读，平台不修复其标注")
+
+    def _cb(phase: str):
+        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
+
     run_dir = _ds_dir(name, root) / "autofix" / datetime.now().strftime("%Y%m%d-%H%M%S")
-    summary = apply_autofix(Path(meta["source_dir"]), meta["task_type"], run_dir)
-    relabel = relabel_refresh(name, root=root)  # 增量：只有被改写的 JSON 比派生 txt 新
-    report = validate_dataset_by_name(name, root)
+    summary = apply_autofix(Path(meta["source_dir"]), meta["task_type"], run_dir,
+                            progress=_cb("修复写回"))
+    relabel = relabel_refresh(name, root=root, progress_cb=progress_cb)  # 增量：只有被改写的 JSON 比派生 txt 新
+    report = validate_dataset_by_name(name, root, progress_cb=progress_cb)
     return {**summary, "relabel": relabel,
             "validation": {"ok": report["ok"], "fixables": report["fixables"],
                            "counts": report["counts"], "drops": report["drops"],
@@ -715,12 +730,13 @@ def auto_fix_dataset(name: str, root: Path | None = None) -> dict:
 
 
 def relabel_refresh(name: str, image: str | None = None, force: bool = False,
-                    root: Path | None = None) -> dict:
+                    root: Path | None = None, progress_cb=None) -> dict:
     """标注变更联动（M9 01 号票）：单图（image 给定）或全清单按 mtime 增量重转换派生 YOLO txt。
 
     force=True 跳过增量判断全量重转换——转换器规则变更后（如 OBB 越界改钳制），
     JSON mtime 未变但派生 txt 已过时，增量模式看不见，须强制重建。
     返回 {refreshed, drops}——刷新过程中出现的转换丢弃逐条带回（不自动确认，重校验后入账）。
+    progress_cb(phase, cur, total)：全清单模式逐 20 张回调（UI 进度条用）。
     """
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
@@ -736,7 +752,9 @@ def relabel_refresh(name: str, image: str | None = None, force: bool = False,
 
     refreshed = 0
     drops: list[dict] = []
-    for img in targets:
+    for i, img in enumerate(targets):
+        if progress_cb is not None and image is None and (i % 20 == 0 or i == len(targets) - 1):
+            progress_cb("重转派生", i + 1, len(targets))
         p = Path(img)
         split = "train" if img in train_set or str(p) in train_set else "val"
         txt = ds_dir / "derived" / manifest["uid"] / "labels" / split / f"{p.stem}.txt"
