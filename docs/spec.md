@@ -8,7 +8,7 @@ Version 1.2 · 2026-09-22 · v1.0（2026-09-06）由 wayfinder 地图 13 张决�
 
 ```
 浏览器（NiceGUI 薄层 UI，中文）
-   │ REST /api/v1（19 端点，docs/api.md）  WS /ws/events（五事件）
+   │ REST /api/v1（19 端点，docs/api.md）  WS /ws/events（六事件）
 FastAPI + Runner（同进程；asyncio 单飞队列）──── SQLite（六表，SQLAlchemy 2.0）
    │ Popen(start_new_session)                       │
 Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染管线
@@ -57,7 +57,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 ### 2.3 实时监控 [T7]
 
-- WS 五事件：`run.metrics`（逐 epoch）/ `run.progress`（1Hz）/ `run.status` / `task.updated`（含 agent_state）/ `queue.updated`；断线 REST 补齐不回放；日志独立通道，stdout 只透传落 `training.log`。
+- WS 六事件：`run.metrics`（逐 epoch）/ `run.progress`（1Hz）/ `run.status` / `task.updated`（含 agent_state）/ `queue.updated` / `deployment.updated`（登记/验证落定/清理删除）；断线 REST 补齐不回放；日志独立通道，stdout 只透传落 `training.log`。UI 的训练页与部署区订阅此通道事件驱动刷新（事件当门铃、REST 取数据 + 低频兜底），不周期轮询。
 - 四类视图：任务/队列页、Run 详情页（loss 分项 + P/R/mAP50/mAP50-95/lr 曲线 + 产物区）、Agent 循环页（轮次时间线 + 审批门）、对比页（Task 内跨 Run + 跨 Task）。
 - **监控增强** [M7]：GPU 利用率/显存/温度采样入库（pynvml，5–10s）——Run 详情 System 卡 + 多 Run 显存对比；训练时长预估（历史 Run 中位数，提交确认页）；桌面通知（完成/失败/审批请求 → notify-send）；train/val loss 同图双线（实线训练/虚线验证）。
 

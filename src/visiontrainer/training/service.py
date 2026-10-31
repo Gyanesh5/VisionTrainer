@@ -13,6 +13,7 @@ from .manager import SubprocessHandle
 from .snapshot import load_snapshot
 from ..datasets import service as ds
 from ..datasets.service import DatasetError
+from ..ws import publish_threadsafe
 
 
 class TaskError(Exception):
@@ -874,8 +875,12 @@ def delete_model_dir(manager, name: str, model_lib_dir: str | None = None) -> di
         raise _http_err("invalid_args", "目录不在模型库内，拒绝删除", 400)
     n_dep = 0
     with manager.Session() as s:
+        removed_ids = [row[0] for row in
+                       s.query(Deployment.id).filter(Deployment.model_lib_dir == str(target))]
         n_dep = s.query(Deployment).filter(Deployment.model_lib_dir == str(target)).delete()
         s.commit()
+    for dep_id in removed_ids:
+        publish_threadsafe({"type": "deployment.updated", "deployment_id": dep_id, "action": "removed"})
     shutil.rmtree(target, ignore_errors=True)
     return {"deleted": name, "removed_deployments": n_dep}
 
@@ -1013,6 +1018,7 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
         s.add(deployment)
         s.commit()
         dep_id = deployment.id
+        publish_threadsafe({"type": "deployment.updated", "deployment_id": dep_id, "action": "created"})
 
         verify_image = None
         src = ds_meta.get("source_dir")
@@ -1052,6 +1058,7 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
             else:
                 dep.verification = {"status": "failed", "detail": "未产生 result.json"}
             s2.commit()
+        publish_threadsafe({"type": "deployment.updated", "deployment_id": dep_id, "action": "updated"})
 
     def _watch() -> None:
         log_f = (export_dir / "export.log").open("wb")
@@ -1063,6 +1070,7 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
                     dep = s2.get(Deployment, dep_id)
                     dep.verification = {"status": "failed", "detail": f"导出进程启动失败：{exc}"}
                     s2.commit()
+                publish_threadsafe({"type": "deployment.updated", "deployment_id": dep_id, "action": "updated"})
                 return
             _finalize(proc)
         finally:

@@ -10,7 +10,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-# ---- WS 五事件（07 号票定稿，docs/api.md 为准） ----
+# ---- WS 事件（07 号票五事件定稿 + deployment.updated，docs/api.md 为准） ----
 
 RunStatus = Literal[
     "queued", "running", "stopping", "done", "failed", "cancelled"
@@ -66,12 +66,21 @@ class QueueUpdatedEvent(BaseModel):
     block_reason: str | None = None
 
 
+class DeploymentUpdatedEvent(BaseModel):
+    """部署记录变化（登记 / 验证落定 / 清理删除）。载荷只做关联，消费方经 REST 取全量。"""
+
+    type: Literal["deployment.updated"] = "deployment.updated"
+    deployment_id: int
+    action: Literal["created", "updated", "removed"]
+
+
 WSEvent = (
     RunMetricsEvent
     | RunProgressEvent
     | RunStatusEvent
     | TaskUpdatedEvent
     | QueueUpdatedEvent
+    | DeploymentUpdatedEvent
 )
 
 

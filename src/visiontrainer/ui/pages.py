@@ -19,6 +19,7 @@ from fastapi import Request
 from nicegui import app, ui
 
 from .. import thumbs
+from .. import ws
 from ..config import load_config, update_config
 from ..datasets import service as ds
 from ..training.params import GROUPS as PARAM_GROUPS
@@ -1208,6 +1209,38 @@ def _scroll_to(el) -> None:
     # 对象（详情卡/下钻列表）反而滚错方向
     ui.run_javascript(
         f"document.getElementById('c{el.id}')?.scrollIntoView({{behavior:'smooth', block:'start'}})")
+
+
+_WS_REFRESH_POLL_SEC = 0.25  # 事件泵唤醒周期：仅排空进程内队列，无 DB/渲染开销
+_WS_REFRESH_FALLBACK_SEC = 30.0
+
+
+def _refresh_on_ws_events(callback: Callable[[], None], event_types: set[str] | None = None) -> None:
+    """订阅进程内 WS 事件总线，事件到达即调 callback（同一时间窗合并为一次），另挂低频兜底全刷。
+
+    取代周期轮询：训练域状态变化本就即时广播事件（schemas.py WS 事件），空开页面零查询。
+    publish 在订阅队列积压满（1000 条）时会丢事件，兜底 timer 保证最终一致。
+    客户端删除（断连超过 reconnect_timeout）时须退订，否则队列滞留 _subscribers 泄漏；
+    不能挂 on_disconnect——它在重连时也会触发，会把还活着的页面误退订。
+    """
+    queue = ws.subscribe()
+    client = ui.context.client
+
+    def _drain() -> None:
+        hit = False
+        while True:
+            try:
+                event = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if event_types is None or event.get("type") in event_types:
+                hit = True
+        if hit:
+            callback()
+
+    client.on_delete(lambda: ws.unsubscribe(queue))
+    ui.timer(_WS_REFRESH_POLL_SEC, _drain)
+    ui.timer(_WS_REFRESH_FALLBACK_SEC, callback)
 
 
 def _model_task(model: str) -> str | None:
@@ -3056,7 +3089,7 @@ document.addEventListener('scroll', function(e){
 
             seen_dep: set = set()
             state["open_create"] = create_dialog.open
-            ui.timer(2.0, refresh)
+            _refresh_on_ws_events(refresh)
             refresh()
 
             # 数据集页「用此数据集训练」直达：?dataset=名 预填并直接弹窗
@@ -5206,7 +5239,7 @@ document.addEventListener('scroll', function(e){
                                   f"在 X-AnyLabeling 模型下拉 → Custom → 加载 {last['model_lib_dir']}/config.yaml",
                                   type="positive")
 
-            ui.timer(3.0, render_deployments)
+            _refresh_on_ws_events(render_deployments, {"deployment.updated"})
             state["dep_first_render"] = True
             render_deployments()
 

@@ -143,3 +143,60 @@ def test_desktop_type_mapping():
     assert desktop_type("yolo27x", "obb", end2end=False) == "yolov8_obb"
     # classify 无 end2end 概念，恒 v8_cls 兜底
     assert desktop_type("yolo26n-cls", "classify") == "yolov8_cls"
+
+
+def test_deploy_events_published(deploy_client):
+    """部署全链路广播 deployment.updated：登记 → 验证落定 → 清理删除（WS 契约第六事件）。"""
+    from asyncio import QueueEmpty
+
+    from visiontrainer import ws as wsmod
+    from visiontrainer.db.models import Deployment, Run
+
+    c, tmp_path = deploy_client
+    manager = c.app.state.manager
+    q = wsmod.subscribe()
+    dep_events: list[dict] = []
+
+    def _collect() -> None:
+        while True:
+            try:
+                event = q.get_nowait()
+            except QueueEmpty:
+                break
+            if event.get("type") == "deployment.updated":
+                dep_events.append(event)
+
+    try:
+        task_id = c.post("/api/v1/tasks", json={"name": "deploy-ev", "base_model": "yolo11n",
+                                                "dataset": "plate", "epochs": 2}).json()["id"]
+        run_uid = _wait_done(c, task_id)
+        assert c.post(f"/api/v1/runs/{run_uid}/deploy").status_code == 200
+
+        # 登记（exporting）与验证落定经后台线程异步广播，顺序由同一事件循环保证
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            _collect()
+            if [e["action"] for e in dep_events] == ["created", "updated"]:
+                break
+            time.sleep(0.2)
+        assert [e["action"] for e in dep_events] == ["created", "updated"], dep_events
+        assert isinstance(dep_events[0]["deployment_id"], int)
+
+        # 清理删除：登记一条指向临时模型库的部署（真实链路会写真实模型库目录，不在此删除）
+        fake = tmp_path / "models" / "fake-ev"
+        fake.mkdir(parents=True, exist_ok=True)
+        with manager.Session() as s:
+            run = s.query(Run).filter(Run.uid == run_uid).one()
+            s.add(Deployment(run_id=run.id, model_lib_dir=str(fake),
+                             onnx_path=str(fake / "model.onnx"), verified=True))
+            s.commit()
+        assert c.delete("/api/v1/model-library/fake-ev").status_code == 200
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            _collect()
+            if dep_events[-1]["action"] == "removed":
+                break
+            time.sleep(0.1)
+        assert [e["action"] for e in dep_events] == ["created", "updated", "removed"], dep_events
+    finally:
+        wsmod.unsubscribe(q)

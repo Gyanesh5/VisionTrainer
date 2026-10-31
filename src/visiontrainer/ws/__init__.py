@@ -1,7 +1,9 @@
-"""WS 事件通道（07 号票五事件）。
+"""WS 事件通道（07 号票五事件 + deployment.updated）。
 
-广播契约：WS 客户端收到的每帧都是 schemas.py 里的五事件之一。
+广播契约：WS 客户端收到的每帧都是 schemas.py 里的事件之一。
 线程安全：训练 watchdog 线程通过 publish_threadsafe 投递。
+订阅方生命周期：subscribe() 返回的队列由调用方持有，结束时必须 unsubscribe()——
+UI 页面挂 client.on_delete（不能挂 on_disconnect，重连也会触发）；/ws/events 端点在断连 finally 退订。
 """
 
 from __future__ import annotations

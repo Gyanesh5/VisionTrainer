@@ -79,7 +79,7 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
 
     @app.websocket("/ws/events")
     async def ws_events(websocket: WebSocket):
-        """五事件增量推送（契约：不做历史回放，断线补齐走 REST）。"""
+        """领域事件增量推送（契约：不做历史回放，断线补齐走 REST）。"""
         await websocket.accept()
         q = subscribe()
         try:

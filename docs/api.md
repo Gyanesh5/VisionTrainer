@@ -127,7 +127,7 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 
 ## WebSocket
 
-**`/ws/events`** — 五种增量事件（07 号票定稿；JSON 帧，`type` 判别）：
+**`/ws/events`** — 六种增量事件（07 号票五事件定稿 + `deployment.updated`；JSON 帧，`type` 判别）：
 
 ```jsonc
 {"type": "run.metrics",  "run_uid": "3f9a2c1b", "epoch": 12,
@@ -142,9 +142,12 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
  "agent_state": "waiting_approval"}                           // agent_state 仅 source=agent
 {"type": "queue.updated", "running_uid": "3f9a2c1b",
  "queued_uids": ["a1b2c3d4"], "block_reason": null}           // 外部占用时填原因
+{"type": "deployment.updated", "deployment_id": 3,
+ "action": "verified"}                                        // created 登记 / updated 验证落定 / removed 清理删除
 ```
 
 - 断线补齐：**REST 拉全量**（`GET /runs/{uid}`），WS 不回放。
+- 自带 UI 的训练页与部署区以此通道事件驱动刷新（事件当门铃、REST 取数据 + 低频兜底），不周期轮询；`deployment.updated` 补齐部署记录后台落定（导出验证异步）与清理删除的即时通知。
 - 日志流：独立通道（实现层可为 WS `/ws/logs/{uid}` 或 SSE），不走事件通道。
 - 骨架期 `/ws/echo` 保留至实装时移除。
 
