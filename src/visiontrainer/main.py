@@ -73,11 +73,14 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         selfcheck_result = run_selfcheck(cfg)
         app.state.selfcheck = selfcheck_result
         log_summary(selfcheck_result)
-        if mcp_sub is not None:
-            async with mcp_sub.lifespan(app):
+        try:
+            if mcp_sub is not None:
+                async with mcp_sub.lifespan(app):
+                    yield
+            else:
                 yield
-        else:
-            yield
+        finally:
+            tuner.shutdown_all(manager)  # 关停循环线程：孤儿线程会跨会话决策/烧配额
 
     app = FastAPI(title="VisionTrainer", version="0.1.0", lifespan=lifespan)
     app.include_router(api_router, prefix="/api")

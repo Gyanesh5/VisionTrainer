@@ -117,6 +117,20 @@ def revoke_preapproval(task_id: int, request: Request):
         raise _err(tsvc.TaskError("not_found", f"任务不存在：{task_id}", 404))
 
 
+@router.post("/tasks/{task_id}/agent-mode")
+def set_agent_mode(task_id: int, request: Request, body: dict):
+    """自主档位切换（ADR 0007）：{approval: autonomous | supervised}，下一轮生效。"""
+    from ..agent import tuner
+
+    try:
+        return tuner.set_approval(_manager(request), task_id,
+                                  (body or {}).get("approval") or "")
+    except KeyError:
+        raise _err(tsvc.TaskError("not_found", f"任务不存在：{task_id}", 404))
+    except ValueError as exc:
+        raise _err(tsvc.TaskError("state_conflict", str(exc), 409))
+
+
 @router.get("/tasks")
 def list_tasks(request: Request):
     return tsvc.list_tasks(_manager(request))

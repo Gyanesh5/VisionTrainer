@@ -275,3 +275,90 @@ def test_budget_cfg_task_overrides_global(factory, monkeypatch):
                                                                      "total_tokens": 1000}
     assert tuner_mod._budget_cfg_of({"budget_round_seconds": "bad"}) == {"round_seconds": 0,
                                                                          "total_tokens": 1000}
+
+
+# ---------------------------------------------------------------- 档位切换（07 号票）
+
+def test_set_approval_mode(agent_env):
+    """档位切换：autonomous/supervised 归一落档，即时读侧生效；非法与拒绝。"""
+    client, _app, _log, _decisions = agent_env
+    tid = _mk_task(client, approval="supervised")
+    r = client.post(f"/api/v1/tasks/{tid}/agent-mode", json={"approval": "auto"})
+    assert r.status_code == 200 and r.json()["approval"] == "autonomous"  # 旧值归一
+    assert client.get(f"/api/v1/tasks/{tid}").json()["agent_config"]["approval"] == "autonomous"
+    r = client.post(f"/api/v1/tasks/{tid}/agent-mode", json={"approval": "supervised"})
+    assert r.json()["approval"] == "supervised"
+    assert client.post(f"/api/v1/tasks/{tid}/agent-mode",
+                       json={"approval": "bogus"}).status_code == 409
+
+
+def test_waiting_wake_applies_pending_verdict(factory, tmp_path, monkeypatch):
+    """重启恢复路径：waiting_approval + pending_verdict 唤醒直达裁决建轮，不重新决策。"""
+    import json as _json
+    import threading as _threading
+    import time as _time
+
+    from visiontrainer.agent import tuner as tuner_mod
+    from visiontrainer.db.models import AgentDecision, Run, Task
+
+    mgr = TrainingManager(factory, ManagerSettings(
+        training_python="python", trainer_entry="x", runs_dir=tmp_path / "runs"))
+    with factory() as s:
+        t = Task(uid="tkwake", name="唤醒", source="agent", status="running",
+                 base_model="stub", train_args={"epochs": 2, "lr0": 0.015},
+                 dataset_manifest_path="/dsm/good/derived/aa/data.yaml")
+        s.add(t)
+        s.flush()
+        for i in (1, 2):
+            s.add(Run(uid=f"rnwk{i}", task_id=t.id, round_no=i, status="done", primary_metric=0.3))
+        t.agent_config = {"state": "waiting_approval", "approval": "supervised",
+                          "max_rounds": 5, "objective": "唤醒",
+                          "history": [{"at": "t0", "analysis": "方案", "changes": {"lr0": 0.015},
+                                       "clamps": [], "verdict": "approved"},
+                                      {"at": "t1", "analysis": "轮 3 方案", "changes": {"lr0": 0.015},
+                                       "clamps": []}],
+                          "pending_verdict": {"action": "approve_with_changes",
+                                              "overrides": {"lr0": 0.1}, "at": "t2"}}
+        s.commit()
+        tid = t.id
+
+    calls = {"n": 0}
+
+    def fake_decide(Session, task_id, objective, history, best):
+        calls["n"] += 1
+        return ({"analysis": "不该被调用", "action": "stop"}, None, None, [], {"analyzed": False})
+
+    monkeypatch.setattr(tuner_mod, "_decide", fake_decide)
+    tuner_mod.launch_or_resume(mgr, tid)
+    _time.sleep(0.5)  # 线程停到 step-1 等待点
+    # 模拟「重启前 approve 已写 pending_verdict、进程随即终止」的恢复现场：置 running 唤醒
+    with factory() as s:
+        _t = s.get(Task, tid)
+        _ac = dict(_t.agent_config or {})
+        _ac["state"] = "running"
+        _t.agent_config = _ac
+        s.commit()
+    deadline = _time.time() + 10
+    while _time.time() < deadline:
+        with factory() as s:
+            ac = (s.get(Task, tid).agent_config or {})
+            if "pending_verdict" not in ac and ac.get("state") == "running":
+                break
+        _time.sleep(0.2)
+    # 收线：running 状态不走审批门，直接置停止标志
+    key = (id(mgr), tid)
+    if key in tuner_mod._stop_flags:
+        tuner_mod._stop_flags[key].set()
+    _time.sleep(0.5)
+
+    with factory() as s:
+        ac = s.get(Task, tid).agent_config or {}
+        runs = s.query(Run).filter(Run.task_id == tid).order_by(Run.round_no).all()
+        dec = s.query(AgentDecision).all()
+        assert calls["n"] == 0                       # 未重新决策
+        assert "pending_verdict" not in ac           # 裁决已消费，不留孤儿
+        assert ac["history"][-1]["verdict"] == "approve_with_changes"
+        assert ac["history"][-1]["changes"]["lr0"] == 0.1
+        assert len(runs) == 3 and runs[2].round_no == 3   # 已建轮
+        assert dec[0].changes["lr0"] == 0.1  # 归档含改后参数
+        assert ac["state"] in ("terminated", "running")

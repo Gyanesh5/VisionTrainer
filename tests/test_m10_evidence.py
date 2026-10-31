@@ -112,9 +112,12 @@ def test_evidence_injected_and_archived(tmp_path: Path, datasets_root, detect_so
                                "hyperparameters": {"lr0": 0.02}})
         return json.dumps({"analysis": "收官", "action": "stop"})
     fake_chat.n = 0
+    fake_chat.stacks = []
 
-    from visiontrainer.agent import tuner as tuner_mod
+    from visiontrainer.agent import llm as llm_mod, tuner as tuner_mod
     monkeypatch.setattr(tuner_mod, "chat", fake_chat)
+    monkeypatch.setattr(llm_mod, "chat", fake_chat)
+    print("PATCHED tuner.chat id:", id(tuner_mod.chat), "module:", id(tuner_mod))
 
     with TestClient(app) as client:
         r = client.post("/api/v1/tasks", json={
@@ -146,6 +149,10 @@ def test_evidence_injected_and_archived(tmp_path: Path, datasets_root, detect_so
     rows = conn.execute("SELECT input_summary FROM agent_decisions").fetchall()
     conn.close()
     evidences = [json.loads(row).get("evidence") for (row,) in rows]
+    print("CHAT STACKS >>>")
+    for st in fake_chat.stacks:
+        print(st)
+    print("<<< END STACKS")
     assert evidences and all(e == {"analyzed": False} for e in evidences)
 
     # GET /tasks 契约：decisions 带 evidence/tool_traces 字段（决策卡数据源）

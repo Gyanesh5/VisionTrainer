@@ -83,6 +83,18 @@ def launch_or_resume(manager, task_id: int) -> None:
     t.start()
 
 
+def shutdown_all(manager) -> None:
+    """应用关停：终止该 manager 名下全部循环线程。
+
+    孤儿线程会在进程退出后继续轮询/决策（测试串扰与真实 LLM 配额燃烧的根源）；
+    状态存 DB，下次启动 recover() 原样恢复，不丢任务。
+    """
+    mid = id(manager)
+    for (mid_, _tid), ev in list(_stop_flags.items()):
+        if mid_ == mid:
+            ev.set()
+
+
 def recover(manager) -> None:
     """平台重启后：所有未完成 agent 任务恢复循环线程。"""
     with manager.Session() as s:
@@ -228,6 +240,26 @@ def _consume_preapproval(Session, task_id: int) -> None:
         s.commit()
 
 
+def set_approval(manager, task_id: int, approval: str) -> dict:
+    """自主档位切换（M10 07）：autonomous / supervised，循环逐轮读取即时生效。"""
+    mode = _normalize_approval(approval)
+    if mode not in ("autonomous", "supervised"):
+        raise ValueError(f"未知档位：{approval}")
+    with manager.Session() as s:
+        from visiontrainer.db.models import Task
+
+        t = s.get(Task, task_id)
+        if t is None:
+            raise KeyError(task_id)
+        if t.source != "agent":
+            raise ValueError("非 Agent 任务没有自主档位")
+        cfg = dict(t.agent_config or {})
+        cfg["approval"] = mode
+        t.agent_config = cfg
+        s.commit()
+    return {"task_id": task_id, "approval": mode}
+
+
 def grant_preapproval(manager, task_id: int, rounds: int) -> dict:
     """批量预审授权：接下来 N 轮一次放行（supervised 档的整夜计划入口）。"""
     rounds = max(int(rounds), 0)
@@ -352,11 +384,45 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
         # 1) 等审批 / 暂停恢复：这里只等待，不占队列
         if state in ("waiting_approval", "paused"):
             act = _await_verdict(Session, task_id, stop)
+            if act == "shutdown":
+                return  # 应用关停：只退线程，任务状态原样留给下次恢复
             if act == "stop":
                 finish("terminated")
                 return
             if state == "paused":
                 set_state("running")  # 人工处理后重试本轮决策
+                continue
+            # waiting_approval 唤醒（含平台重启恢复）：待批方案已在历史末条——
+            # 直接走裁决与建轮，不重新决策（M10 03：pending_verdict 不留孤儿）
+            proposal = dict((list(cfg.get("history") or [])[-1: ] or [{}])[-1].get("changes") or {})
+            decision_ctx = {"analysis": (list(cfg.get("history") or [])[-1: ] or [{}])[-1].get("analysis", ""),
+                            "action": "tune", "hyperparameters": proposal}
+            verdict = _consume_verdict(Session, task_id)
+            if verdict.get("action") == "reject":
+                _mark_history_verdict(Session, task_id, "rejected")
+                set_state("running")
+                continue  # 重新决策
+            changes = dict(proposal)
+            if verdict.get("action") == "approve_with_changes":
+                changes = {**changes, **(verdict.get("overrides") or {})}
+            _mark_history_verdict(Session, task_id,
+                                  "preapproved" if act == "preapproved"
+                                  else verdict.get("action") or "approved",
+                                  changes=changes)
+            if act == "preapproved":
+                _consume_preapproval(Session, task_id)
+            queued = _queue_round(Session, task_id, decision=decision_ctx, changes=changes,
+                                  clamps=[], objective=cfg.get("objective", ""),
+                                  best=_last_run(Session, task_id)["primary_metric"],
+                                  traces=[], importance=None,
+                                  round_no=len(list(cfg.get("history") or [])) + 1)
+            set_state("running")
+            if queued:
+                res = _wait_run(manager, queued, stop, task_id=task_id, prune=prune,
+                                round_deadline=_round_deadline(budget))
+                if res == "budget_stopped":
+                    finish("done", "单轮运行时长熔断")
+                    return
             continue
 
         # 2) 首轮：建轮 1 Run（create_task 已建，防重复）
@@ -417,6 +483,8 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
         if approval == "supervised" and pre_remaining <= 0:
             set_state("waiting_approval")
             act = _await_verdict(Session, task_id, stop)
+            if act == "shutdown":
+                return  # 应用关停：只退线程，任务状态原样留给下次恢复
             if act == "stop":
                 finish("terminated")
                 return
@@ -435,24 +503,10 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
                 _consume_preapproval(Session, task_id)
                 _mark_history_verdict(Session, task_id, "preapproved", changes=changes)
 
-        with Session() as s:
-            t = s.get(Task, task_id)
-            args = dict(t.train_args or {})
-            args.update(changes)
-            t.train_args = args
-            s.commit()
-            run = Run(uid=_uid(), task_id=task_id, round_no=done_rounds + 1, status="queued")
-            s.add(run)
-            s.flush()
-            s.add(AgentDecision(run_id=run.id, round_no=run.round_no,
-                                input_summary={"objective": objective, "best_so_far": best,
-                                               "analysis": decision.get("analysis", ""),
-                                               "param_importance": importance,
-                                               "tool_traces": traces,
-                                               "evidence": evidence},
-                                response=decision, changes=changes, clamps=clamps))
-            s.commit()
-            queued = run.uid
+        queued = _queue_round(Session, task_id, decision=decision, changes=changes,
+                              clamps=clamps, objective=objective, best=best,
+                              traces=traces, importance=importance,
+                              round_no=done_rounds + 1, evidence=evidence)
 
         set_state("running")
         if queued:
@@ -463,11 +517,40 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
                 return
 
 
+def _queue_round(Session, task_id: int, *, decision: dict, changes: dict, clamps: list,
+                 objective: str, best: float | None, traces: list[dict],
+                 importance: dict | None, round_no: int, evidence: dict | None = None) -> str:
+    """落案并建轮：累计超参写入任务 + 决策归档 + 排队（gate 与 waiting 唤醒共用）。"""
+    from visiontrainer.db.models import AgentDecision, Run, Task
+
+    with Session() as s:
+        t = s.get(Task, task_id)
+        args = dict(t.train_args or {})
+        args.update(changes)
+        t.train_args = args
+        s.commit()
+        run = Run(uid=_uid(), task_id=task_id, round_no=round_no, status="queued")
+        s.add(run)
+        s.flush()
+        s.add(AgentDecision(run_id=run.id, round_no=run.round_no,
+                            input_summary={"objective": objective, "best_so_far": best,
+                                           "analysis": decision.get("analysis", ""),
+                                           "param_importance": importance,
+                                           "tool_traces": traces,
+                                           "evidence": evidence},
+                            response=decision, changes=changes, clamps=clamps))
+        s.commit()
+        return run.uid
+
+
 def _await_verdict(Session, task_id: int, stop: threading.Event) -> str:
-    """等待人工裁决：'continue'（放行）/ 'preapproved'（等待期间获批量预审授权）/ 'stop'。"""
+    """等待人工裁决：'continue'（放行）/ 'preapproved'（等待期间获批量预审授权）/
+    'stop'（任务终态）/ 'shutdown'（应用关停——只退出线程，不改任务状态）。"""
     from visiontrainer.db.models import Task
 
-    while not stop.is_set():
+    while True:
+        if stop.is_set():
+            return "shutdown"
         with Session() as s:
             t = s.get(Task, task_id)
             cfg = (t.agent_config or {}) if t else {}
@@ -479,7 +562,6 @@ def _await_verdict(Session, task_id: int, stop: threading.Event) -> str:
         if int((cfg.get("preapproval") or {}).get("remaining") or 0) > 0:
             return "preapproved"  # 等待期间整夜计划获授权 → 免放行直通
         time.sleep(POLL)
-    return "stop"
 
 
 def _queued_run_uid(Session, task_id: int) -> str | None:

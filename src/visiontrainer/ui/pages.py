@@ -5861,6 +5861,38 @@ document.addEventListener('scroll', function(e){
                 decisions = {d["round_no"]: d for d in task.get("decisions") or []}
                 pruned_ev = {p.get("round"): p for p in cfg.get("pruned_rounds") or []}
                 max_rounds = int(cfg.get("max_rounds", 5) or 5)
+
+                # 改后放行（M10 07）：按最新方案逐项微调超参，越界值平台侧按白名单自动压回
+                revise_holder: dict = {"fields": {}}
+                with ui.dialog() as revise_dialog, ui.card().classes("w-[26rem] gap-2"):
+                    ui.label("改后放行").classes("font-bold")
+                    ui.label("修改后放行；越界值将按白名单自动压回并记录。").classes(
+                        "text-xs opacity-60")
+                    revise_body = ui.column().classes("w-full gap-1")
+                    # 字段随 render_detail 静态构建（对话框重建即刷新，无需 on_open）
+                    latest = (cfg.get("history") or [{}])[-1]
+                    with revise_body:
+                        _changes = latest.get("changes") or {}
+                        if not _changes:
+                            ui.label("（本轮无超参变更，无可改项）").classes("text-xs opacity-40")
+                        for _k, _v in _changes.items():
+                            _inp = ui.number(_k, value=float(_v) if isinstance(_v, (int, float)) else 0,
+                                             step=0.0001).props("dense outlined")
+                            revise_holder["fields"][_k] = _inp
+
+                    def _submit_revise() -> None:
+                        overrides = {}
+                        for k, inp in revise_holder["fields"].items():
+                            try:
+                                overrides[k] = float(inp.value)
+                            except (TypeError, ValueError):
+                                continue
+                        revise_dialog.close()
+                        do_approve("approve_with_changes", hyperparameters=overrides)
+
+                    with ui.row().classes("w-full justify-end"):
+                        ui.button("取消", on_click=revise_dialog.close).props("flat")
+                        ui.button("修改后放行", icon="edit", on_click=_submit_revise).props("unelevated")
                 primaries = [r["primary_metric"] for r in rounds if r["primary_metric"] is not None]
                 baseline = primaries[0] if primaries else None
                 best = max(primaries) if primaries else None
@@ -5927,6 +5959,37 @@ document.addEventListener('scroll', function(e){
                             ui.label(f"停止原因：{cfg['stop_reason']}").classes("text-xs opacity-60")
                         if cfg.get("pause_reason"):
                             ui.label(f"暂停原因：{cfg['pause_reason']}").classes("text-xs text-orange-700")
+
+                        # 预算与档位（M10 03/07）：三层熔断消耗一览 + 自主档位切换
+                        _g_agent = load_config().get("agent", {}) or {}
+                        _tok_used = int(cfg.get("token_usage") or 0)
+                        _tok_max = cfg.get("budget_total_tokens")
+                        _tok_max = int(_g_agent.get("budget_total_tokens", 0) or 0) if _tok_max is None \
+                            else int(_tok_max or 0)
+                        _sec_max = cfg.get("budget_round_seconds")
+                        _sec_max = int(_g_agent.get("budget_round_seconds", 0) or 0) if _sec_max is None \
+                            else int(_sec_max or 0)
+                        _rounds_used = len(rounds)
+                        with ui.row().classes("w-full items-center gap-2 flex-wrap q-mt-xs"):
+                            ui.chip(f"轮 {_rounds_used}/{max_rounds}").props(
+                                "dense outline square color=grey").classes("text-[10px]")
+                            ui.chip(f"token {_tok_used}" + (f"/{_tok_max}" if _tok_max else "")).props(
+                                "dense outline square color=grey").classes("text-[10px]")
+                            ui.chip("单轮时长 " + (f"≤{_sec_max}s" if _sec_max else "不限")).props(
+                                "dense outline square color=grey").classes("text-[10px]")
+                            if cfg.get("budget_round_fired") or "熔断" in (cfg.get("stop_reason") or ""):
+                                _fired = ui.badge("已熔断").props("color=red outline square")
+                                with _fired:
+                                    ui.tooltip(f"触顶熔断：{cfg.get('budget_round_fired') or cfg.get('stop_reason')}")
+                            _cur_mode = {"auto": "autonomous", "manual": "supervised"}.get(
+                                cfg.get("approval", "manual"), cfg.get("approval", "supervised"))
+                            with ui.select({"autonomous": "autonomous（直通+通知+审计）",
+                                            "supervised": "supervised（每轮审批）"},
+                                           value=_cur_mode if _cur_mode in ("autonomous", "supervised")
+                                           else "supervised",
+                                           on_change=lambda e: do_set_approval(e.value)
+                                           ).props("dense outlined").classes("min-w-[13rem] text-[11px]") as _mode_sel:
+                                ui.tooltip("自主档位：autonomous 免逐轮审批（不可逆动作仍恒人工），supervised 每轮放行")
 
                     # ── 卡 2：决策卡三段式时间线（最新在上）
                     timeline_card = ui.card().classes("w-full gap-2")
@@ -5995,10 +6058,14 @@ document.addEventListener('scroll', function(e){
                                             for _w in _worst:
                                                 ui.chip(f"最差图 {Path(_w['image']).name}（错 {_w['score']}）").props(
                                                     "dense outline square color=teal-8").classes("text-[10px]")
-                                            _nt = len((dec or {}).get("tool_traces") or [])
-                                            if _nt:
-                                                ui.chip(f"工具查询 ×{_nt}").props(
+                                            _traces = (dec or {}).get("tool_traces") or []
+                                            if _traces:
+                                                _tc = ui.chip(f"工具查询 ×{len(_traces)}").props(
                                                     "dense outline square color=teal-8").classes("text-[10px]")
+                                                with _tc:
+                                                    ui.tooltip(" → ".join(
+                                                        f"{tr.get('tool')}({', '.join(f'{k}={v}' for k, v in (tr.get('args') or {}).items()) or '—'})"
+                                                        for tr in _traces) or "本轮工具调用轨迹")
                                         ui.tooltip(_ev.get("note") or "本轮决策引用的错误分析证据摘要")
                                     elif rn > 1:
                                         ui.chip("证据：错误分析未跑").props(
@@ -6079,13 +6146,47 @@ document.addEventListener('scroll', function(e){
                                                  ).classes("text-[11px] opacity-50")
                                     ui.label(f"已用 {len([r for r in rounds])} / {max_rounds} 轮"
                                              ).classes("text-[11px] opacity-50")
+                            # 批量预审（M10 03/07）：余量徽标 + 授权/撤销入口
+                            _pre = (cfg.get("preapproval") or {})
+                            _pre_left = int(_pre.get("remaining") or 0)
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap"):
+                                if _pre_left > 0:
+                                    pb = ui.badge(f"批量预审余 {_pre_left} 轮").props(
+                                        "color=teal outline square")
+                                    with pb:
+                                        ui.tooltip("授权期内轮次自动放行；流水留档可审计")
+                                    rv = ui.button("撤销预审", icon="block",
+                                                   on_click=lambda: do_revoke_preapproval())
+                                    rv.props("outline dense")
+                                elif waiting:
+                                    pre_n = {"v": 3}
+                                    with ui.row().classes("items-center gap-1"):
+                                        ui.number("授权轮数", value=3, min=1, max=50,
+                                                  on_change=lambda e: pre_n.update({"v": int(e.value or 3)})
+                                                  ).props("dense outlined style='max-width:6rem'")
+                                        gb = ui.button("批量预审", icon="done_all",
+                                                       on_click=lambda: do_grant_preapproval(pre_n["v"]))
+                                        gb.props("outline dense")
+                                        with gb:
+                                            ui.tooltip("一次授权 N 轮自动放行（睡前整夜计划），随时可撤销")
+
                             with ui.row().classes("w-full justify-end gap-2"):
                                 if waiting:
-                                    go = ui.button("放行下一轮", icon="play_arrow",
-                                                   on_click=lambda: do_approve("continue"))
+                                    go = ui.button("放行", icon="play_arrow",
+                                                   on_click=lambda: do_approve("approve"))
                                     go.props("unelevated dense")
                                     with go:
                                         ui.tooltip("按最新方案排队下一轮训练")
+                                    revise = ui.button("改后放行", icon="edit",
+                                                       on_click=revise_dialog.open)
+                                    revise.props("outline dense")
+                                    with revise:
+                                        ui.tooltip("修改超参后放行（越界值按白名单自动压回）")
+                                    rej = ui.button("拒绝本轮", icon="undo",
+                                                    on_click=lambda: do_approve("reject"))
+                                    rej.props("outline dense")
+                                    with rej:
+                                        ui.tooltip("不建轮，LLM 重新决策")
                                     see = ui.button("先看详情", icon="visibility",
                                                     on_click=lambda: _scroll_to(timeline_card))
                                     see.props("outline dense")
@@ -6093,7 +6194,7 @@ document.addEventListener('scroll', function(e){
                                         ui.tooltip("滚动到决策时间线")
                                 else:
                                     go = ui.button("恢复循环", icon="play_arrow",
-                                                   on_click=lambda: do_approve("continue"))
+                                                   on_click=lambda: do_approve("approve"))
                                     go.props("unelevated dense")
                                 stop_btn = ui.button("终止循环", icon="stop",
                                                      on_click=stop_confirm_dialog.open)
@@ -6152,10 +6253,45 @@ document.addEventListener('scroll', function(e){
 
             state["open_bulk_del"] = open_bulk_del
 
-            def do_approve(action: str) -> None:
+            _APPROVE_MSG = {"approve": "已放行，下一轮将排队",
+                            "continue": "已放行，下一轮将排队",
+                            "approve_with_changes": "已按修改后方案放行",
+                            "reject": "已拒绝本轮方案，重新决策中",
+                            "stop": "循环已终止"}
+
+            def do_approve(action: str, hyperparameters: dict | None = None) -> None:
+                """审批四态（M10 03/07 号票）：裁决细节过 tuner.approve 同一状态机。"""
                 try:
-                    tuner.approve(get_manager(), state["selected"], action)
-                    ui.notify("已放行，下一轮将排队" if action == "continue" else "循环已终止", type="positive")
+                    tuner.approve(get_manager(), state["selected"], action,
+                                  hyperparameters=hyperparameters)
+                    ui.notify(_APPROVE_MSG.get(action, "已处理"), type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"操作失败：{exc}", type="negative")
+                refresh()
+                render_detail()
+
+            def do_grant_preapproval(rounds: int) -> None:
+                try:
+                    tuner.grant_preapproval(get_manager(), state["selected"], rounds)
+                    ui.notify(f"已授权接下来 {rounds} 轮一次放行", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"操作失败：{exc}", type="negative")
+                refresh()
+                render_detail()
+
+            def do_revoke_preapproval() -> None:
+                try:
+                    tuner.revoke_preapproval(get_manager(), state["selected"])
+                    ui.notify("已撤销批量预审，下一轮回到逐轮审批", type="positive")
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"操作失败：{exc}", type="negative")
+                refresh()
+                render_detail()
+
+            def do_set_approval(mode: str) -> None:
+                try:
+                    tuner.set_approval(get_manager(), state["selected"], mode)
+                    ui.notify("档位已切换（下一轮生效）", type="positive")
                 except Exception as exc:  # noqa: BLE001
                     ui.notify(f"操作失败：{exc}", type="negative")
                 refresh()
