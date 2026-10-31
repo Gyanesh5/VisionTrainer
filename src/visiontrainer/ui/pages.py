@@ -3620,7 +3620,7 @@ document.addEventListener('scroll', function(e){
                         ui.label("上次校验").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
                         with ui.column().classes("flex-1 min-w-0 gap-1"):
                             ui.label(f"{_fmt_ts(lv['checked_at'])} · 共 {lv['total_images']} 图"
-                                     f"（标注 {lv['labeled']} / 负样本 {lv['background']}）"
+                                     f"（已标 {lv['labeled']} / 负样本 {lv['background']}）"
                                      f"{seg or ' · 无问题'}").classes("text-xs opacity-70")
                             if manual:
                                 _render_problems(manual, meta.get("classes"))
@@ -4168,11 +4168,17 @@ document.addEventListener('scroll', function(e){
                     return
                 s = payload.get("summary", {})
                 boxable = s.get("boxable")
+                # 「标注」chip = 标注条数（与类别分布/体检同口径）；分类任务无框概念，flag 即标注，按已标图数计
+                n_ann = (sum(r.get("n") or 0 for r in payload.get("per_image") or [])
+                         if boxable else s.get("labeled", 0))
                 with ui.row().classes("w-full flex-wrap gap-1"):
-                    for txt in (f"图片 {s.get('images', 0)}", f"标注 {s.get('labeled', 0)}",
+                    for txt in (f"图片 {s.get('images', 0)}", f"标注 {n_ann}",
                                 f"train {s.get('train', 0)}", f"val {s.get('val', 0)}",
                                 f"负样本 {s.get('background', 0)}", f"清单 {payload.get('manifest_uid', '—')}"):
-                        ui.chip(txt).props("dense outline square").classes("text-[11px]")
+                        c = ui.chip(txt).props("dense outline square").classes("text-[11px]")
+                        if txt.startswith("标注"):
+                            with c:
+                                ui.tooltip("标注条数（框/多边形/旋转框），非图片数")
                 _lbl = ui.label("点柱 / 框选可筛图").classes("text-[11px] opacity-45")
                 with _lbl:
                     ui.tooltip("直方图点柱、热力图框选（右上角矩形工具）→ 筛出图片清单，可一键直达 X-AnyLabeling")

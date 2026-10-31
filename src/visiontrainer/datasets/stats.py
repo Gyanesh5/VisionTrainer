@@ -2,7 +2,7 @@
 
 payload 结构（SQLite dataset_stats 表，按（数据集，切分清单）一行）：
     meta:    task_type / dataset / manifest_uid / classes / computed_at / summary 数字
-    per_image: 逐图行（下钻筛图用）：name / image / split / w / h / n / labels / centers
+    per_image: 逐图行（下钻筛图用）：name / image / split / w / h / n / labels / label_counts / centers
     agg:     四图聚合 + 逐切分类别分布
 排除/重切后用 recompose 从既有 per_image 重组（零重扫盘）。
 """
@@ -37,17 +37,24 @@ def build_stats(entries: list[dict], manifest: dict, task_type: str,
         if _split_of(e["image"], manifest) is None:
             continue
         meta = e.get("meta") or {}
-        labels = sorted({o["label"] for o in meta.get("objs", []) if o.get("label")})
+        objs = meta.get("objs", [])
+        labels = sorted({o["label"] for o in objs if o.get("label")})
+        label_counts: dict[str, int] = {}
+        for o in objs:
+            if o.get("label"):
+                label_counts[o["label"]] = label_counts.get(o["label"], 0) + 1
         row = {
             "image": e["image"],
             "name": e["image"].rsplit("/", 1)[-1],
             "split": _split_of(e["image"], manifest),
-            "n": len(meta.get("objs", [])),
+            "n": len(objs),
             "labels": labels,
-            "centers": [[o["cx"], o["cy"]] for o in meta.get("objs", [])],
+            # 每类实例数（类别分布口径；labels 是去重类名清单，筛图用）
+            "label_counts": label_counts,
+            "centers": [[o["cx"], o["cy"]] for o in objs],
             # M9：目标像素宽高（小目标占比原料；旧画像无此键，重校验后补全）
             "objs": [{"label": o["label"], "w": o.get("w"), "h": o.get("h")}
-                     for o in meta.get("objs", []) if o.get("w") and o.get("h")],
+                     for o in objs if o.get("w") and o.get("h")],
         }
         if task_type == "classify":
             row["cls"] = meta.get("flag")
@@ -92,8 +99,18 @@ def _compose(dataset: str, task_type: str, classes: list[str],
             hit = set(r.get("labels") or [])
             if not hit:
                 sp["background"] += 1
-            for c in hit:
-                sp["by_class"][c] = sp["by_class"].get(c, 0) + 1
+            # 类别分布按实例数计（每标注 +1，与体检失衡检查同口径）；
+            # 旧画像行无 label_counts 时逐级回退：objs（M9 起，可能漏无宽高的目标）→ 每类按一图计
+            lc = r.get("label_counts")
+            if lc is None:
+                lc = {}
+                for o in r.get("objs") or []:
+                    if o.get("label"):
+                        lc[o["label"]] = lc.get(o["label"], 0) + 1
+                if not lc:
+                    lc = {c: 1 for c in hit}
+            for c, k in lc.items():
+                sp["by_class"][c] = sp["by_class"].get(c, 0) + k
             obj_hist[r["n"]] = obj_hist.get(r["n"], 0) + 1
         for cx, cy in r.get("centers") or []:
             ix = min(int(cx * HEATMAP_GRID), HEATMAP_GRID - 1)
