@@ -136,8 +136,8 @@ Agent 可修改的超参集合及其数值边界；边界外的值被 clamp 并�
 _Avoid_: 可调参数
 
 **审批门（Approval gate）**:
-轮与轮之间的人工放行检查点，manual / auto 两种模式。
-_Avoid_: 确认弹窗
+轮与轮之间及关键工具执行前的放行检查点；按自主档位（autonomous/supervised）决定是否等人，裁决取审批四态之一；等待审批不占训练队列。
+_Avoid_: 确认弹窗、人工卡点
 
 **参数重要性（Parameter importance）**:
 从历史运行统计出的「超参→主指标」关联强度；用于对比页展示与 LLM 调参上下文注入。
@@ -146,6 +146,42 @@ _Avoid_: 特征重要性、敏感性分析
 **烂轮早停（Bad-round pruning）**:
 调参循环的串行早停机制：新轮行至检查点时主指标显著低于同任务历史同期水位，即优雅终止该轮并标记 pruned；被剪事实作为证据进入下一轮 LLM 决策。
 _Avoid_: 剪枝（易与 ASHA/HP 并发机制混淆）、提前停止
+
+**工具面（Tool surface）**:
+Agent 可调用的平台操作集合，按审批策略分三级：只读（直通）、动作（护栏内直通）、关键（恒人工确认）；进程内调参与外部 Agent 接入共用同一份。
+_Avoid_: API 列表、插件、技能集
+
+**决策提供方（Decision provider）**:
+承担轮边界「下一轮怎么改」决策的可插拔组件：默认为进程内调参循环（决策 LLM 驱动），亦可配置为外部 Agent 接入。
+_Avoid_: 大脑、决策引擎
+
+**决策 LLM（Decision LLM）**:
+进程内调参循环执行每轮决策所用的模型，OpenAI 兼容端点可配（默认智谱 glm-5.3-flash 多模态）。
+_Avoid_: Agent 模型、大模型
+
+**外部 Agent 接入（External agent access）**:
+平台作为 MCP 服务端向外部 agent（MCP 客户端，如 Claude Code / pi）开放策展工具面的通道；外部 agent 与进程内调参循环共用工具面、审批门与决策归档。
+_Avoid_: 外部脑、第三方集成
+
+**自主档位（Autonomy level）**:
+调参循环的审批粒度：autonomous（默认——动作工具护栏内直通，通知+审计+随时可停）/ supervised（每轮人工放行）。
+_Avoid_: auto/manual 模式（旧称，语义已被档位取代）
+
+**审批四态（Approval verdicts）**:
+对一轮方案或关键工具调用的裁决：放行 / 改后放行（修改后放行）/ 拒绝本轮 / 终止循环。
+_Avoid_: 确认/取消双态
+
+**经验库（Experience library）**:
+跨调参任务沉淀的「数据集画像 → 超参动作 → 结果」案例库；新调参任务启动时检索注入决策上下文。
+_Avoid_: 知识库、记忆库
+
+**预算熔断（Budget circuit breaker）**:
+调参循环的三层开销上限：轮数、单轮运行时长、累计 token/成本；任一触顶即优雅停止并通知。
+_Avoid_: 限额、止损线
+
+**确定性回退栈（Deterministic fallback stack）**:
+决策提供方失败穷尽后的降级提议序列：上轮最优微扰 → 参数重要性 top 步进 → 随机采样；全部数字可验，穷尽才 paused 等人。
+_Avoid_: 兜底重试
 
 ### 监控与结果域
 

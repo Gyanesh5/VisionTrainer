@@ -1,6 +1,6 @@
 # VisionTrainer 功能与架构 Spec
 
-Version 1.2 · 2026-09-22 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，见 `.scratch/visiontrainer-build/issues/`）；v1.1 增补竞品对标优化 17 条 + quick-win（[M6/M7/M8]，来源 `.scratch/competitive-optimization/`）；**v1.2 增补标注质量审查闭环**（新条目标注 [R#]，来源 `.scratch/annotation-quality-review/` 地图 05–08 号票，存储决策见 [ADR 0003](adr/0003-review-state-in-annotation-json.md)）
+Version 1.3 · 2026-10-31 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，见 `.scratch/visiontrainer-build/issues/`）；v1.1 增补竞品对标优化 17 条 + quick-win（[M6/M7/M8]，来源 `.scratch/competitive-optimization/`）；v1.2 增补标注质量审查闭环（新条目标注 [R#]，来源 `.scratch/annotation-quality-review/` 地图 05–08 号票，存储决策见 [ADR 0003](adr/0003-review-state-in-annotation-json.md)）；**v1.3 重设计 Agent 域为底座 + 双决策提供方**（§2.5 重写，来源 `.scratch/agent-redesign/` 调研 + 访谈，决策见 [ADR 0006](adr/0006-agent-base-and-decision-providers.md)/[0007](adr/0007-approval-gate-human-on-the-loop.md)，实施 M10）
 
 单机 YOLO 训练平台：**数据集管理 → GPU 调度训练队列 → 实时曲线监控 → 结果归档对比**核心闭环，以 **Agent 自动调参**为核心卖点。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录与模型库打通 [T0]。
 
@@ -14,7 +14,8 @@ FastAPI + Runner（同进程；asyncio 单飞队列）──── SQLite（六�
 Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染管线
    ├─ on_fit_epoch_end callback → WS 推送           （前端曲线 + Agent 双消费端）
    └─ results.csv（兜底与收养数据源）
-智谱 glm-5.3-flash（OpenAI 兼容，多模态）← Agent 调参循环
+智谱 glm-5.3-flash（OpenAI 兼容，多模态）← 决策提供方 A：调参循环（进程内）
+外部 Agent（MCP 客户端：Claude Code / pi 等）─ MCP /mcp（策展工具面）→ 决策提供方 B
 ~/Documents/x-anylabeling-models（回注目标）← 一键部署
 ```
 
@@ -70,17 +71,19 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **复盘升级** [M8]：结构化错误统计（Top 混淆类对/缺数据类/FP-FN 失衡/小目标占比）作 LLM 输入 schema；报告固定加「**下一步实验推荐**」章节（超参改动+理由+预期收益，与审批门共享输出结构）。
 - **对比页六件套** [M8]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键。
 
-### 2.5 Agent 自动调参（核心卖点）[T6]
+### 2.5 Agent 自动调参（核心卖点）[T6；v1.3 重设计定稿 2026-10-31，实施 M10]
 
-- **LLM**：OpenAI 兼容三要素接入；默认**智谱 glm-5.3-flash**（多模态），Ollama 备用槽。
-- **多模态输入**：指标 JSON + matplotlib 渲染三图（loss 曲线、主指标曲线、混淆矩阵——第三图直接复用 ultralytics 产物）；模型不支持图自动退化纯 JSON。
-- **白名单**：18 项超参（lr0/lrf/momentum/weight_decay/warmup_epochs/warmup_momentum/box/cls/dfl/hsv_h·s·v/degrees/translate/scale/fliplr/mosaic/mixup/close_mosaic/patience），min/max/step clamp 并记录；**epochs/batch/imgsz/模型结构锁死**。
-- **循环**：默认 max 5 轮；终止 = 达上限 / 连续 2 轮主指标提升 <0.001 / LLM 输出 `{"action":"stop"}` / 轮失败；审批门默认 **manual**（auto 可配）。
-- **兜底**：三级解析降级 → 带错重试 1 次；API 指数退避 3 次；穷尽 → paused 等人，**不静默烧卡**；训练失败循环即终止。
-- **主指标**：detect/segment/obb→mAP50-95，pose→pose mAP50-95，classify→top1；**终止只认数字**。
-- **Agent 页重做** [M7，/prototype 原型先行]：循环总览卡（轮次进度/主指标趋势/剩余轮数/状态）、决策卡三段式（改了什么=超参 diff / 为什么=LLM 理由摘要 / 效果=主指标 delta↑↓）、审批门重设计（主按钮「放行下一轮」+次按钮终止+确认，桌面通知联动）。
-- **参数重要性** [M7]：历史 Run 算「超参→主指标」相关性（Spearman/随机森林，单人规模秒级）——对比页 bar 图 + **注入 LLM 调参上下文** + 统计证据写进决策归档。
-- **烂轮早停** [M7]：新轮行至 1/2 epoch 检查点，主指标 < 历史 Run 同期中位数 − δ（默认 0.05 mAP，保守可配、可全局关）→ 优雅终止标记 pruned；被剪事实作为证据进入下一轮 LLM 决策。
+**底座与决策提供方** [ADR 0006]：平台是底座——工具面 + 护栏 + 状态机为产品本体，**决策提供方可插拔**：①**调参循环**（默认，进程内；**决策 LLM** 经 OpenAI 兼容三要素接入，默认智谱 glm-5.3-flash 多模态、Ollama 备用槽；管无人值守）；②**外部 Agent 接入**——平台作为 MCP 服务端（FastMCP 同应用双接口挂 `/mcp`），外部 agent（MCP 客户端：Claude Code / pi 等）经**策展工具面**（只读 + 提交类，非全量端点）操作平台，配平台操作技能文档；管在场强智能。两者共用同一工具面、审批门、决策归档（新增依赖仅 fastmcp）。
+
+- **工具面三级** [ADR 0006]：只读（查指标/错误分析/历史运行/数据集画像/经验库/试跑叠加——直通+审计）、动作（提超参/建轮/剪枝/停循环——护栏内直通，supervised 档升级审批）、关键（数据侧建议/部署推荐——恒人工确认）；每轮注入工具定义收敛 3–5 个；决策输出恒结构化 JSON，**非代码生成**。
+- **循环**：多步工具调用（OpenAI 兼容 tools 字段；现有 one-shot 决策为退化形态）；轮边界决策（多模态证据面 + 按需只读查询）、轮内零成本监控（指标轮询，不调 LLM）；解析三级降级保留，新增**确定性回退栈**（上轮最优微扰 → 重要性 top 步进 → 随机采样，数字可验，穷尽才 paused）；审批等待不占队列、训练失败即终止、重启恢复不变。
+- **审批门 human-on-the-loop** [ADR 0007]：**自主档位** autonomous（默认：护栏内直通 + 桌面通知 + 全量审计 + 随时可停）/ supervised（每轮放行，原 manual 语义）；**审批四态**（放行 / 改后放行 / 拒绝本轮 / 终止循环）；**批量预审**（睡前排队整夜计划一次放行）；调参/审批/预算策略抽用户可编辑**策略文件**，循环代码冻结。
+- **预算熔断三层**：轮数上限（已有）+ 单轮运行时长上限（防「合法但极慢」参数）+ 累计 token/成本上限；触顶优雅停 + 通知。
+- **记忆**：**经验库**——跨任务「数据集画像 → 超参动作 → 结果」案例检索注入（agent_decisions 资产上加 retrieve/review）；compaction（上下文逼近窗口时摘要压缩，原始条目永不删）。
+- **跨域闭环**：错误分析（混淆对/错误榜）作只读工具按需注入证据；数据侧动作建议（排除文件 / 回 X-AnyLabeling 重标 / 重切分 / 质检探针）与部署推荐落决策卡，人工确认后才成为平台动作（部署回注人工终验不变）。
+- **审计**：agent_decisions 从轮级决策扩展为工具调用轨迹级归档。
+- **安全铁线四条**：单卡单飞 · 白名单 clamp（epochs/batch/imgsz/模型结构锁死）· 终止只认数字 · 写操作与审批状态平台侧校验（防外部 agent 绕行直跑训练，MCP 侧只开只读+提交类）。
+- M4/M7 语义保留：**白名单 18 项**（lr0/lrf/momentum/weight_decay/warmup_epochs/warmup_momentum/box/cls/dfl/hsv_h·s·v/degrees/translate/scale/fliplr/mosaic/mixup/close_mosaic/patience，min/max/step clamp 并记录）；**主指标**映射（detect/segment/obb→mAP50-95，pose→pose mAP50-95，classify→top1）；默认 max 5 轮，终止 = 达上限 / 连续 2 轮无提升 / 主动 stop / 轮失败；**多模态输入**指标 JSON + 三图（loss/主指标/混淆矩阵，不支持图退化纯 JSON）；**兜底** API 指数退避 3 次、穷尽 paused 不烧卡；烂轮早停（1/2 epoch 检查点，pruned 证据入决策）；参数重要性注入；Agent 页三卡结构（循环总览/决策卡三段式/审批门）。
 
 ### 2.6 模型回注 [T9]
 
@@ -122,7 +125,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 ## 4. 非目标（Out of scope）
 
-标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · 工具调用业务 Agent · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理。v1.1 竞品对标再裁决的不做项（2026-09-20）：跨数据集合并训练 · 平台内模型测试模块（Test 页+改标清单已覆盖）· 离线增强管道 · 嵌入级分析（FiftyOne 内嵌或引导）· Optuna 模式 · 终端提交入口 · PWA 移动端 · 拖 .pt 导入历史权重。v1.2 标注质量审查再裁决的不做项（2026-09-22）：平台内标注编辑（修改一律回 X-AnyLabeling，[ADR 0003](adr/0003-review-state-in-annotation-json.md) 维持出界）· 多标注者协议度（IAA/Cohen's kappa，单机自用）· OOF k 折与 cleanlab 质量分（二期候选，最小形态体感后再议）· training dynamics / zero-shot 大模型查漏标 · 任何硬性审查合格线（一律提示+人工确认）。
+标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理。v1.1 竞品对标再裁决的不做项（2026-09-20）：跨数据集合并训练 · 平台内模型测试模块（Test 页+改标清单已覆盖）· 离线增强管道 · 嵌入级分析（FiftyOne 内嵌或引导）· Optuna 模式 · 终端提交入口 · PWA 移动端 · 拖 .pt 导入历史权重。v1.2 标注质量审查再裁决的不做项（2026-09-22）：平台内标注编辑（修改一律回 X-AnyLabeling，[ADR 0003](adr/0003-review-state-in-annotation-json.md) 维持出界）· 多标注者协议度（IAA/Cohen's kappa，单机自用）· OOF k 折与 cleanlab 质量分（二期候选，最小形态体感后再议）· training dynamics / zero-shot 大模型查漏标 · 任何硬性审查合格线（一律提示+人工确认）。v1.3 agent 域重设计再裁决的不做项（2026-10-31，详见 §2.5 与 [ADR 0006](adr/0006-agent-base-and-decision-providers.md)）：通用业务工具 Agent（原「工具调用业务 Agent」收窄——agent 域白名单工具面与 MCP 接入做）· 多智能体编排 · 代码生成式建议 · LLM 当代理模型 · 全自动无人闭环 · Web 检索增强；树搜索/进化种群条件挂起（短训代理评估落地再评）。
 
 ## 5. 路线图（M1–M5）
 
@@ -137,5 +140,6 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 | **M7 Agent 锋利+训练顺滑** [v1.1] | Agent 页重做（原型先行）/ 参数重要性 / 烂轮早停 / 监控四件 / Retry / 表单工程学 | ① 原型过目后实装：循环总览+决策卡三段式+审批门主次分明；② Agent 决策含参数重要性统计且证据归档可回溯；③ 明显劣化轮在 1/2 epoch 被剪并记 pruned；④ Run 详情见 GPU 曲线、提交页见时长预估、完成有桌面通知、loss 双线；⑤ 失败 Run 一键重开；⑥ 表单只存非默认值 |
 | **M8 病根与价值可见** [v1.1] | 错误分析 / 复盘升级 / 阈值探索器 / Test 页 / 对比六件套 / 部署管理 / 实验模板 | ① Run 后最差样本榜+叠加大图+矩阵点格下钻可用；② FN/FP 清单可导出回 X-AnyLabeling；③ 复盘含「下一步实验推荐」且引用错误统计；④ 部署时建议置信度写入模型配置；⑤ 试跑页 ONNX 叠框正确；⑥ 对比页 diff 三件套+「与当前部署版对比」；⑦ 模板一键生成多 Task |
 | **M9 标注质量审查** [v1.2] | 校验规则扩充 / 审计与健康报告扩充 / 标注审查页签+键盘流 / 只训已审开关 / 单图重转换联动 / 驳回清单导出 | ① 导入含非法 shape 的目录 → 丢弃清单+确认门，零静默（plate-circle 试金石）；退化框/越界/孤儿/同图重复均有报告；② 审查页签键盘判定写回 JSON，X-AnyLabeling 文件列表图标同步绿标；XAL 内改标注后平台自动回「已修改」待审；③ 单图改标后派生 txt 即时刷新、审计缓存正确失效；④ 「只训已审」开启重切后清单只含通过图、旧清单保留可切回；⑤ 驳回清单可导出 markdown；⑥ 训练提交显示审查完成度提示 |
+| **M10 Agent 域底座化** [v1.3] | 工具面三级契约 / 多步工具循环 + 决策提供方 / 审批门 human-on-the-loop（四态+档位+策略文件+预算熔断+批量预审）/ 错误分析证据接入 / 经验库 + compaction / MCP 接入（fastmcp） / Agent 页升级 | ① 只读工具查询进决策且工具调用轨迹归档可回溯；② autonomous 档整夜自跑：熔断/通知/审计齐全，supervised 每轮审批；③ 审批四态含「改后放行」；④ 决策引用错误分析证据；⑤ 经验库跨任务注入新任务首轮；⑥ 外部 agent 经 `/mcp` 开任务/查曲线/提交超参，走同一审批门；⑦ 重设计前后同组固定任务对比 |
 
-依赖（v1.0）：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。依赖（v1.1 滚动三波）：M6 → M7 → M8 串行推进（每波落地一波验收一波）；M8 内复盘升级与阈值探索器依赖错误分析先落地。依赖（v1.2）：M9 独立成波、无跨波硬依赖（基于既有数据集管线与错误分析回路扩展），随时可开工；波内建议序：规则扩充与联动底座 → 审查页签 → 只训已审。
+依赖（v1.0）：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。依赖（v1.1 滚动三波）：M6 → M7 → M8 串行推进（每波落地一波验收一波）；M8 内复盘升级与阈值探索器依赖错误分析先落地。依赖（v1.2）：M9 独立成波、无跨波硬依赖（基于既有数据集管线与错误分析回路扩展），随时可开工；波内建议序：规则扩充与联动底座 → 审查页签 → 只训已审。依赖（v1.3）：M10 基于 M4/M7（循环内核与 Agent 页）/M8（错误分析）既有资产；波内序：工具面 → 循环引擎 → 审批门主干，错误分析接入与经验库并行，MCP 接入最后，Agent 页随行。
