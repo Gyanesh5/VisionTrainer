@@ -5982,6 +5982,27 @@ document.addEventListener('scroll', function(e){
                                         ui.label("建立基线：官方默认超参。").classes("text-[11px] opacity-40")
                                     else:
                                         ui.label("—").classes("text-[11px] opacity-40")
+                                    _ev = (dec or {}).get("evidence") or {}
+                                    if _ev.get("analyzed"):
+                                        _top = (_ev.get("top_confusion") or [])[:2]
+                                        _worst = (_ev.get("worst_images") or [])[:1]
+                                        with ui.row().classes("flex-wrap gap-1 q-mt-xs"):
+                                            ui.chip("证据：错误分析").props(
+                                                "dense outline square color=teal").classes("text-[10px]")
+                                            for _c in _top:
+                                                ui.chip(f"混淆 {_c['gt']}→{_c['pred']}×{_c['n']}").props(
+                                                    "dense outline square color=teal-8").classes("text-[10px]")
+                                            for _w in _worst:
+                                                ui.chip(f"最差图 {Path(_w['image']).name}（错 {_w['score']}）").props(
+                                                    "dense outline square color=teal-8").classes("text-[10px]")
+                                            _nt = len((dec or {}).get("tool_traces") or [])
+                                            if _nt:
+                                                ui.chip(f"工具查询 ×{_nt}").props(
+                                                    "dense outline square color=teal-8").classes("text-[10px]")
+                                        ui.tooltip(_ev.get("note") or "本轮决策引用的错误分析证据摘要")
+                                    elif rn > 1:
+                                        ui.chip("证据：错误分析未跑").props(
+                                            "dense outline square color=grey").classes("text-[10px]")
                                 with ui.column().classes("flex-1 min-w-40 gap-1"):
                                     ui.label("效果（主指标）").classes(
                                         "text-[11px] font-semibold opacity-50")

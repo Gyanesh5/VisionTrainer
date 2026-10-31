@@ -117,6 +117,12 @@ def approve(manager, task_id: int, action: str, hyperparameters: dict | None = N
         if norm == "stop":
             if state not in ("waiting_approval", "paused"):
                 raise ValueError(f"当前状态 {state} 不在审批/暂停点")
+            from .experience import archive_experience
+
+            try:
+                archive_experience(manager.Session, task_id)
+            except Exception:
+                pass
             cfg["state"] = "terminated"
             queued_uids = [r.uid for r in
                            s.query(Run).filter(Run.task_id == task_id, Run.status == "queued").all()]
@@ -264,11 +270,14 @@ def revoke_preapproval(manager, task_id: int) -> dict:
 # ---------------------------------------------------------------- 主循环
 
 def _loop_safe(manager, task_id: int, stop: threading.Event) -> None:
-    """线程外壳：退出时清注册表；DB 先行消失（测试清理/平台关闭）则静默退出。"""
+    """线程外壳：退出时清注册表；异常打印到 stderr 再吞（循环线程静默死亡不可诊断）。"""
     try:
         _loop(manager, task_id, stop)
     except Exception:
-        pass
+        import sys
+        import traceback
+
+        traceback.print_exc(file=sys.stderr)
     finally:
         _threads.pop((id(manager), task_id), None)
         _stop_flags.pop((id(manager), task_id), None)
@@ -299,6 +308,16 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
                     t2.agent_config = cfg
                     s2.commit()
 
+    def finish(state: str, reason: str | None = None) -> None:
+        """终态出口：状态落定 + 经验沉淀（M10 05，失败不阻断收官）。"""
+        set_state(state, {"stop_reason": reason} if reason else None)
+        from .experience import archive_experience
+
+        try:
+            archive_experience(Session, task_id)
+        except Exception:
+            pass
+
     cfg, done_rounds = load()
     max_rounds = int(cfg.get("max_rounds", 5))
     objective = cfg.get("objective", "")
@@ -325,7 +344,7 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             desktop_notify("预算熔断",
                            f"「{_name}」累计 {used_tokens} tokens 超上限"
                            f" {budget['total_tokens']}，调参循环已停止")
-            set_state("done", {"stop_reason": f"累计 token 熔断（{used_tokens} > {budget['total_tokens']}）"})
+            finish("done", f"累计 token 熔断（{used_tokens} > {budget['total_tokens']}）")
             return
         if state in ("terminated", "done"):
             return
@@ -334,7 +353,7 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
         if state in ("waiting_approval", "paused"):
             act = _await_verdict(Session, task_id, stop)
             if act == "stop":
-                set_state("terminated")
+                finish("terminated")
                 return
             if state == "paused":
                 set_state("running")  # 人工处理后重试本轮决策
@@ -354,14 +373,14 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
                 res = _wait_run(manager, queued, stop, task_id=task_id, prune=prune,
                                 round_deadline=_round_deadline(budget))
                 if res == "budget_stopped":
-                    set_state("done", {"stop_reason": "单轮运行时长熔断"})
+                    finish("done", "单轮运行时长熔断")
                     return
                 continue
 
         # 3) 轮间决策
         last = _last_run(Session, task_id)
         if last is None or last["status"] == "failed":
-            set_state("terminated", {"stop_reason": "上一轮训练失败"})
+            finish("terminated", "上一轮训练失败")
             return
 
         primary = last["primary_metric"] or 0.0
@@ -375,19 +394,19 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             last_eval_round = last["round_no"]
 
         if no_improve >= NO_IMPROVE_ROUNDS:
-            set_state("done", {"stop_reason": f"连续 {NO_IMPROVE_ROUNDS} 轮无提升"})
+            finish("done", f"连续 {NO_IMPROVE_ROUNDS} 轮无提升")
             return
         if done_rounds >= max_rounds:
-            set_state("done", {"stop_reason": "达到最大轮数"})
+            finish("done", "达到最大轮数")
             return
 
         # 4) 决策（多模态 + 只读工具多步循环；端点失败 → paused，解析穷尽 → 确定性回退栈）
-        decision, error, importance, traces = _decide(Session, task_id, objective, history, best)
+        decision, error, importance, traces, evidence = _decide(Session, task_id, objective, history, best)
         if error is not None:
             set_state("paused", {"pause_reason": error})
             continue
         if decision.get("action") == "stop":
-            set_state("done", {"stop_reason": "LLM 主动停止"})
+            finish("done", "LLM 主动停止")
             return
         changes, clamps = clamp_changes(decision.get("hyperparameters") or {})
         history = _append_history(Session, task_id, decision, changes, clamps)
@@ -399,7 +418,7 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             set_state("waiting_approval")
             act = _await_verdict(Session, task_id, stop)
             if act == "stop":
-                set_state("terminated")
+                finish("terminated")
                 return
             waited = act == "continue"
         verdict = _consume_verdict(Session, task_id)
@@ -429,7 +448,8 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
                                 input_summary={"objective": objective, "best_so_far": best,
                                                "analysis": decision.get("analysis", ""),
                                                "param_importance": importance,
-                                               "tool_traces": traces},
+                                               "tool_traces": traces,
+                                               "evidence": evidence},
                                 response=decision, changes=changes, clamps=clamps))
             s.commit()
             queued = run.uid
@@ -439,7 +459,7 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
             res = _wait_run(manager, queued, stop, task_id=task_id, prune=prune,
                             round_deadline=_round_deadline(budget))
             if res == "budget_stopped":
-                set_state("done", {"stop_reason": "单轮运行时长熔断"})
+                finish("done", "单轮运行时长熔断")
                 return
 
 
@@ -624,10 +644,14 @@ def _append_history(Session, task_id: int, decision: dict, changes: dict, clamps
 # ---------------------------------------------------------------- LLM 决策
 
 def _decide(Session, task_id: int, objective: str, history: list[dict], best: float | None):
-    """决策入口：核心决策 + token 用量落档（预算熔断的数据源，ADR 0007）。"""
+    """决策入口：核心决策 + token 用量落档（预算熔断的数据源，ADR 0007）。
+
+    返回 (decision, error, importance, traces, evidence)——evidence 为本轮注入的
+    错误分析证据摘要（M10 04），随决策归档可回溯。
+    """
     from visiontrainer.db.models import Task
 
-    decision, error, importance, traces, usage = _decide_core(
+    decision, error, importance, traces, usage, evidence = _decide_core(
         Session, task_id, objective, history, best)
     if usage:
         with Session() as s:
@@ -636,7 +660,7 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
             cfg["token_usage"] = int(cfg.get("token_usage") or 0) + int(usage)
             t.agent_config = cfg
             s.commit()
-    return decision, error, importance, traces
+    return decision, error, importance, traces, evidence
 
 
 def _decide_core(Session, task_id: int, objective: str, history: list[dict],
@@ -645,15 +669,16 @@ def _decide_core(Session, task_id: int, objective: str, history: list[dict],
 
     失败分级（decider.py 铁线）：端点不可达（chat 内 raise）→ 立即 paused 不烧卡（M4 ③）；
     解析穷尽（带错重试 1 次后仍非法 / 工具步数耗尽）→ 确定性回退栈，栈也穷尽才 paused。
-    返回 (decision, error, importance, tool_traces, token_usage)。
+    返回 (decision, error, importance, tool_traces, token_usage, evidence)。
     """
     from ..charts.render import confusion_matrix_png, render_run_charts
     from ..agent.importance import compute_importance, render_context
+    from ..agent.tools import error_evidence
     from visiontrainer.db.models import EpochMetric, Run, Task
 
     provider = select_provider()
     if provider != "llm":
-        return None, str(provider_unavailable_error(provider)), None, [], 0
+        return None, str(provider_unavailable_error(provider)), None, [], 0, {"analyzed": False}
 
     with Session() as s:
         t = s.get(Task, task_id)
@@ -671,6 +696,15 @@ def _decide_core(Session, task_id: int, objective: str, history: list[dict],
     importance = compute_importance(Session, dataset=dataset, base_model=t.base_model)
     imp_text = render_context(importance)
 
+    # 错误分析证据（M10 04）：有界摘要自动注入 + 最差图叠加图随多模态内容携带
+    evidence = error_evidence(Session, task_id)
+    experience_ctx: list[dict] = []
+    if not history:  # 经验库（M10 05）：首轮决策注入同域既往案例
+        from .experience import retrieve_experiences
+
+        experience_ctx = retrieve_experiences(Session, dataset, base_model=t.base_model,
+                                              exclude_task_id=task_id, limit=3)
+
     charts: list = []
     if run_dir:
         charts = render_run_charts(metrics, Path(run_dir) / "report_assets")
@@ -685,12 +719,17 @@ def _decide_core(Session, task_id: int, objective: str, history: list[dict],
         "latest_metrics": metrics[-8:],
         "param_importance": imp_text or "（历史 Run 不足，暂无参数重要性证据）",
         "pruned_rounds": pruned_rounds,
+        "error_analysis_evidence": evidence,
+        "experiences": experience_ctx or "（经验库无同域案例）",
         "instruction": "输出 JSON：{analysis, action: 'tune'|'stop', hyperparameters: {...}}；"
                        "hyperparameters 只能包含白名单键；若无改进空间 action=stop。"
-                       "决策前可调用只读工具（query_*）查证据——指标摘要/错误分析/历史运行/数据集画像；"
+                       "决策前可调用只读工具（query_*）查证据——指标摘要/错误分析/历史运行/数据集画像/经验库；"
+                       "experiences 是同域既往案例（相关非因果，供参考）；"
                        "param_importance 是历史统计证据（相关非因果，样本少时弱参考），"
                        "pruned_rounds 是被早停剪掉的烂轮事实。",
     }, ensure_ascii=False)}]
+    if evidence.get("overlay"):
+        charts.append(evidence["overlay"])  # 最差图叠加图作多模态证据（04 号票）
     for png in charts:
         content.append(_content_image(png))  # API 只认 base64 data URL，file:// 会 400
 
@@ -707,12 +746,14 @@ def _decide_core(Session, task_id: int, objective: str, history: list[dict],
             msgs = messages if attempt == 0 else messages + [
                 {"role": "user", "content": f"上次输出不合法：{parse_error}。请重新只输出 JSON 决策。"}]
             try:
+                budget_chars = int((load_config().get("agent", {}) or {}).get("context_budget_chars") or 0)
                 msg, tr, usage = run_tool_loop(msgs, registry, levels={ToolLevel.READONLY},
-                                               audit=None, call=chat)
+                                               audit=None, call=chat,
+                                               context_budget=budget_chars or None)
                 traces.extend(tr)
                 usage_total += usage
             except LLMError as exc:  # 端点级失败 → paused（绝不静默烧卡）
-                return None, str(exc), importance, traces, usage_total
+                return None, str(exc), importance, traces, usage_total, evidence
             if msg is None:
                 parse_error = "工具步数预算耗尽，未产出最终决策"
                 continue
@@ -722,9 +763,9 @@ def _decide_core(Session, task_id: int, objective: str, history: list[dict],
                 parse_error = str(exc)
                 continue
             decision.setdefault("action", "tune")
-            return decision, None, importance, traces, usage_total
+            return decision, None, importance, traces, usage_total, evidence
     except Exception as exc:  # 循环线程静默吞异常的兜底：决策失败必须落 paused 可见
-        return None, f"决策异常：{exc}", importance, traces, usage_total
+        return None, f"决策异常：{exc}", importance, traces, usage_total, evidence
 
     fb = deterministic_fallback(train_args=train_args, history=history,
                                 importance=importance, round_no=len(history) + 2)
@@ -733,5 +774,5 @@ def _decide_core(Session, task_id: int, objective: str, history: list[dict],
         return {"analysis": f"确定性回退（{meta['desc']}）：LLM 决策穷尽后的数字可验探针",
                 "action": "tune", "hyperparameters": changes,
                 "source": "deterministic", "fallback_level": meta["level"]}, \
-            None, importance, traces, usage_total
-    return None, f"决策失败：解析穷尽且回退栈无新探针（{parse_error}）", importance, traces, usage_total
+            None, importance, traces, usage_total, evidence
+    return None, f"决策失败：解析穷尽且回退栈无新探针（{parse_error}）", importance, traces, usage_total, evidence

@@ -79,8 +79,8 @@ class ToolRegistry:
 # ---------------------------------------------------------------- 只读工具（01 号票四件）
 
 def _dataset_of(task) -> str | None:
-    return (Path(task.dataset_manifest_path).parent.parent.parent.name
-            if task.dataset_manifest_path else None)
+    from .experience import dataset_of
+    return dataset_of(task)
 
 
 def _query_metrics(Session):
@@ -164,6 +164,15 @@ def _query_history_runs(Session):
 _PROFILE_TRIM_KEYS = ("rows", "images", "items", "points")  # 逐图行等大键不进 LLM 上下文
 
 
+def _query_experience(Session):
+    def handler(dataset: str | None = None, base_model: str | None = None, limit: int = 5) -> dict:
+        from .experience import retrieve_experiences
+
+        return {"experiences": retrieve_experiences(Session, dataset, base_model,
+                                                    limit=int(limit))}
+    return handler
+
+
 def _query_dataset_profile(Session):
     def handler(dataset: str) -> dict:
         from ..db.models import DatasetStat
@@ -179,6 +188,58 @@ def _query_dataset_profile(Session):
                     "task_type": row.task_type, "computed_at": str(row.computed_at),
                     "profile": payload}
     return handler
+
+
+def error_evidence(Session, task_id: int, *, worst_limit: int = 3,
+                   confusion_limit: int = 4) -> dict:
+    """轮边界决策的错误分析证据摘要（M10 04 号票）：有界注入，不全量塞上下文。
+
+    有分析 → 摘要（关键计数 + Top 混淆格 + 最差图榜 + 最差图叠加路径）；
+    未分析 → analyzed=false（如实告知 LLM 与归档）。
+    """
+    from ..db.models import Run
+
+    run = None
+    with Session() as s:
+        run = (s.query(Run).filter(Run.task_id == task_id)
+               .order_by(Run.round_no.desc()).first())
+    if run is None:
+        return {"analyzed": False}
+    data = get_error_analysis_compat(Session, run.uid)
+    if not data.get("analyzed"):
+        return {"analyzed": False}
+    summary = data.get("summary") or {}
+    counts = {"counts": summary.get("counts"), "f1": summary.get("f1"),
+              "precision": summary.get("precision"), "recall": summary.get("recall"),
+              "n_classes": len(summary.get("classes") or []),
+              "small_objects": summary.get("small_objects")}
+    worst = data["worst_images"][:max(int(worst_limit), 0)]
+    return {"analyzed": True, "metrics": counts,
+            "top_confusion": data["top_confusion"][:max(int(confusion_limit), 0)],
+            "worst_images": worst,
+            "overlay": next((w["overlay"] for w in worst if w.get("overlay")), None),
+            "note": "仅摘要；全量明细可调 query_error_analysis 查询"}
+
+
+def get_error_analysis_compat(Session, run_uid: str) -> dict:
+    """复用分析读取服务（manager 口径适配），返回带 analyzed 标记与 overlay 路径的结构。"""
+    from ..training import service as tsvc
+
+    data = tsvc.get_error_analysis(_Mgr(Session=Session), run_uid)
+    if data is None:
+        return {"analyzed": False}
+    axis, cells = data["matrix"]["axis"], data["matrix"]["cells"]
+    confusions = [{"gt": axis[i], "pred": axis[j], "n": cells[i][j]}
+                  for i in range(len(axis)) for j in range(len(axis))
+                  if i != j and cells[i][j] > 0]
+    confusions.sort(key=lambda c: -c["n"])
+    return {"analyzed": True, "summary": data.get("summary"),
+            "top_confusion": confusions,
+            "worst_images": [{"image": e["image"], "score": e["score"], "fp": e["fp"],
+                              "fn": e["fn"], "confusion": e["confusion"],
+                              "overlay": e.get("overlay")}
+                             for e in data["per_image"]],
+            "n_records": data["n_records"]}
 
 
 def build_default_registry(Session) -> ToolRegistry:
@@ -208,6 +269,14 @@ def build_default_registry(Session) -> ToolRegistry:
                                    "base_model": {"type": "string", "description": "预训练权重标识（可省）"},
                                    "limit": {"type": "integer", "description": "上限，默认 10"}}},
         handler=_query_history_runs(Session)))
+    reg.register(ToolSpec(
+        name="query_experience", level=ToolLevel.READONLY,
+        description="查跨任务经验库：既往调参任务的终态超参组合与结果（同数据集/同预训练权重优先）。",
+        parameters={"type": "object",
+                    "properties": {"dataset": {"type": "string", "description": "数据集名（可省）"},
+                                   "base_model": {"type": "string", "description": "预训练权重标识（可省）"},
+                                   "limit": {"type": "integer", "description": "上限，默认 5"}}},
+        handler=_query_experience(Session)))
     reg.register(ToolSpec(
         name="query_dataset_profile", level=ToolLevel.READONLY,
         description="查数据集健康画像聚合（类别分布/尺寸/目标数；逐图行不返回）。",

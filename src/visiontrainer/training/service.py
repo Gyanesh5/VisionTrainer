@@ -158,6 +158,8 @@ def get_task(manager, task_id: int) -> dict:
         decisions = [{"round_no": d.round_no, "changes": d.changes, "clamps": d.clamps,
                       "analysis": (d.input_summary or {}).get("analysis", ""),
                       "param_importance": (d.input_summary or {}).get("param_importance"),
+                      "evidence": (d.input_summary or {}).get("evidence"),
+                      "tool_traces": (d.input_summary or {}).get("tool_traces") or [],
                       "at": d.created_at.isoformat(timespec="seconds") if d.created_at else None}
                      for d in (s.query(AgentDecision).join(Run, Run.id == AgentDecision.run_id)
                                .filter(Run.task_id == task_id).order_by(AgentDecision.round_no).all())]

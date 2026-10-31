@@ -39,11 +39,54 @@ def _truncate(text: str, limit: int = TOOL_RESULT_MAX_CHARS) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _msg_size(m: dict) -> int:
+    c = m.get("content")
+    if not isinstance(c, str):
+        c = json.dumps(c, ensure_ascii=False, default=str) if c is not None else ""
+    return len(c) + len(json.dumps(m.get("tool_calls") or "", default=str))
+
+
+def compact_messages(msgs: list[dict], budget: int) -> list[dict] | None:
+    """上下文逼近预算时压缩（pi compaction 策略，M10 05）。
+
+    保留 system + 首条 user（决策指令与证据）与近段消息；整块移除最旧的
+    assistant(tool_calls)+其工具结果（维持 OpenAI 消息配对约束），占位摘要说明压缩事实。
+    原始记录经决策轨迹归档持久可查。返回新列表或 None（无需压缩）。
+    """
+    total = sum(_msg_size(m) for m in msgs)
+    if total <= budget:
+        return None
+    msgs = list(msgs)
+    dropped = 0
+    while total > budget and len(msgs) > 2:
+        i = next((k for k, m in enumerate(msgs) if k >= 2 and m.get("tool_calls")), None)
+        if i is None:
+            if len(msgs) <= 2:
+                break
+            i = 2  # 无工具块：删最旧的非 system/非指令消息
+            total -= _msg_size(msgs[i])
+            msgs.pop(i)
+            dropped += 1
+            continue
+        j = i
+        while j + 1 < len(msgs) and msgs[j + 1].get("role") == "tool":
+            j += 1
+        total -= sum(_msg_size(m) for m in msgs[i:j + 1])
+        del msgs[i:j + 1]
+        dropped += 1
+    if not dropped:
+        return None
+    msgs.insert(2, {"role": "user",
+                    "content": f"（已压缩 {dropped} 块早期消息：工具结果全文见决策轨迹归档）"})
+    return msgs
+
+
 def run_tool_loop(messages: list[dict], registry: ToolRegistry, *,
                   levels: set[ToolLevel] | None = None,
                   audit: Callable | None = None,
                   max_steps: int = MAX_TOOL_STEPS,
-                  call: Callable | None = None) -> tuple[dict | None, list[dict], int]:
+                  call: Callable | None = None,
+                  context_budget: int | None = None) -> tuple[dict | None, list[dict], int]:
     """多步工具循环。call(messages, tools=...) 返回助手文本 str 或消息 dict（chat 双态）。
 
     返回 (最终助手消息, 工具调用轨迹, 本次消耗 token 数)；步数预算耗尽未拿到最终消息
@@ -55,6 +98,10 @@ def run_tool_loop(messages: list[dict], registry: ToolRegistry, *,
     traces: list[dict] = []
     usage_total = 0
     for _ in range(max_steps):
+        if context_budget:
+            compacted = compact_messages(msgs, context_budget)
+            if compacted is not None:
+                msgs = compacted
         raw = call(msgs, tools=registry.to_openai_tools(levels=levels) or None)
         msg = raw if isinstance(raw, dict) else {"content": raw}
         u = msg.get("_usage") or {}

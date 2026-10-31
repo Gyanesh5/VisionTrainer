@@ -78,7 +78,7 @@ def agent_env(tmp_path: Path, datasets_root, detect_source, monkeypatch):
         decisions["n"] += 1
         return ({"analysis": f"决策 {decisions['n']}", "action": "tune",
                  "hyperparameters": {"lr0": 0.009 + 0.001 * decisions["n"]}},
-                None, None, [])
+                None, None, [], {"analyzed": False})
 
     monkeypatch.setattr("visiontrainer.agent.tuner._decide", fake_decide)
     with TestClient(app) as c:

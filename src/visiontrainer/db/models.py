@@ -163,7 +163,28 @@ class RunSampleError(Base):
     box: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
 
 
-SCHEMA_VERSION = 4
+class AgentExperience(Base):
+    """跨任务经验库（M10 05 号票）：调参任务终态沉淀的「数据集画像 → 超参动作 → 结果」案例。
+
+    新任务首轮决策按相似度检索 top-k 注入上下文；query_experience 只读工具同源。
+    """
+
+    __tablename__ = "agent_experiences"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    task_id: Mapped[int] = mapped_column(Integer, unique=True)  # 一任务一案例（终态归档，可重写）
+    dataset: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    base_model: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    task_type: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    n_classes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    train_args: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    best_primary: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rounds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    stop_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+SCHEMA_VERSION = 5
 
 
 def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
@@ -179,7 +200,7 @@ def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
             "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY, version INTEGER)"
         )
         # 幂等迁移（10 号票约定）：v2 = stats/audits 两表；v3 = gpu_samples 表 + runs.pruned 列；
-        # v4 = run_sample_errors 表（create_all 已建）
+        # v4 = run_sample_errors 表（create_all 已建）；v5 = agent_experiences 表（create_all 已建）
         conn.exec_driver_sql("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
         if engine.dialect.name == "sqlite":
             cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(runs)")]
