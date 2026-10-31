@@ -20,7 +20,8 @@ from PIL import Image
 
 from .audit import compute_audit, fingerprint_of, load_cached, save_cached
 from .convert import TASK_SHAPES, json_to_yolo_lines, write_label
-from .split import build_grouped_manifest, build_manifest, excluded_manifest, restored_manifest, save_manifest
+from .split import (absorbed_manifest, build_grouped_manifest, build_manifest,
+                    excluded_manifest, restored_manifest, save_manifest)
 from .stats import build_stats, get_stats, recompose, save_stats
 from .tiling import JPEG_QUALITY, TILE_GRID_MAX, TILE_OVERLAP_MAX, TILE_TASKS, plan_image, summarize
 from .validate import scan_entries, validate_dataset
@@ -82,6 +83,36 @@ def _drops_signature(report: dict) -> str:
 def _mark_drops(meta: dict, report: dict) -> None:
     meta["drops_signature"] = _drops_signature(report)
     meta["drops_pending_ack"] = bool(report.get("drops")) and meta.get("drops_acked") != meta["drops_signature"]
+
+
+def _drift_report(entries: list[dict], manifest: dict, meta: dict) -> dict:
+    """清单漂移账目（spec「图片集漂移检测警告」落点）：扫描 vs 活跃清单对账。
+
+    新增 = 扫描到、不在清单、也不在排除日志（排除是用户裁决——不复活、不算漂移）；
+    已消失 = 清单内但扫描未见。new_classes = 新增文件携带的未注册类别（同步阻断项，
+    口径与 scan 的 unknown_labels 一致：任意 shape 的 label 不在 classes 即算）。
+    """
+    in_manifest = {f["image"] for f in manifest.get("files") or []}
+    excluded_log = {e["file"] for e in meta.get("excluded") or []}
+    scanned = {e["image"] for e in entries}
+    outside = scanned - in_manifest
+    added = sorted(outside - excluded_log)
+    missing = sorted(in_manifest - scanned)
+    added_set = set(added)
+    new_classes: set[str] = set()
+    for e in entries:
+        if e["image"] in added_set and e.get("label"):
+            for s in _read_json(e["label"]).get("shapes") or []:
+                if s.get("label") and s.get("label") not in meta["classes"]:
+                    new_classes.add(str(s["label"]))
+    return {
+        "added": len(added),
+        "added_sample": [Path(p).name for p in added[:3]],
+        "missing": len(missing),
+        "missing_sample": [Path(p).name for p in missing[:3]],
+        "excluded_present": len(outside & excluded_log),
+        "new_classes": sorted(new_classes),
+    }
 
 
 def import_dataset(
@@ -254,12 +285,13 @@ def validate_dataset_by_name(name: str, root: Path | None = None,
 
     scan = scan_entries(src, meta["task_type"], meta["classes"], progress=_cb("扫描校验"))
     report = validate_dataset(src, meta["task_type"], meta["classes"], scan=scan)
+    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+    report["drift"] = _drift_report(scan["entries"], manifest, meta)
     (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     meta["last_validation"] = report
     _mark_drops(meta, report)  # M9：新丢弃集合出现才重新要求确认（同签名已确认则粘住）
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     # 健康报告聚合随校验刷新（当前活跃清单画像；M6 01 号票）
-    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
     save_stats(name, build_stats(scan["entries"], manifest, meta["task_type"], meta["classes"], name))
     return report
 
@@ -309,6 +341,55 @@ def resplit_dataset(name: str, ratio: float, seed: int, stratify: bool,
     (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     _refresh_stats_recompose(name, meta, prev, manifest)
     return manifest
+
+
+def sync_added_files(name: str, root: Path | None = None, progress_cb=None) -> dict:
+    """同步新增图片：源目录清单外新图增量纳入活跃切分（确认门在 UI 层，此处复核真源）。
+
+    语义：以源目录现状重扫为准（不信任旧报告里的漂移快照）；既有文件 train/val
+    归属不动，新增文件按当前（ratio, seed, stratify）只在自身范围内入切；生成新
+    清单版本（旧版保留可切回）、按当前标注重建派生（老图改标一并生效）、随后全量
+    重校验（报告 + 画像 + 漂移账目一并刷新）。排除日志中的文件不复活；新增携带
+    未注册类别 → 阻断（类序变更牵连老模型可比性——先改标注映射到既有类别，或
+    另建数据集）。progress_cb(phase, cur, total)：扫描新增 / 派生训练结构 / 重校验。
+    """
+    meta = get_dataset(name, root)
+    if meta["form"] != "managed":
+        raise DatasetError("invalid_args", "外部数据集不参与同步")
+    ds_dir = _ds_dir(name, root)
+    prev = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+
+    def _cb(phase: str):
+        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
+
+    scan = scan_entries(Path(meta["source_dir"]), meta["task_type"], meta["classes"],
+                        progress=_cb("扫描新增"))
+    in_manifest = {f["image"] for f in prev["files"]}
+    excluded_log = {e["file"] for e in meta.get("excluded") or []}
+    new_entries = [
+        {"image": e["image"], "label": e["label"], "primary_label": e.get("primary_label")}
+        for e in scan["entries"]
+        if e["image"] not in in_manifest and e["image"] not in excluded_log
+    ]
+    if not new_entries:
+        raise DatasetError("state_conflict", "源目录没有清单外新增图片——先「重新校验」刷新漂移账目")
+    new_classes = _drift_report(scan["entries"], prev, meta)["new_classes"]
+    if new_classes:
+        raise DatasetError("state_conflict",
+                           f"新增图片携带未注册类别：{'、'.join(new_classes)}"
+                           "——先在源标注中改为既有类别，或另建数据集")
+    manifest = absorbed_manifest(prev, new_entries)
+    _derive(ds_dir, manifest, meta["task_type"], meta["classes"], progress=_cb("派生训练结构"))
+    save_manifest(ds_dir, manifest)
+    if manifest["uid"] != meta["active_manifest"] and \
+            not any(b["uid"] == manifest["uid"] for b in meta["manifests"]):
+        meta["manifests"].append(_manifest_brief(manifest))
+    meta["active_manifest"] = manifest["uid"]
+    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    report = validate_dataset_by_name(name, root, progress_cb=progress_cb)
+    return {"uid": manifest["uid"], "added": len(new_entries),
+            "train": len(manifest["train"]), "val": len(manifest["val"]),
+            "validation": report}
 
 
 def rename_classes(name: str, classes: list[str], root: Path | None = None) -> dict:

@@ -3678,6 +3678,67 @@ document.addEventListener('scroll', function(e){
                                     ui.button("一键修复", icon="auto_fix_high",
                                               on_click=autofix_dlg.open).props(
                                         "dense unelevated color=warning")
+                # 清单漂移（spec「图片集漂移检测警告」落点）：源目录新增未纳入 / 已消失——
+                # 琥珀条诚实入账，「同步新增」过确认门增量纳入（排除日志中的文件不复活）
+                drift = lv.get("drift") or {}
+                if drift.get("added") or drift.get("missing"):
+                    n_add, n_miss = drift.get("added") or 0, drift.get("missing") or 0
+
+                    async def _do_sync_added(ds_name: str, dlg) -> None:
+                        dlg.close()
+                        op = ops.begin(f"ds:{ds_name}:sync", f"同步新增 · {ds_name}", scope=ds_name)
+                        try:
+                            r = await _io(ds.sync_added_files, ds_name, None, op.progress)
+                            op.finish()
+                            v = r.get("validation") or {}
+                            ui.notify(f"已同步新增 {r.get('added', 0)} 张"
+                                      f"（train {r.get('train', 0)} / val {r.get('val', 0)}）"
+                                      f"——重校验{'通过' if v.get('ok') else '仍有需人工项'}",
+                                      type="positive" if v.get("ok") else "warning")
+                        except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
+                            ui.notify(f"同步失败：{exc}", type="negative")
+                        refresh()
+                        render_detail()
+
+                    with ui.dialog() as sync_dlg, ui.card().classes("w-full max-w-lg gap-2"):
+                        ui.label("同步新增图片").classes("text-sm font-semibold")
+                        blocked = bool(drift.get("new_classes"))
+                        if blocked:
+                            ui.label(f"新增图片携带未注册类别：{'、'.join(drift['new_classes'])}"
+                                     "——先在 X-AnyLabeling 中改为既有类别，或另建数据集；"
+                                     "类序变更会破坏既有模型的可比性，平台不自动追加类别。"
+                                     ).classes("text-xs text-amber-500")
+                        ui.label(f"将把源目录中 {n_add} 张新增图片纳入切分——既有图片的 "
+                                 "train/val 归属不变，新增图片按当前比例与种子入切；"
+                                 "生成新切分版本（旧版保留可切回），按当前标注重建派生"
+                                 "并自动重新校验。").classes("text-xs opacity-70")
+                        with ui.row().classes("w-full justify-end gap-2"):
+                            ui.button("取消", on_click=sync_dlg.close).props("flat")
+                            go_btn = ui.button("执行同步", icon="playlist_add",
+                                               on_click=lambda: _do_sync_added(meta["name"], sync_dlg))
+                            go_btn.props("unelevated color=warning")
+                            if blocked:
+                                go_btn.props("disable")
+
+                    with ui.row().classes(
+                            "w-full items-center gap-2 q-pa-sm rounded").style(
+                            "background:rgba(245,158,11,.12)"):
+                        ui.icon("sync_problem").classes("text-amber-400")
+                        drift_txt = (f"源目录新增 {n_add} 张图片未纳入切分——不参与训练与统计"
+                                     if n_add else "")
+                        if n_miss:
+                            drift_txt += ("；" if drift_txt else "") + \
+                                f"清单内 {n_miss} 张已从源目录消失（可用「重切分/排除」处置）"
+                        if n_add and drift.get("added_sample"):
+                            drift_txt += f"（如 {drift['added_sample'][0]}）"
+                        ui.label(drift_txt).classes("text-xs flex-1 min-w-0").tooltip(
+                            "切分清单是版本快照（全 Run 共用同一份 val，指标可比）；"
+                            "排除过的文件不会被同步复活")
+                        if n_add:
+                            ui.button("同步新增", icon="playlist_add",
+                                      on_click=sync_dlg.open).props(
+                                "dense unelevated color=warning")
                 # M9 确认门：转换丢弃未确认 → 横幅 + 确认按钮（确认前提交训练被拒）
                 if meta.get("drops_pending_ack"):
                     n_drop = (lv.get("drops") or

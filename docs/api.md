@@ -22,8 +22,9 @@
 | POST | `/api/v1/datasets/import` | 导入 X-AnyLabeling 标注目录 → 托管数据集（后台：转换+校验+切分）。body: `{name, task_type, source_dir, split:{ratio, seed?, stratify?}}` |
 | POST | `/api/v1/datasets/external` | 注册外部标准 YOLO 目录（只读）。body: `{name, task_type, path}` |
 | GET | `/api/v1/datasets/{id}` | 详情：manifest、validation_report、classes |
-| POST | `/api/v1/datasets/{id}/validate` | 重跑五条校验规则 |
+| POST | `/api/v1/datasets/{id}/validate` | 重跑五条校验规则；报告新增清单漂移账目 `drift`（`added`/`missing`/`excluded_present`/`new_classes`，概览琥珀条与同步确认门的数据源） |
 | POST | `/api/v1/datasets/{id}/resplit` | 重新切分 → 新 manifest id。body: `{ratio, seed?, stratify?}` |
+| POST | `/api/v1/datasets/{id}/sync-added` | 同步新增图片（长操作）：源目录清单外新图增量纳入切分——老图 train/val 归属不动，新图按当前（ratio, seed, stratify）只在自身范围内入切；生成新 manifest（旧版可切回）；排除日志中的文件不复活；新增携带未注册类别 409 阻断；完成后自动全量重校验 |
 | PUT | `/api/v1/datasets/{id}/classes` | 类别改名/重排（显式操作：重写 labels + 新 manifest） |
 | DELETE | `/api/v1/datasets/{id}?delete_files=` | 删除（磁盘默认保留，10 号票） |
 

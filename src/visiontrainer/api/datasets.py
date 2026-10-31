@@ -134,6 +134,17 @@ def resplit_dataset(name: str, body: ResplitBody):
         return _error_response(exc)
 
 
+@router.post("/{name}/sync-added")
+def sync_added(name: str):
+    """同步新增图片（长操作）：源目录清单外新图增量纳入切分——老图 train/val 归属
+    不动、新图按当前比例与种子只在自身范围内入切；生成新清单版本（旧版可切回）；
+    排除日志中的文件不复活；新增携带未注册类别 409 阻断；完成后自动全量重校验。"""
+    try:
+        return svc.sync_added_files(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
 @router.put("/{name}/classes")
 def rename_classes(name: str, body: ClassesBody):
     try:

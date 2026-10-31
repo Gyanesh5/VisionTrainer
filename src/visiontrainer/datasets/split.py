@@ -125,6 +125,54 @@ def build_grouped_manifest(groups: list[dict], ratio: float, seed: int, stratify
     }
 
 
+def absorbed_manifest(prev: dict, new_entries: list[dict]) -> dict:
+    """同步新增（排除恢复的同族）：把源目录新图纳入 prev 生成新清单。
+
+    归属稳定：既有文件 train/val 一律不动（全 Run val 可比性的地基）；新增文件
+    按 prev 的（ratio, seed, stratify）只在自身范围内洗牌入切——既不扰动既有
+    分布，同 seed 又可复现。uid 按（seed, ratio, 文件集哈希）重算，天然生成
+    新版本；prev_uid 链与 absorbed 记录保证可追溯。
+    """
+    rng = random.Random(prev["seed"])
+    labeled = [e for e in new_entries if e.get("primary_label")]
+    background = [e for e in new_entries if not e.get("primary_label")]
+
+    groups: dict[str, list[dict]] = defaultdict(list)
+    if prev.get("stratify"):
+        for e in labeled:
+            groups[e["primary_label"]].append(e)
+        buckets = list(groups.values())
+    else:
+        rng.shuffle(labeled)
+        buckets = [labeled]
+
+    add_train: list[dict] = []
+    add_val: list[dict] = []
+    for bucket in buckets:
+        k = int(len(bucket) * prev["ratio"])
+        add_train.extend(bucket[:k])
+        add_val.extend(bucket[k:])
+    add_train.extend(background)  # 负样本只进 train（05 号票同口径）
+
+    files = sorted(prev["files"] + list(new_entries), key=lambda f: f["image"])
+    files_hash = _file_label({f["image"]: f.get("primary_label") for f in files})
+    return {
+        "uid": _manifest_uid(prev["seed"], prev["ratio"], files_hash),
+        "seed": prev["seed"],
+        "ratio": prev["ratio"],
+        "stratify": prev["stratify"],
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "files": [
+            {"image": f["image"], "label": f["label"], "primary_label": f.get("primary_label")}
+            for f in files
+        ],
+        "train": sorted(set(prev["train"]) | {e["image"] for e in add_train}),
+        "val": sorted(set(prev["val"]) | {e["image"] for e in add_val}),
+        "prev_uid": prev["uid"],
+        "absorbed": sorted(e["image"] for e in new_entries),
+    }
+
+
 def save_manifest(dataset_dir: Path, manifest: dict) -> Path:
     derived = dataset_dir / "derived" / manifest["uid"]
     derived.mkdir(parents=True, exist_ok=True)
