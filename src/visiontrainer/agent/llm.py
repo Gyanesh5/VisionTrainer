@@ -63,7 +63,9 @@ def chat(messages: list[dict], *, client: httpx.Client | None = None,
         )
         resp.raise_for_status()
         data = resp.json()
-        message = data["choices"][0]["message"]
+        message = dict(data["choices"][0]["message"])
+        if tools:
+            message["_usage"] = data.get("usage") or {}  # 预算熔断的 token 计量（03 号票）
         return message if tools else (message.get("content") or "")
     except (httpx.HTTPError, KeyError, IndexError) as exc:
         raise LLMError(f"LLM 调用失败：{exc}") from exc

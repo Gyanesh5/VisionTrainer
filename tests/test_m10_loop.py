@@ -82,7 +82,7 @@ def test_tool_loop_dispatches_and_feeds_back(factory):
         _tool_call("query_metrics", {"run_uid": uid}),
         json.dumps({"analysis": "证据已查", "action": "tune", "hyperparameters": {"lr0": 0.02}}),
     ])
-    msg, traces = run_tool_loop([{"role": "user", "content": "决策"}], reg, call=fake)
+    msg, traces, usage = run_tool_loop([{"role": "user", "content": "决策"}], reg, call=fake)
     assert msg is not None and "tune" in msg["content"]
     assert len(traces) == 1 and traces[0]["tool"] == "query_metrics"
     assert traces[0]["level"] == "readonly" and "0.4" in traces[0]["result_digest"]
@@ -103,7 +103,7 @@ def test_tool_loop_rejects_unknown_and_out_of_level(factory):
         _tool_call("critical_thing", {}, cid="c2"),
         json.dumps({"analysis": "放弃工具", "action": "stop"}),
     ])
-    msg, traces = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
+    msg, traces, usage = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
     assert msg["content"] and "stop" in msg["content"]
     assert "不可在本轮调用" in traces[0]["result_digest"]
     assert traces[1]["level"] == "critical" and "不可在本轮调用" in traces[1]["result_digest"]
@@ -115,7 +115,7 @@ def test_tool_loop_tool_failure_becomes_result(factory):
         _tool_call("query_metrics", {"run_uid": "ghost"}),
         json.dumps({"analysis": "无此运行", "action": "stop"}),
     ])
-    msg, traces = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
+    msg, traces, usage = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
     assert "不存在" in traces[0]["result_digest"]
     assert "stop" in msg["content"]
 
@@ -123,15 +123,15 @@ def test_tool_loop_tool_failure_becomes_result(factory):
 def test_tool_loop_str_response_is_content():
     reg = build_default_registry(object())
     fake = Scripted(["只是文本"])
-    msg, traces = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
-    assert msg == {"content": "只是文本"} and traces == []
+    msg, traces, usage = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
+    assert msg == {"content": "只是文本"} and traces == [] and usage == 0
 
 
 def test_tool_loop_step_budget_exhausted(factory):
     reg = build_default_registry(factory)
     fake = Scripted([_tool_call("query_metrics", {"run_uid": "x"})])
-    msg, traces = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
-    assert msg is None and len(traces) == MAX_TOOL_STEPS
+    msg, traces, usage = run_tool_loop([{"role": "user", "content": "x"}], reg, call=fake)
+    assert msg is None and len(traces) == MAX_TOOL_STEPS and usage == 0
 
 
 # ---------------------------------------------------------------- 确定性回退栈

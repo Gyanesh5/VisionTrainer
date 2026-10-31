@@ -223,7 +223,7 @@ def test_agent_decision_archives_importance_placeholder():
     # 由 test_m4_agent 的现有链路覆盖 input_summary；这里仅锁定字段契约存在
     import inspect
 
-    src = inspect.getsource(tuner._decide)
+    src = inspect.getsource(tuner._decide_core)
     assert "param_importance" in src and "pruned_rounds" in src
 
 

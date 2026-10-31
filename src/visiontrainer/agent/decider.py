@@ -43,22 +43,25 @@ def run_tool_loop(messages: list[dict], registry: ToolRegistry, *,
                   levels: set[ToolLevel] | None = None,
                   audit: Callable | None = None,
                   max_steps: int = MAX_TOOL_STEPS,
-                  call: Callable | None = None) -> tuple[dict | None, list[dict]]:
+                  call: Callable | None = None) -> tuple[dict | None, list[dict], int]:
     """多步工具循环。call(messages, tools=...) 返回助手文本 str 或消息 dict（chat 双态）。
 
-    返回 (最终助手消息, 工具调用轨迹)；步数预算耗尽未拿到最终消息 → (None, 轨迹)。
-    端点级失败原样上抛（LLMError → paused）。
+    返回 (最终助手消息, 工具调用轨迹, 本次消耗 token 数)；步数预算耗尽未拿到最终消息
+    → (None, 轨迹, 消耗)。端点级失败原样上抛（LLMError → paused）。
     """
     levels = levels if levels is not None else {ToolLevel.READONLY}
     call = call or _default_call
     msgs = list(messages)
     traces: list[dict] = []
+    usage_total = 0
     for _ in range(max_steps):
         raw = call(msgs, tools=registry.to_openai_tools(levels=levels) or None)
         msg = raw if isinstance(raw, dict) else {"content": raw}
+        u = msg.get("_usage") or {}
+        usage_total += int(u.get("total_tokens") or 0)
         calls = msg.get("tool_calls") or []
         if not calls:
-            return msg, traces
+            return msg, traces, usage_total
         msgs.append(msg)
         for tc in calls:
             fn = (tc.get("function") or {})
@@ -87,12 +90,21 @@ def run_tool_loop(messages: list[dict], registry: ToolRegistry, *,
                            "at": _now()})
             msgs.append({"role": "tool", "tool_call_id": tc.get("id") or "",
                          "content": _truncate(json.dumps(result, ensure_ascii=False, default=str))})
-    return None, traces
+    return None, traces, usage_total
 
 
 def _default_call(messages, tools=None, **kw):
     from .llm import chat
     return chat(messages, tools=tools, **kw)
+
+
+def approval_required(level: ToolLevel, mode: str) -> bool:
+    """审批策略（ADR 0007，铁线）：只读直通；关键恒人工；动作 autonomous 直通 / supervised 审批。"""
+    if level == ToolLevel.READONLY:
+        return False
+    if level == ToolLevel.CRITICAL:
+        return True
+    return mode == "supervised"
 
 
 # ---------------------------------------------------------------- 确定性回退栈

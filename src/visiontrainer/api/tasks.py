@@ -36,10 +36,12 @@ def _maps_errors(fn):
 
 class AgentConfig(BaseModel):
     max_rounds: int = 5
-    approval: str = "manual"
+    approval: str = "manual"        # autonomous/supervised（auto/manual 旧值在循环读侧归一）
     objective: str = ""
     prune: bool | None = None       # M7 烂轮早停：任务级覆盖（None=跟随全局 [agent].prune_enabled）
     prune_delta: float | None = None
+    budget_round_seconds: int | None = None   # ADR 0007 预算熔断：单轮运行时长上限（None=跟随全局）
+    budget_total_tokens: int | None = None    # 累计 token 上限（None=跟随全局）
 
 
 class TaskCreateBody(BaseModel):
@@ -76,16 +78,43 @@ def create_task(body: TaskCreateBody, request: Request):
 
 @router.post("/tasks/{task_id}/approve")
 def approve_task(task_id: int, request: Request, body: dict):
-    """审批门裁决：{action: "continue" | "stop"}（06 号票）。"""
+    """审批四态（ADR 0007）：{action: approve|approve_with_changes|reject|stop,
+    hyperparameters?}（continue/stop 旧值兼容映射）。"""
     from ..agent import tuner
 
-    action = (body or {}).get("action")
+    body = body or {}
     try:
-        return tuner.approve(_manager(request), task_id, action)
+        return tuner.approve(_manager(request), task_id, body.get("action"),
+                             hyperparameters=body.get("hyperparameters"))
     except KeyError:
         raise _err(tsvc.TaskError("not_found", f"任务不存在：{task_id}", 404))
     except ValueError as exc:
         raise _err(tsvc.TaskError("state_conflict", str(exc), 409))
+
+
+@router.post("/tasks/{task_id}/preapproval")
+def grant_preapproval(task_id: int, request: Request, body: dict):
+    """批量预审授权（ADR 0007）：{rounds: N}——接下来 N 轮一次放行，流水留档可审计。"""
+    from ..agent import tuner
+
+    try:
+        return tuner.grant_preapproval(_manager(request), task_id,
+                                       int((body or {}).get("rounds") or 0))
+    except KeyError:
+        raise _err(tsvc.TaskError("not_found", f"任务不存在：{task_id}", 404))
+    except ValueError as exc:
+        raise _err(tsvc.TaskError("state_conflict", str(exc), 409))
+
+
+@router.delete("/tasks/{task_id}/preapproval")
+def revoke_preapproval(task_id: int, request: Request):
+    """撤销批量预审：下一轮立即回到逐轮审批。"""
+    from ..agent import tuner
+
+    try:
+        return tuner.revoke_preapproval(_manager(request), task_id)
+    except KeyError:
+        raise _err(tsvc.TaskError("not_found", f"任务不存在：{task_id}", 404))
 
 
 @router.get("/tasks")

@@ -16,7 +16,8 @@ DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8600},
     # M7：桌面通知（notify-send）与烂轮早停的全局开关/参数（按任务可在 Agent 对话框覆盖）
     "notifications": {"desktop": True},
-    "agent": {"prune_enabled": True, "prune_delta": 0.05, "provider": "llm"},
+    "agent": {"prune_enabled": True, "prune_delta": 0.05, "provider": "llm",
+              "budget_round_seconds": 0, "budget_total_tokens": 0},
 }
 
 # 接口/设置页可改键白名单；库外其余键（如 training.db_url）只能手改文件
@@ -26,7 +27,8 @@ EDITABLE: dict[str, set[str]] = {
     "training": {"python", "trainer_entry", "export_entry", "datasets_dir",
                  "runs_dir", "model_lib_dir", "check_occupancy"},
     "notifications": {"desktop"},
-    "agent": {"prune_enabled", "prune_delta", "provider"},
+    "agent": {"prune_enabled", "prune_delta", "provider",
+              "budget_round_seconds", "budget_total_tokens"},
 }
 RESTART_SECTIONS = ("server", "training")
 
@@ -63,6 +65,10 @@ def _validate(section: str, key: str, value: object) -> None:
     if full == "agent.provider":
         if value not in ("llm", "external"):
             raise ConfigError("invalid_value", "agent.provider 须为 llm 或 external")
+        return
+    if full in ("agent.budget_round_seconds", "agent.budget_total_tokens"):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError("invalid_value", f"{full} 须为 ≥0 的整数（0 = 不限）")
         return
     if not isinstance(value, str):
         raise ConfigError("invalid_value", f"{full} 须为字符串")
