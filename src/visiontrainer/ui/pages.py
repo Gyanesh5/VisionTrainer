@@ -5922,38 +5922,38 @@ document.addEventListener('scroll', function(e){
                                     ui.label(f"轮次进度 {done} / {max_rounds}"
                                              + (f"（剩余 {max_rounds - done} 轮）" if done < max_rounds else "")
                                              ).classes("text-xs opacity-70")
-                                with ui.row().classes("w-full items-center gap-2"):
-                                    with ui.element("div").classes(
-                                            "flex-1 h-2 rounded").style("background:rgba(148,163,184,.18)"):
-                                        with ui.element("div").classes("h-full rounded").style(
-                                                f"width:{min(done / max(max_rounds, 1) * 100, 100):.0f}%;"
-                                                "background:linear-gradient(90deg,#2563eb,#22d3ee)"):
-                                            pass
-                                with ui.row().classes("flex-wrap gap-1"):
-                                    for r in rounds:
-                                        if r.get("pruned"):
-                                            b = ui.badge(f"轮{r['round_no']} ✂").props(
-                                                "color=purple outline").style("font-size:9px")
-                                        elif r["primary_metric"] is not None:
-                                            b = ui.badge(f"轮{r['round_no']} {r['primary_metric']:.3f}").props(
-                                                "color=green outline").style("font-size:9px")
-                                        else:
-                                            s_l, _ = RUN_STATUS.get(r["status"], (r["status"], "grey"))
-                                            b = ui.badge(f"轮{r['round_no']} {s_l}").props(
-                                                "color=grey outline").style("font-size:9px")
-                                        with b:
-                                            ui.tooltip(f"轮 {r['round_no']} · {r['status']}"
-                                                       + (f" · 已剪枝" if r.get("pruned") else ""))
+                                with ui.element("div").classes(
+                                        "w-full h-1.5 rounded").style("background:rgba(148,163,184,.18)"):
+                                    with ui.element("div").classes("h-full rounded").style(
+                                            f"width:{min(done / max(max_rounds, 1) * 100, 100):.0f}%;"
+                                            "background:#64748b"):
+                                        pass
+                                # 逐轮摘要收敛为一行等宽文本（去 badge 堆叠）
+                                _parts = []
+                                for r in rounds:
+                                    if r.get("pruned"):
+                                        _parts.append(f"轮{r['round_no']}（剪）")
+                                    elif r["primary_metric"] is not None:
+                                        _parts.append(f"轮{r['round_no']} {r['primary_metric']:.3f}")
+                                    else:
+                                        s_l, _ = RUN_STATUS.get(r["status"], (r["status"], "grey"))
+                                        _parts.append(f"轮{r['round_no']} {s_l}")
+                                _rounds_line = ui.label(" · ".join(_parts)).classes(
+                                    "text-[11px] opacity-70 tabular-nums tracking-tight")
+                                with _rounds_line:
+                                    ui.tooltip(" · ".join(
+                                        f"轮 {r['round_no']} · {r['status']}" + (" · 已剪枝" if r.get("pruned") else "")
+                                        for r in rounds))
                             with ui.column().classes("w-[13.5rem] shrink-0 gap-1"):
                                 ui.label("主指标趋势").classes("text-xs opacity-70")
                                 ui.echart(_spark_options(
                                     [r["primary_metric"] for r in rounds])).classes("w-full h-11")
                                 with ui.row().classes("gap-3"):
-                                    ui.label(f"最优 {_fmt_metric(best)}").classes("text-xs font-semibold")
+                                    ui.label(f"最优 {_fmt_metric(best)}").classes("text-xs font-semibold tabular-nums")
                                     if baseline is not None and best is not None:
                                         d = best - baseline
                                         ui.label(f"较基线 {'+' if d >= 0 else ''}{d:.3f}").classes(
-                                            "text-xs font-semibold " + ("text-green-600" if d > 0 else
+                                            "text-xs font-semibold tabular-nums " + ("text-green-600" if d > 0 else
                                                                        ("text-red-500" if d < 0 else "opacity-60")))
                         if cfg.get("stop_reason"):
                             ui.label(f"停止原因：{cfg['stop_reason']}").classes("text-xs opacity-60")
@@ -5971,12 +5971,10 @@ document.addEventListener('scroll', function(e){
                             else int(_sec_max or 0)
                         _rounds_used = len(rounds)
                         with ui.row().classes("w-full items-center gap-2 flex-wrap q-mt-xs"):
-                            ui.chip(f"轮 {_rounds_used}/{max_rounds}").props(
-                                "dense outline square color=grey").classes("text-[10px]")
-                            ui.chip(f"token {_tok_used}" + (f"/{_tok_max}" if _tok_max else "")).props(
-                                "dense outline square color=grey").classes("text-[10px]")
-                            ui.chip("单轮时长 " + (f"≤{_sec_max}s" if _sec_max else "不限")).props(
-                                "dense outline square color=grey").classes("text-[10px]")
+                            ui.label(f"轮 {_rounds_used}/{max_rounds} · "
+                                     f"token {_tok_used}" + (f"/{_tok_max}" if _tok_max else "") + " · "
+                                     + ("单轮时长 ≤%ds" % _sec_max if _sec_max else "单轮时长不限")
+                                     ).classes("text-[11px] opacity-60 tabular-nums")
                             if cfg.get("budget_round_fired") or "熔断" in (cfg.get("stop_reason") or ""):
                                 _fired = ui.badge("已熔断").props("color=red outline square")
                                 with _fired:
@@ -6024,18 +6022,17 @@ document.addEventListener('scroll', function(e){
                                         "text-[11px] font-semibold opacity-50")
                                     changes = r.get("args_changes") or {}
                                     if changes:
-                                        with ui.row().classes("flex-wrap gap-1"):
-                                            for k, v in changes.items():
-                                                ui.chip(f"{k} → {v}").props(
-                                                    "dense square color=blue-8 outline").classes("text-[11px]")
+                                        ui.label(" · ".join(
+                                            f"{k} {v}" for k, v in changes.items())).classes(
+                                            "text-[11px] tabular-nums opacity-80")
                                     else:
                                         ui.label("—（基线轮，官方默认超参）" if rn == 1 else "同基线"
                                                  ).classes("text-[11px] opacity-40")
                                     for c in (dec or {}).get("clamps") or []:
                                         reason = ("非白名单" if c.get("reason") == "not_in_allowlist"
                                                   else c.get("reason", "越界"))
-                                        ui.chip(f"已拦截 {c.get('key')}={c.get('requested')}（{reason}）"
-                                                ).props("dense outline square color=grey").classes("text-[11px]")
+                                        ui.label(f"已拦截 {c.get('key')}={c.get('requested')}（{reason}）"
+                                                 ).classes("text-[11px] opacity-50")
                                 with ui.column().classes("flex-1 min-w-40 gap-1"):
                                     ui.label("为什么（LLM 理由）").classes(
                                         "text-[11px] font-semibold opacity-50")
@@ -6049,27 +6046,23 @@ document.addEventListener('scroll', function(e){
                                     if _ev.get("analyzed"):
                                         _top = (_ev.get("top_confusion") or [])[:2]
                                         _worst = (_ev.get("worst_images") or [])[:1]
-                                        with ui.row().classes("flex-wrap gap-1 q-mt-xs"):
-                                            ui.chip("证据：错误分析").props(
-                                                "dense outline square color=teal").classes("text-[10px]")
-                                            for _c in _top:
-                                                ui.chip(f"混淆 {_c['gt']}→{_c['pred']}×{_c['n']}").props(
-                                                    "dense outline square color=teal-8").classes("text-[10px]")
-                                            for _w in _worst:
-                                                ui.chip(f"最差图 {Path(_w['image']).name}（错 {_w['score']}）").props(
-                                                    "dense outline square color=teal-8").classes("text-[10px]")
-                                            _traces = (dec or {}).get("tool_traces") or []
+                                        _bits = [f"混淆 {c['gt']}→{c['pred']}×{c['n']}" for c in _top]
+                                        _bits += [f"最差图 {Path(w['image']).name}（错 {w['score']}）"
+                                                  for w in _worst]
+                                        _traces = (dec or {}).get("tool_traces") or []
+                                        if _traces:
+                                            _bits.append(f"工具查询 ×{len(_traces)}")
+                                        _ev_line = ui.label("证据 · " + "，".join(_bits)).classes(
+                                            "text-[11px] opacity-60")
+                                        with _ev_line:
+                                            _tips = [_ev.get("note") or "本轮决策引用的错误分析证据摘要"]
                                             if _traces:
-                                                _tc = ui.chip(f"工具查询 ×{len(_traces)}").props(
-                                                    "dense outline square color=teal-8").classes("text-[10px]")
-                                                with _tc:
-                                                    ui.tooltip(" → ".join(
-                                                        f"{tr.get('tool')}({', '.join(f'{k}={v}' for k, v in (tr.get('args') or {}).items()) or '—'})"
-                                                        for tr in _traces) or "本轮工具调用轨迹")
-                                        ui.tooltip(_ev.get("note") or "本轮决策引用的错误分析证据摘要")
+                                                _tips.append("调用轨迹：" + " → ".join(
+                                                    f"{tr.get('tool')}({', '.join(f'{k}={v}' for k, v in (tr.get('args') or {}).items()) or '—'})"
+                                                    for tr in _traces))
+                                            ui.tooltip("；".join(_tips))
                                     elif rn > 1:
-                                        ui.chip("证据：错误分析未跑").props(
-                                            "dense outline square color=grey").classes("text-[10px]")
+                                        ui.label("证据：错误分析未跑").classes("text-[11px] opacity-40")
                                 with ui.column().classes("flex-1 min-w-40 gap-1"):
                                     ui.label("效果（主指标）").classes(
                                         "text-[11px] font-semibold opacity-50")
@@ -6089,12 +6082,12 @@ document.addEventListener('scroll', function(e){
                                         pv = prev_by_round.get(rn)
                                         if pv is None:
                                             ui.label(f"基线 {r['primary_metric']:.3f}").classes(
-                                                "text-[11px] font-semibold")
+                                                "text-[11px] font-semibold tabular-nums")
                                         else:
                                             d = r["primary_metric"] - pv
                                             ui.label(f"{r['primary_metric']:.3f} "
                                                      f"（{'↑' if d >= 0 else '↓'}{abs(d):.3f}）").classes(
-                                                "text-[11px] font-semibold " +
+                                                "text-[11px] font-semibold tabular-nums " +
                                                 ("text-green-600" if d > 0 else
                                                  ("text-red-500" if d < 0 else "opacity-60")))
                             # 重要性条（最新决策依据；归档快照见决策记录）
@@ -6118,21 +6111,20 @@ document.addEventListener('scroll', function(e){
                         next_round = len([r for r in rounds]) + 1
                         latest = (cfg.get("history") or [{}])[-1]
                         with ui.card().classes("w-full gap-2").style(
-                                "border:1px solid rgba(245,158,11,.45);"
-                                "background:rgba(245,158,11,.07)"):
+                                "border-left:3px solid #d97706"):
                             with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                                 ui.icon("hourglass_top" if waiting else "pause_circle").classes(
-                                    "text-amber-500")
-                                ui.label(f"{'⏳ 等待审批 — 轮 ' + str(next_round) + ' 方案已就绪' if waiting else '已暂停，处理后可继续'}"
+                                    "text-amber-600")
+                                ui.label(f"{'等待审批 — 轮 ' + str(next_round) + ' 方案已就绪' if waiting else '已暂停，处理后可继续'}"
                                          ).classes("font-semibold text-sm")
                                 if waiting:
                                     ui.label("桌面通知已发送 · 放行即排队").classes(
                                         "text-[11px] opacity-50")
                             with ui.row().classes("w-full items-center gap-2 flex-wrap"):
                                 if waiting and latest.get("changes"):
-                                    with ui.row().classes("flex-wrap gap-1 flex-1"):
-                                        for k, v in (latest.get("changes") or {}).items():
-                                            ui.chip(f"{k} → {v}").props("dense square").classes("text-[11px]")
+                                    ui.label(" · ".join(
+                                        f"{k} {v}" for k, v in (latest.get("changes") or {}).items())
+                                    ).classes("text-[12px] tabular-nums opacity-80 flex-1")
                                 elif waiting:
                                     ui.label("（无超参变更）").classes("text-[11px] opacity-40")
                                 if waiting:
