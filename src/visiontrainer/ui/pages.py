@@ -1667,9 +1667,9 @@ def _select_with_sync(table, state, key: str, render, after=None, sync_selected=
 
 
 AI_STYLE = """
-/* ============ AI 风格主题（深浅两模式适配，只动外观不动 Quasar 行为） ============ */
+/* ============ 全局主题（设计克制：无渐变/无玻璃拟态/语义色克制，去 AI 味规则见记忆 ui-de-ai-style） ============ */
 :root {
-  --ai-grad: linear-gradient(135deg, #6366f1 0%, #8b5cf6 52%, #06b6d4 100%);
+  --ai-brand: #5898d4;
   --ai-edge: rgba(148, 163, 184, .16);
 }
 
@@ -1678,125 +1678,83 @@ AI_STYLE = """
   overflow: hidden;
 }
 
-/* 主内容区：品牌色氛围光晕（浅色更淡，深色更明显） */
-.ai-main {
-  background-image:
-    radial-gradient(1100px 480px at 85% -8%, rgba(99, 102, 241, .06), transparent 62%),
-    radial-gradient(900px 420px at -8% 108%, rgba(6, 182, 212, .05), transparent 62%);
-}
-body.body--dark .ai-main {
-  background-image:
-    radial-gradient(1100px 480px at 85% -8%, rgba(99, 102, 241, .13), transparent 62%),
-    radial-gradient(900px 420px at -8% 108%, rgba(6, 182, 212, .09), transparent 62%);
-}
-
-/* 页面标题：品牌渐变文字 */
+/* 页面标题：实色，层级靠字重 */
 .ai-title {
-  background-image: linear-gradient(118deg, #1e293b 25%, #4f46e5 68%, #0e7490 100%);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+  color: #0f172a;
 }
 body.body--dark .ai-title {
-  background-image: linear-gradient(118deg, #e2e8f0 25%, #a5b4fc 68%, #67e8f9 100%);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
+  color: #e2e8f0;
 }
 
-/* 侧栏：深空渐变 + 顶部渐变 logo + 当前项发光指示 */
+/* 侧栏：实色深底 + 当前项实色指示（无发光） */
 .ai-nav {
-  background: linear-gradient(180deg, #090d1a 0%, #101827 100%) !important;
+  background: #0f172a !important;
   border-right: 1px solid rgba(148, 163, 184, .09) !important;
 }
-.ai-logo {
-  background-image: var(--ai-grad);
-  -webkit-background-clip: text; background-clip: text; color: transparent;
-  letter-spacing: .14em; font-size: 15px; font-weight: 800;
-}
 .ai-nav .ai-active .q-btn {
-  background: rgba(99, 102, 241, .22) !important;
-  box-shadow: 0 0 14px rgba(99, 102, 241, .38);
-  border: 1px solid rgba(129, 140, 248, .45);
+  background: rgba(88, 152, 212, .16) !important;
+  border: 1px solid rgba(88, 152, 212, .35);
 }
 
-/* 卡片：玻璃拟态（大圆角 + 细半透明边 + 背景模糊 + 柔和影） */
+/* 卡片：普通卡（细边 + 轻影，无毛玻璃无悬停发光） */
 main .q-card, .q-dialog .q-card {
-  border-radius: 14px !important;
+  border-radius: 10px !important;
   border: 1px solid var(--ai-edge);
-  backdrop-filter: blur(10px);
-  -webkit-backdrop-filter: blur(10px);
-  box-shadow: 0 4px 22px rgba(15, 23, 42, .06);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, .05);
 }
 body.body--dark main .q-card, body.body--dark .q-dialog .q-card {
-  background: rgba(29, 32, 45, .74) !important;
-  box-shadow: 0 6px 26px rgba(0, 0, 0, .38);
+  background: #1d202d !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .3);
 }
-main .q-card:hover { box-shadow: 0 8px 30px rgba(99, 102, 241, .14); }
 
-/* 主按钮：品牌渐变 + 悬停发光（危险/成功色保持语义） */
-/* 主按钮渐变走 ::before 覆层——Quasar 按钮基类会清 background-image，伪元素无层叠竞争 */
-.q-btn--unelevated.bg-primary {
-  position: relative; overflow: hidden;
-  box-shadow: 0 2px 12px rgba(99, 102, 241, .28);
-  border-radius: 10px;
-  transition: box-shadow .2s ease, filter .2s ease;
-}
-.q-btn--unelevated.bg-primary::before {
-  content: ""; position: absolute; inset: 0;
-  background-image: var(--ai-grad);
-  border-radius: inherit; z-index: 0;
-}
-.q-btn--unelevated.bg-primary > .q-btn__content { position: relative; z-index: 1; }
-.q-btn--unelevated.bg-primary:hover {
-  box-shadow: 0 4px 20px rgba(99, 102, 241, .48);
-  filter: brightness(1.07);
-}
-.q-btn { border-radius: 10px; }
+/* 主按钮：实色品牌色（Quasar bg-primary 原色），无渐变无发光 */
+.q-btn--unelevated.bg-primary { border-radius: 8px; }
+.q-btn { border-radius: 8px; }
 
-/* 表格：圆角容器 + 表头微底色 + 行悬停高亮 */
-.q-table__container { border-radius: 12px !important; }
-.q-table thead tr th { background: rgba(99, 102, 241, .05) !important; }
-body.body--dark .q-table thead tr th { background: rgba(99, 102, 241, .10) !important; }
+/* 表格：圆角容器 + 中性表头微底色 + 中性行悬停；数字等宽对齐 */
+.q-table__container { border-radius: 10px !important; }
+.q-table thead tr th { background: rgba(100, 116, 139, .06) !important; }
+body.body--dark .q-table thead tr th { background: rgba(100, 116, 139, .10) !important; }
 .q-table tbody tr { transition: background .15s ease; }
-.q-table tbody tr:hover { background: rgba(99, 102, 241, .06) !important; }
+.q-table tbody tr:hover { background: rgba(100, 116, 139, .05) !important; }
+main .q-table td, main .q-table th { font-variant-numeric: tabular-nums; }
 
 /* 徽章 / 横幅 / 通知圆角 */
-.q-badge { border-radius: 6px; }
-.q-banner { border-radius: 12px; }
-.q-notification { border-radius: 12px !important; }
+.q-badge { border-radius: 4px; }
+.q-banner { border-radius: 8px; }
+.q-notification { border-radius: 8px !important; }
 
-/* 输入聚焦光环 */
-.q-field--focused .q-field__control { border-radius: 10px; }
-.q-field--filled .q-field__control::before, .q-field--outlined .q-field__control::before { border-radius: 10px; }
+/* 输入圆角 */
+.q-field--focused .q-field__control { border-radius: 8px; }
+.q-field--filled .q-field__control::before, .q-field--outlined .q-field__control::before { border-radius: 8px; }
 
-/* 对话框：毛玻璃遮罩 + 弹入动画 */
+/* 对话框：素遮罩 + 简单滑入（无回弹） */
 .q-dialog__backdrop {
-  background: rgba(8, 12, 26, .45) !important;
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
+  background: rgba(15, 23, 42, .5) !important;
 }
-.q-dialog__inner > div { animation: ai-pop .24s cubic-bezier(.34, 1.35, .64, 1); }
-@keyframes ai-pop { from { opacity: 0; transform: translateY(12px) scale(.985); } }
+.q-dialog__inner > div { animation: ai-pop .18s ease-out; }
+@keyframes ai-pop { from { opacity: 0; transform: translateY(8px); } }
 
-/* 细滚动条 */
+/* 细滚动条（中性） */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: rgba(100, 116, 139, .35); border-radius: 8px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(99, 102, 241, .5); }
+::-webkit-scrollbar-thumb:hover { background: rgba(100, 116, 139, .55); }
 
 /* 分隔线柔化 */
 .q-separator { opacity: .6; }
 """
 
 
-# 产品标识：检测框四角括号（视觉检测）+ 上升收敛曲线（训练过程），品牌渐变与主题一致
+# 产品标识：检测框四角括号（视觉检测）+ 上升收敛曲线（训练过程），品牌单色
 _LOGO_SVG = (
     '<svg width="34" height="34" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">'
-    '<defs><linearGradient id="vt-g" x1="4" y1="4" x2="32" y2="32" gradientUnits="userSpaceOnUse">'
-    '<stop stop-color="#6366f1"/><stop offset=".52" stop-color="#8b5cf6"/>'
-    '<stop offset="1" stop-color="#06b6d4"/></linearGradient></defs>'
-    '<path d="M2.5 10.5V5A2.5 2.5 0 0 1 5 2.5h5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
-    '<path d="M25.5 2.5H31A2.5 2.5 0 0 1 33.5 5v5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
-    '<path d="M33.5 25.5V31a2.5 2.5 0 0 1-2.5 2.5h-5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
-    '<path d="M10.5 33.5H5A2.5 2.5 0 0 1 2.5 31v-5.5" stroke="url(#vt-g)" stroke-width="3.2" stroke-linecap="round"/>'
-    '<path d="M8 26c4.5-1 6.5-8 10.5-11 3-2.2 7-4 10-5.5" stroke="url(#vt-g)" stroke-width="2.6" '
+    '<defs></defs>'
+    '<path d="M2.5 10.5V5A2.5 2.5 0 0 1 5 2.5h5.5" stroke="#5898d4" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M25.5 2.5H31A2.5 2.5 0 0 1 33.5 5v5.5" stroke="#5898d4" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M33.5 25.5V31a2.5 2.5 0 0 1-2.5 2.5h-5.5" stroke="#5898d4" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M10.5 33.5H5A2.5 2.5 0 0 1 2.5 31v-5.5" stroke="#5898d4" stroke-width="3.2" stroke-linecap="round"/>'
+    '<path d="M8 26c4.5-1 6.5-8 10.5-11 3-2.2 7-4 10-5.5" stroke="#5898d4" stroke-width="2.6" '
     'stroke-linecap="round"/>'
     '<circle cx="28.5" cy="9.5" r="2.6" fill="#06b6d4"/>'
     '</svg>'
@@ -2037,9 +1995,9 @@ document.addEventListener('scroll', function(e){
                     return
                 # ui.banner 在 NiceGUI 3.x 已移除（2026-09-21 撞出：仅在有问题分支才执行，此前未被打开过）
                 with sc_col, ui.card().classes(
-                        "w-full q-py-sm gap-1 rounded-lg " +
-                        ("bg-red-100 text-red-900" if errs else "bg-amber-100 text-amber-900")):
-                    ui.icon("error" if errs else "info").classes("q-mr-sm")
+                        "w-full q-py-sm gap-1 rounded-lg").style(
+                        "border-left:3px solid " + ("#dc2626" if errs else "#d97706")):
+                    ui.icon("error" if errs else "info").classes("q-mr-sm opacity-70")
                     with ui.column().classes("flex-1 gap-0"):
                         ui.label(f"启动自检发现 {len(errs)} 项错误"
                                  + (f"、{len(warns)} 项提示" if warns else "")
@@ -2316,9 +2274,9 @@ document.addEventListener('scroll', function(e){
                             _snap_kv("预训练权重", f"{winfo.get('name') or _model_short(winfo.get('path'))}"
                                      + (f" · sha256 {winfo['sha256'][:12]}" if winfo.get("sha256") else "（训练端解析）"))
                             _snap_kv("冻结时间", snap.get("frozen_at", "—"))
-                            with ui.row().classes("w-full flex-wrap gap-1"):
-                                for k, v in list((snap.get("train_args") or {}).items())[:14]:
-                                    ui.chip(f"{k} = {v}").props("dense outline square").classes("text-[10px]")
+                            ui.label(" · ".join(
+                                f"{k} = {v}" for k, v in list((snap.get("train_args") or {}).items())[:14])
+                            ).classes("text-[10px] tabular-nums opacity-70 break-all")
                             ui.label("数据集此后重切/排除/改名，本快照不受影响——历史 Run 可完整复现训练输入"
                                      ).classes("text-[11px] opacity-45")
 
@@ -2406,24 +2364,22 @@ document.addEventListener('scroll', function(e){
                                 sm = analysis.get("summary") or {}
                                 c = sm.get("counts") or {}
                                 sw = analysis.get("sweep") or {}
-                                with ui.row().classes("w-full flex-wrap gap-1 items-center"):
-                                    for txt, col in ((f"P {sm.get('precision', '—')}", "blue"),
-                                                     (f"R {sm.get('recall', '—')}", "blue"),
-                                                     (f"F1 {sm.get('f1', '—')}", "blue"),
-                                                     (f"TP {c.get('tp', 0)}", "green"),
-                                                     (f"FP {c.get('fp', 0)}", "red"),
-                                                     (f"FN {c.get('fn', 0)}", "orange"),
-                                                     (f"混淆 {c.get('confusion', 0)}", "purple")):
-                                        ui.chip(txt).props(f"dense square outline color={col}").classes("text-[11px]")
+                                with ui.row().classes("w-full flex-wrap gap-x-3 items-center"):
+                                    ui.label(" · ".join(
+                                        [f"P {sm.get('precision', '—')}", f"R {sm.get('recall', '—')}",
+                                         f"F1 {sm.get('f1', '—')}", f"TP {c.get('tp', 0)}",
+                                         f"FP {c.get('fp', 0)}", f"FN {c.get('fn', 0)}",
+                                         f"混淆 {c.get('confusion', 0)}"])).classes(
+                                        "text-[11px] tabular-nums opacity-80")
                                     if sw.get("recommended_conf") is not None:
-                                        ui.chip(f"建议 conf {sw['recommended_conf']}"
-                                                f"（F1 {sw.get('recommended_f1')}）").props(
-                                            "dense square color=amber-8").classes("text-[11px]")
+                                        ui.label(f"建议 conf {sw['recommended_conf']}"
+                                                 f"（F1 {sw.get('recommended_f1')}）").classes(
+                                            "text-[11px] tabular-nums opacity-80")
                                     if (sm.get("small_objects") or {}).get("total"):
                                         so = sm["small_objects"]
-                                        ui.chip(f"小目标 GT 占比 {so['share']:.0%}"
-                                                f"（{so['count']}/{so['total']}）").props(
-                                            "dense square outline color=grey").classes("text-[11px]")
+                                        ui.label(f"小目标 GT 占比 {so['share']:.0%}"
+                                                 f"（{so['count']}/{so['total']}）").classes(
+                                            "text-[11px] tabular-nums opacity-70")
                                     ea_conf = _labeled("conf", ui.number, w="w-36", label_w="w-10",
                                                        value=sm.get("conf") or 0.25,
                                                        min=0.01, max=1.0, step=0.05)
@@ -2432,9 +2388,12 @@ document.addEventListener('scroll', function(e){
                                     rea_btn = ui.button("重算", icon="refresh",
                                                         on_click=lambda: do_analysis(uid, float(ea_conf.value or 0.25), rea_btn)
                                                         ).props("outline dense")
-                                for tc in (sm.get("top_confusions") or [])[:4]:
-                                    ui.chip(f"混淆 {tc['gt']}→{tc['pred']} ×{tc['count']}"
-                                            ).props("dense square outline color=purple").classes("text-[11px]")
+                                _tc_txt = "，".join(
+                                    f"{tc['gt']}→{tc['pred']} ×{tc['count']}"
+                                    for tc in (sm.get("top_confusions") or [])[:4])
+                                if _tc_txt:
+                                    ui.label("Top 混淆：" + _tc_txt).classes(
+                                        "text-[11px] tabular-nums opacity-70")
                                 with ui.row().classes("w-full gap-4 items-start flex-wrap"):
                                     with ui.column().classes("flex-1 min-w-[18rem]"):
                                         with ui.label("阈值探索").classes("text-xs font-semibold opacity-70"):
@@ -2651,11 +2610,10 @@ document.addEventListener('scroll', function(e){
                                                         with img:
                                                             ui.tooltip("点击查看大图")
                                                         if boxes:
-                                                            with ui.row().classes("flex-wrap gap-1"):
-                                                                for b in boxes[:10]:
-                                                                    ui.chip(f"{b['cls']} {b['conf']}").props(
-                                                                        "dense square outline").classes(
-                                                                        "text-[11px]")
+                                                            ui.label("，".join(
+                                                                f"{b['cls']} {b['conf']}"
+                                                                for b in boxes[:10])).classes(
+                                                                "text-[11px] tabular-nums opacity-70")
                                                         else:
                                                             ui.label("（无检出框）").classes(
                                                                 "text-xs opacity-40")
@@ -3026,7 +2984,7 @@ document.addEventListener('scroll', function(e){
                         ratio = ready / p["total"]
                         warn = ratio < 0.8
                         rv_hint.set_text(
-                            f"{'⚠️' if warn else '✅'} 审查完成度：通过+跳过 {ready}/{p['total']}（{ratio:.0%}）"
+                            f"审查完成度：通过+跳过 {ready}/{p['total']}（{ratio:.0%}）"
                             + ("——低于 80%，建议先到数据集「标注审查」页过一遍" if warn else "")
                             + (f" · 负样本 {p['unlabeled']} 不计" if p["unlabeled"] else ""))
 
@@ -3090,7 +3048,7 @@ document.addEventListener('scroll', function(e){
                             parts.append(f"高级参数 {n} 项")
                         if est_rate and c_epochs.value:
                             parts.append(f"⏱ ~{_fmt_duration(est_rate['seconds_per_epoch'] * float(c_epochs.value))}")
-                        summary_label.set_text("🚀 将排队：" + " · ".join(str(x) for x in parts))
+                        summary_label.set_text("将排队：" + " · ".join(str(x) for x in parts))
 
                     with ui.expansion("高级训练参数", icon="tune",
                                       caption="ultralytics 8.4.100 官方全量 · 留空走官方默认").classes("w-full"):
@@ -3273,7 +3231,7 @@ document.addEventListener('scroll', function(e){
                     for d in deps:
                         if d["deployment_id"] not in seen_dep:
                             if seen_dep and d["verified"]:  # 首屏静默（不追认历史部署）
-                                ui.notify(f"✅ 部署完成并通过导出验证：{Path(d['model_lib_dir']).name}",
+                                ui.notify(f"部署完成并通过导出验证：{Path(d['model_lib_dir']).name}",
                                           type="positive")
                             seen_dep.add(d["deployment_id"])
                 except Exception:  # noqa: BLE001
@@ -3433,10 +3391,9 @@ document.addEventListener('scroll', function(e){
                                 _dir_open_btn(meta["source_dir"])
                         with ui.row().classes("w-full gap-2 items-start"):
                             ui.label("类别").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
-                            with ui.row().classes("flex-wrap gap-1 flex-1 min-w-0"):
-                                ui.label(f"共 {len(meta['classes'])} 类（行序即 id）").classes("text-xs opacity-70")
-                                for c in meta["classes"]:
-                                    ui.chip(c).props("dense outline square").classes("text-[11px]")
+                            ui.label(f"共 {len(meta['classes'])} 类（行序即 id）："
+                                     + "，".join(meta["classes"])).classes(
+                                "text-xs opacity-70 break-all flex-1 min-w-0")
                         brief = next((m for m in meta.get("manifests", [])
                                       if m["uid"] == meta.get("active_manifest")), None)
                         if brief:
@@ -4168,17 +4125,16 @@ document.addEventListener('scroll', function(e){
                     return
                 s = payload.get("summary", {})
                 boxable = s.get("boxable")
-                # 「标注」chip = 标注条数（与类别分布/体检同口径）；分类任务无框概念，flag 即标注，按已标图数计
+                # 「标注」= 标注条数（与类别分布/体检同口径）；分类任务无框概念，flag 即标注，按已标图数计
                 n_ann = (sum(r.get("n") or 0 for r in payload.get("per_image") or [])
                          if boxable else s.get("labeled", 0))
-                with ui.row().classes("w-full flex-wrap gap-1"):
-                    for txt in (f"图片 {s.get('images', 0)}", f"标注 {n_ann}",
-                                f"train {s.get('train', 0)}", f"val {s.get('val', 0)}",
-                                f"负样本 {s.get('background', 0)}", f"清单 {payload.get('manifest_uid', '—')}"):
-                        c = ui.chip(txt).props("dense outline square").classes("text-[11px]")
-                        if txt.startswith("标注"):
-                            with c:
-                                ui.tooltip("标注条数（框/多边形/旋转框），非图片数")
+                _stats_txt = " · ".join(
+                    [f"图片 {s.get('images', 0)}", f"标注 {n_ann}", f"train {s.get('train', 0)}",
+                     f"val {s.get('val', 0)}", f"负样本 {s.get('background', 0)}",
+                     f"清单 {payload.get('manifest_uid', '—')}"])
+                _stat = ui.label(_stats_txt).classes("text-[11px] tabular-nums opacity-70")
+                with _stat:
+                    ui.tooltip("标注条数（框/多边形/旋转框），非图片数")
                 _lbl = ui.label("点柱 / 框选可筛图").classes("text-[11px] opacity-45")
                 with _lbl:
                     ui.tooltip("直方图点柱、热力图框选（右上角矩形工具）→ 筛出图片清单，可一键直达 X-AnyLabeling")
@@ -4265,10 +4221,10 @@ document.addEventListener('scroll', function(e){
                             ui.icon("straighten").classes("text-[14px] opacity-50")
                             with ui.label("目标尺寸").classes("opacity-60"):
                                 ui.tooltip("COCO 口径，按 640 基准换算：小 <32² · 中 32²–96² · 大 ≥96² px")
-                            for k, zh, c in (("small", "小", "amber"), ("medium", "中", "blue"),
-                                             ("large", "大", "green")):
-                                ui.badge(f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
-                                         ).props(f"color={c} outline").style("font-size:10px")
+                            ui.label(" · ".join(
+                                f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
+                                for k, zh in (("small", "小"), ("medium", "中"), ("large", "大")))).classes(
+                                "text-[11px] tabular-nums opacity-70")
                 else:
                     ui.label("分类任务无目标框：直方图 / 尺寸热力图 / 中心热力图不适用").classes("text-xs opacity-40")
                 rerender_drill()
@@ -4530,18 +4486,18 @@ document.addEventListener('scroll', function(e){
                                  ).classes("text-xs opacity-40")
                         return
                     sm = audit.get("summary", {})
-                    with ui.row().classes("w-full flex-wrap gap-1"):
-                        ui.chip(f"精确重复 {sm.get('exact', 0)} 组").props("dense square outline " + (
-                            "color=red" if sm.get("exact") else "color=grey")).classes("text-[11px]")
-                        ui.chip(f"近似重复 {sm.get('near', 0)} 组").props("dense square outline " + (
-                            "color=orange" if sm.get("near") else "color=grey")).classes("text-[11px]")
-                        ui.chip(f"跨切分泄漏 {sm.get('leaks', 0)} 对").props("dense square outline " + (
-                            "color=red" if sm.get("leaks") else "color=grey")).classes("text-[11px]")
-                        ui.chip("类别均衡" if sm.get("imbalance_ok", True) else "类别失衡"
-                                ).props("dense square outline " + (
-                                    "color=green" if sm.get("imbalance_ok", True) else "color=red")).classes("text-[11px]")
+                    _v = [("精确重复", sm.get("exact", 0)), ("近似重复", sm.get("near", 0)),
+                          ("跨切分泄漏", sm.get("leaks", 0))]
+                    _ok = bool(sm.get("imbalance_ok", True))
+                    with ui.row().classes("w-full flex-wrap gap-x-3 items-center text-[11px] tabular-nums"):
+                        for _lbl, _n in _v:
+                            _bad = bool(_n)
+                            ui.label(f"{_lbl} {_n}").classes(
+                                "text-red-600" if _bad else "opacity-70")
+                        ui.label("类别均衡" if _ok else "类别失衡").classes(
+                            "opacity-70" if _ok else "text-red-600")
                         if audit.get("from_cache"):
-                            ui.chip("缓存命中").props("dense square color=blue outline").classes("text-[11px]")
+                            ui.label("缓存命中").classes("opacity-50")
                         ui.label(f"{_fmt_ts(audit.get('checked_at'))} · 体检范围 {audit.get('files', 0)} 张（活跃清单成员）"
                                  ).classes("text-[11px] opacity-50")
                     if audit.get("skipped_undecodable"):
@@ -5401,7 +5357,7 @@ document.addEventListener('scroll', function(e){
                 rows = []
                 for t in ordered:
                     row = {"tid": str(t["id"]),
-                           "name": ("⭐ " if t["id"] == baseline_id else "") + t["name"],
+                           "name": (t["name"] + "（基准）") if t["id"] == baseline_id else t["name"],
                            "dot": rank_dot[t["id"]]}
                     for j, k in enumerate(shown_keys):
                         v = (t.get("train_args") or {}).get(k)
@@ -5458,10 +5414,9 @@ document.addEventListener('scroll', function(e){
                                           caption="相关非因果，样本少时弱参考 · 已注入 Agent 上下文"
                                           ).classes("w-full"):
                             ui.echart(_importance_options(imp)).classes("w-full h-56")
-                    with ui.row().classes("w-full flex-wrap gap-1"):
-                        ui.label("任务级超参：").classes("text-xs opacity-50")
-                        for k, v in (data["train_args"] or {}).items():
-                            ui.chip(f"{k} = {v}").props("dense outline square").classes("text-[11px]")
+                    ui.label("任务级超参：" + " · ".join(
+                        f"{k} = {v}" for k, v in (data["train_args"] or {}).items())).classes(
+                        "text-[11px] tabular-nums opacity-70 break-all")
                     rows = []
                     prev_metric = None
                     for r in data["rounds"]:
@@ -5596,7 +5551,7 @@ document.addEventListener('scroll', function(e){
                         state["seen_deployed"].add(d["deployment_id"])
                     if newly and not state.pop("dep_first_render", False):
                         last = newly[-1]
-                        ui.notify(f"✅ 部署完成并通过导出验证：{Path(last['model_lib_dir']).name}。"
+                        ui.notify(f"部署完成并通过导出验证：{Path(last['model_lib_dir']).name}。"
                                   f"在 X-AnyLabeling 模型下拉 → Custom → 加载 {last['model_lib_dir']}/config.yaml",
                                   type="positive")
 
@@ -5833,14 +5788,16 @@ document.addEventListener('scroll', function(e){
                 with banner_col:
                     for r in rows:
                         if r.get("agent_state") == "waiting_approval":
-                            with ui.card().classes("w-full q-py-sm gap-1 rounded-lg bg-amber-100 text-amber-900"):
-                                ui.icon("hourglass_top").classes("q-mr-sm")
+                            with ui.card().classes("w-full q-py-sm gap-1 rounded-lg").style(
+                                    "border-left:3px solid #d97706"):
+                                ui.icon("hourglass_top").classes("q-mr-sm opacity-70")
                                 ui.label(f"「{r['name']}」等待审批：LLM 已给出下一轮超参方案").classes("text-sm")
                                 ui.button("去处理", icon="arrow_forward", on_click=lambda rr=r: select(rr)
                                           ).props("unelevated dense color=amber-8")
                         elif r.get("agent_state") == "paused":
-                            with ui.card().classes("w-full q-py-sm gap-1 rounded-lg bg-orange-100 text-orange-900"):
-                                ui.icon("pause_circle").classes("q-mr-sm")
+                            with ui.card().classes("w-full q-py-sm gap-1 rounded-lg").style(
+                                    "border-left:3px solid #ea580c"):
+                                ui.icon("pause_circle").classes("q-mr-sm opacity-70")
                                 ui.label(f"「{r['name']}」已暂停（LLM 决策失败等，等待人工处理）").classes("text-sm")
                                 ui.button("去处理", icon="arrow_forward", on_click=lambda rr=r: select(rr)
                                           ).props("unelevated dense color=orange-8")
