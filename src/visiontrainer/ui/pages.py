@@ -536,16 +536,20 @@ def _drill_desc(drill: dict) -> str:
 
 
 def _open_in_xal(image: str) -> None:
-    """在 X-AnyLabeling 桌面端打开指定图片（训练 python 即其 venv；平台自身零 Qt）。"""
+    """在 X-AnyLabeling 桌面端打开指定图片（训练 python 即其 venv；平台自身零 Qt）。
+
+    单实例复用：已开窗口直接在其内加载并前置，不再另开新窗（探测与收发由 xal_open_entry 负责）。
+    """
     import subprocess
     import sys
 
     from ..config import load_config
 
     py = load_config().get("training", {}).get("python") or sys.executable
+    entry = Path(__file__).resolve().parents[1] / "training" / "xal_open_entry.py"
     try:
         subprocess.Popen(
-            [py, "-c", "from anylabeling.app import main; main()", "--filename", image],
+            [py, str(entry), image],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True)
         ui.notify(f"已在 X-AnyLabeling 中打开 {Path(image).name}", type="positive")

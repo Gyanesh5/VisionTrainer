@@ -2,7 +2,7 @@
 
 Version 1.3 · 2026-10-31 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，见 `.scratch/visiontrainer-build/issues/`）；v1.1 增补竞品对标优化 17 条 + quick-win（[M6/M7/M8]，来源 `.scratch/competitive-optimization/`）；v1.2 增补标注质量审查闭环（新条目标注 [R#]，来源 `.scratch/annotation-quality-review/` 地图 05–08 号票，存储决策见 [ADR 0003](adr/0003-review-state-in-annotation-json.md)）；**v1.3 重设计 Agent 域为底座 + 双决策提供方**（§2.5 重写，来源 `.scratch/agent-redesign/` 调研 + 访谈，决策见 [ADR 0006](adr/0006-agent-base-and-decision-providers.md)/[0007](adr/0007-approval-gate-human-on-the-loop.md)，实施 M10）
 
-单机 YOLO 训练平台：**数据集管理 → GPU 调度训练队列 → 实时曲线监控 → 结果归档对比**核心闭环，以 **Agent 自动调参**为核心卖点。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录与模型库打通 [T0]。
+单机 YOLO 训练平台：**数据集管理 → GPU 调度训练队列 → 实时曲线监控 → 结果归档对比**核心闭环，以 **Agent 自动调参**为核心卖点。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录与模型库打通 [T0]；各页「在 X-AnyLabeling 中打开」按钮单实例复用（已开窗口直接加载目标图并前置，`training/xal_open_entry.py` 本地 socket 探测；未保存修改沿用桌面端「保存/放弃/取消」语义，2026-11-02）。
 
 ## 1. 总体架构
 
