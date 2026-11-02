@@ -811,14 +811,19 @@ def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> d
 
 
 def relabel_refresh(name: str, image: str | None = None, force: bool = False,
-                    root: Path | None = None, progress_cb=None) -> dict:
+                    root: Path | None = None, progress_cb=None,
+                    format: str = "yolo") -> dict:
     """标注变更联动（M9 01 号票）：单图（image 给定）或全清单按 mtime 增量重转换派生 YOLO txt。
 
     force=True 跳过增量判断全量重转换——转换器规则变更后（如 OBB 越界改钳制），
-    JSON mtime 未变但派生 txt 已过时，增量模式看不见，须强制重建。
+    JSON mtime 未变但派生 txt 已过时，增量模式看不见，须强制重建；「导出标注」按钮
+    （YOLO 格式）即此路径。
     返回 {refreshed, drops}——刷新过程中出现的转换丢弃逐条带回（不自动确认，重校验后入账）。
     progress_cb(phase, cur, total)：全清单模式逐 20 张回调（UI 进度条用）。
+    format：导出格式，当前仅 yolo（派生结构即 YOLO 导出，训练直接使用）。
     """
+    if format != "yolo":
+        raise DatasetError("invalid_args", f"暂不支持的导出格式：{format}（当前仅支持 yolo）")
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集只读，无重转换概念")
@@ -885,7 +890,7 @@ def ensure_fresh_derivation(data_yaml: str | Path) -> dict:
 
     data_yaml：Task 冻结的 <ds>/derived/<uid>/data.yaml（钉住清单版本，与运行快照同源）。
     逐图内容比对（非 mtime——转换器规则升级也能查出），漂移文件就地重转换，使
-    「改完标注直接开训」成为唯一正确用法，不再依赖手动「重建派生标注」。
+    「改完标注直接开训」成为唯一正确用法，不再依赖手动「导出标注」。
 
     返回 {"checked", "refreshed"（漂移图片绝对路径名单）, "dataset"}。
     外部数据集（平台零写入）no-op。Raises:

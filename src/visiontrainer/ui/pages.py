@@ -3357,26 +3357,11 @@ document.addEventListener('scroll', function(e){
                                                     on_click=lambda: do_validate(name, val_btn))
                                 val_btn.props("outline dense")
 
-                                async def _do_relabel_refresh(ds_name: str, _btn=None) -> None:
-                                    op = ops.begin(f"ds:{ds_name}:relabel", f"重建派生标注 · {ds_name}",
-                                                   scope=ds_name)
-                                    try:
-                                        with _busy(_btn):
-                                            r = await _io(ds.relabel_refresh, ds_name, None, True, None,
-                                                          op.progress)
-                                        op.finish()
-                                        n_drop = len(r.get("drops") or [])
-                                        ui.notify(f"已重转换 {r['refreshed']} 个派生标注"
-                                                  + (f"（丢弃 {n_drop} 条，明细见重新校验）" if n_drop else ""),
-                                                  type="positive")
-                                    except Exception as exc:  # noqa: BLE001
-                                        op.fail(str(exc))
-                                        ui.notify(f"重转换失败：{exc}", type="negative")
-
-                                rfr_btn = ui.button("重建派生标注", icon="sync_alt",
-                                                    on_click=lambda: _do_relabel_refresh(name, rfr_btn))
-                                rfr_btn.props("outline dense").tooltip(
-                                    "全量重转换派生 YOLO 标注（转换器规则变更后的恢复通道；日常标注修改自动增量刷新）")
+                                exp_btn = ui.button("导出标注", icon="file_download",
+                                                    on_click=lambda: open_export(meta))
+                                exp_btn.props("outline dense").tooltip(
+                                    "把真源标注导出为选定格式（当前仅 YOLO；转换器规则变更后的恢复通道"
+                                    "——日常标注修改自动增量刷新，无需手动导出）")
                                 res_btn = ui.button("重切分", icon="call_split", on_click=lambda: open_resplit(meta))
                                 res_btn.props("outline dense")
                                 tile_btn = ui.button("切片", icon="grid_view",
@@ -4810,6 +4795,12 @@ document.addEventListener('scroll', function(e){
                 _tl_invalidate()  # 复位预览区/确认门并回填默认新集名
                 tiling_dialog.open()
 
+            def open_export(meta: dict) -> None:
+                exp_title.set_text(f"导出标注 {meta['name']}")
+                fmt_state["v"] = "yolo"
+                _refresh_fmt_btns()
+                export_dialog.open()
+
             def open_delete(meta: dict) -> None:
                 del_title.set_text(f"删除数据集 {meta['name']}")
                 del_note.set_text("托管数据集：删除平台侧数据（含派生结构），标注源目录永不触碰。"
@@ -4981,6 +4972,57 @@ document.addEventListener('scroll', function(e){
                             ui.notify(f"重切失败：{exc}", type="negative")
                     refresh()
                     render_detail()
+
+            # ── 导出标注（格式选择器；当前仅 YOLO 有实现 = 全量重转换派生结构，训练即用）
+            with ui.dialog() as export_dialog, ui.card().classes("w-96 gap-2"):
+                exp_title = ui.label("导出标注").classes("font-bold")
+                ui.label("把真源标注导出为所选格式；YOLO 即派生结构，训练直接使用。").classes("text-xs opacity-60")
+                export_formats = {"yolo": "YOLO", "coco": "COCO JSON", "voc": "Pascal VOC XML"}
+                fmt_state = {"v": "yolo"}
+                fmt_btns: dict[str, ui.button] = {}
+
+                def _refresh_fmt_btns() -> None:
+                    for k, b in fmt_btns.items():
+                        b.props("unelevated" if k == fmt_state["v"] else "outline")
+
+                with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                    ui.label("数据格式").classes("w-20 text-xs text-right opacity-70 shrink-0")
+                    with ui.row().classes("flex-1 min-w-0 gap-1"):
+                        for k, label in export_formats.items():
+                            fmt_btns[k] = ui.button(
+                                label, on_click=lambda k=k: _set_fmt(k)).props("dense")
+                # COCO/VOC 尚未实现：置灰不可选；服务层 format 守卫兜底
+                for k, b in fmt_btns.items():
+                    if k != "yolo":
+                        b.props("disable").tooltip("尚未支持，后续接入")
+                _refresh_fmt_btns()
+
+                def _set_fmt(k: str) -> None:
+                    fmt_state["v"] = k
+                    _refresh_fmt_btns()
+
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=export_dialog.close).props("flat")
+                    x_ok = ui.button("导出", icon="file_download",
+                                     on_click=lambda: do_export()).props("unelevated")
+
+                async def do_export() -> None:
+                    name = state["selected"]
+                    if not name:
+                        return
+                    op = ops.begin(f"ds:{name}:export", f"导出标注 · {name}", scope=name)
+                    with _busy(x_ok, "导出中…"):
+                        try:
+                            r = await _io(ds.relabel_refresh, name, None, True, None, op.progress)
+                            op.finish()
+                            export_dialog.close()
+                            n_drop = len(r.get("drops") or [])
+                            ui.notify(f"已导出 {r['refreshed']} 张图的标注（YOLO）"
+                                      + (f"（丢弃 {n_drop} 条，明细见重新校验）" if n_drop else ""),
+                                      type="positive")
+                        except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
+                            ui.notify(f"导出失败：{exc}", type="negative")
 
             # ── 切片（Tiling）：dry-run 预览确认门 + 进度；参数变更即失效须重新预览
             with ui.dialog() as tiling_dialog, ui.card().classes("w-[30rem] gap-2"):

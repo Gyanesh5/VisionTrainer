@@ -230,6 +230,11 @@ def test_relabel_refresh_single_and_incremental(tmp_path, tmp_db):
     r4 = svc.relabel_refresh("m9rf", force=True, root=root)
     assert r4["refreshed"] == 2
 
+    # format：当前仅 yolo 有实现，其余在入口即拒（导出标注格式选择器兜底）
+    with pytest.raises(DatasetError) as ei:
+        svc.relabel_refresh("m9rf", force=True, root=root, format="coco")
+    assert ei.value.code == "invalid_args" and "暂不支持" in ei.value.message
+
     with pytest.raises(DatasetError):
         svc.relabel_refresh("m9rf", image=str(src / "nope.png"), root=root)
 
