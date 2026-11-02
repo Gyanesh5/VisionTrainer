@@ -1,4 +1,4 @@
-"""X-AnyLabeling 调起子进程入口——在 X-AnyLabeling/.venv 的 python 里独立运行（不 import visiontrainer 包）。
+"""X-AnyLabeling 调起子进程入口——在 vendor/X-AnyLabeling 子模块 .venv 的 python 里独立运行（不 import visiontrainer 包）。
 
 用法：python xal_open_entry.py <image_path>
 

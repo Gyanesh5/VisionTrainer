@@ -5,8 +5,10 @@ host = "127.0.0.1"
 port = 8600
 
 [training]
-# 训练/导出子进程使用的 python 解释器（torch/ultralytics 所在环境；平台自身 venv 无 torch）
-python = "/home/wuguang/Desktop/workspace/X-AnyLabeling/.venv/bin/python"
+# 训练/导出子进程使用的 python 解释器（torch/ultralytics 所在环境；平台自身 venv 无 torch）。
+# X-AnyLabeling 已是本仓库 vendor/X-AnyLabeling 子模块（ADR 0008），venv 在子模块内，
+# 路径随克隆位置调整：git submodule update --init 后在其内建 .venv 并安装依赖。
+python = "/home/wuguang/Desktop/workspace/VisionTrainer/vendor/X-AnyLabeling/.venv/bin/python"
 # 子进程入口（真实链路；tests/stub_*.py 仅测试用，不要写进正式配置）
 trainer_entry = "~/Desktop/workspace/VisionTrainer/src/visiontrainer/training/trainer_entry.py"
 export_entry = "~/Desktop/workspace/VisionTrainer/src/visiontrainer/training/export_entry.py"

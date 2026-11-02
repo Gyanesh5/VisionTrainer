@@ -19,7 +19,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 ~/Documents/x-anylabeling-models（回注目标）← 一键部署
 ```
 
-技术栈 [T8, ADR 0002]：Python 3.12 · uv · FastAPI · NiceGUI 3.x（UI 薄层，契约框架无关）· SQLite + SQLAlchemy 2.0 · TOML 配置（密钥不进 git）。平台 venv 无 torch；训练子进程指向配置的外部 python（现 X-AnyLabeling/.venv）。
+技术栈 [T8, ADR 0002]：Python 3.12 · uv · FastAPI · NiceGUI 3.x（UI 薄层，契约框架无关）· SQLite + SQLAlchemy 2.0 · TOML 配置（密钥不进 git）。平台 venv 无 torch；训练子进程指向配置的外部 python（vendor/X-AnyLabeling 子模块 .venv，[ADR 0008](adr/0008-x-anylabeling-vendor-submodule.md)，固定 v4.0.5）。
 
 ## 2. 功能规格
 

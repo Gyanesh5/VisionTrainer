@@ -33,7 +33,7 @@ def _check_training_python(cfg: dict) -> dict:
         "label": "训练 python",
         "severity": "error" if problem else "ok",
         "summary": f"{p}（{version}）" if version else (problem or str(p)),
-        "detail": "" if not problem else "修复：设置页「训练与目录」→ 填训练环境（X-AnyLabeling/.venv）的 python 绝对路径",
+        "detail": "" if not problem else "修复：设置页「训练与目录」→ 填训练环境（vendor/X-AnyLabeling 子模块 .venv）的 python 绝对路径",
     }
 
 
