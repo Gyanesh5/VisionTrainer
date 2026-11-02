@@ -35,6 +35,8 @@ def test_open_in_xal_无实例_经入口脚本调起并脱离会话(recorder, mo
     _open_in_xal("/data/img/1.jpg")
     assert recorder["argv"] == ["/opt/xal-venv/python", str(ENTRY_PATH), "/data/img/1.jpg"]
     assert recorder["kwargs"]["start_new_session"] is True  # GUI 进程不挂平台会话
+    # 平台插件对齐桌面端手动启动（xcb）：不覆盖则 XAL 继承会话 wayland 默认，Hyprland+NVIDIA 下卡顿
+    assert recorder["kwargs"]["env"]["QT_QPA_PLATFORM"] == "xcb"
     assert ENTRY_PATH.is_file(), f"入口脚本缺位：{ENTRY_PATH}"
     assert recorder["notify"][1]["type"] == "positive"
 

@@ -539,7 +539,10 @@ def _open_in_xal(image: str) -> None:
     """在 X-AnyLabeling 桌面端打开指定图片（训练 python 即其 venv；平台自身零 Qt）。
 
     单实例复用：已开窗口直接在其内加载并前置，不再另开新窗（探测与收发由 xal_open_entry 负责）。
+    平台插件对齐桌面端手动启动（~/.local/share/applications 固定 xcb）：会话默认 QT_QPA_PLATFORM=
+    wayland 在 Hyprland+NVIDIA 上是 Qt 卡顿路径，X-AnyLabeling 画布为 CPU 光栅绘制，xcb(XWayland) 流畅。
     """
+    import os
     import subprocess
     import sys
 
@@ -550,6 +553,7 @@ def _open_in_xal(image: str) -> None:
     try:
         subprocess.Popen(
             [py, str(entry), image],
+            env={**os.environ, "QT_QPA_PLATFORM": "xcb"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True)
         ui.notify(f"已在 X-AnyLabeling 中打开 {Path(image).name}", type="positive")
