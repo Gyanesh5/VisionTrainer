@@ -5881,12 +5881,13 @@ document.addEventListener('scroll', function(e){
             def open_export(meta: dict) -> None:
                 """导出标注对话框：按本集任务类型置灰格式，三维参数每次打开复位。"""
                 state["exp_task"] = meta["task_type"]
+                state["exp_ds"] = meta["name"]
                 exp_title.set_text(f"导出标注 · {meta['name']}")
                 fmt_state["v"] = "yolo"
                 e_scope.set_value("all")
                 e_img.set_value("link")
                 e_zip.set_value(False)
-                e_split_note.set_visibility(False)
+                e_split_row.set_visibility(False)
                 exp_note.set_visibility(False)
                 _refresh_fmt_btns()
                 export_dialog.open()
@@ -6480,34 +6481,83 @@ document.addEventListener('scroll', function(e){
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.label("导出范围").classes("w-20 text-xs text-right opacity-70 shrink-0")
                     e_scope = ui.radio(EXPORT_SCOPES, value="all").props("dense")
-                e_split_note = ui.label("按切分导出的 uid 选择与写出入票 08——此刻只有全集可填"
-                                        ).classes("text-xs text-amber-500").set_visibility(False)
+                e_split_sel_holder: dict = {"box": None}
+
+                with ui.row().classes("w-full items-center gap-2") as e_split_row:
+                    ui.label("切分").classes("w-20 text-xs text-right opacity-70 shrink-0")
+                    e_split_sel = ui.select({"": "最近切分"}, label="切分", with_input=False
+                                            ).props("dense outlined").classes("flex-1")
+                    with e_split_sel:
+                        ui.tooltip("按所选切分的实效口径导出（排除与缺失被剔），train/val 分目录")
+                e_split_row.set_visibility(False)
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.label("图片").classes("w-20 text-xs text-right opacity-70 shrink-0")
                     e_img = ui.radio(EXPORT_IMAGES, value="link").props("dense")
                 e_zip = ui.checkbox("顺带打包 zip").tooltip("自包含目录之外再落一份 zip，便于拷走")
 
+                async def _load_split_opts() -> None:
+                    try:
+                        splits = await _io(ds.list_splits, state.get("exp_ds") or "")
+                    except Exception:  # noqa: BLE001
+                        splits = []
+                    opts = {"": "最近切分"}
+                    opts.update({s["uid"]: f"{s['uid']} · {_fmt_ts(s.get('created_at'))}"
+                                 for s in splits})
+                    e_split_sel.options = opts
+                    e_split_sel.value = ""
+                    if not splits:
+                        e_split_sel.set_enabled(False)
+                        e_split_sel.props("disable")
+
                 def _sync_scope() -> None:
-                    e_split_note.set_visibility(e_scope.value == "split")
+                    e_split_row.set_visibility(e_scope.value == "split")
+                    if e_scope.value == "split":
+                        asyncio.get_running_loop().create_task(_load_split_opts())
                     exp_note.set_visibility(False)
 
                 e_scope.on_value_change(lambda _e: _sync_scope())
                 exp_note = ui.label("").classes("text-xs text-amber-500").set_visibility(False)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=export_dialog.close).props("flat")
-                    ui.button("导出", icon="file_download",
-                              on_click=lambda: do_export()).props("unelevated")
+                    btn_exp = ui.button("导出", icon="file_download",
+                                        on_click=lambda: do_export(btn_exp)).props("unelevated")
 
-                def do_export() -> None:
-                    """未接线：导出的写出在票 08——不伪造成功，也不静默改写派生结构。"""
-                    exp_note.set_text(
-                        "「导出标注」尚未接线（写出在票 08）：本次没有写出任何文件。已登记的参数＝"
-                        f"{EXPORT_FORMATS[fmt_state['v']][0]} · "
-                        f"{EXPORT_SCOPES.get(e_scope.value, '全集')} · "
-                        f"{EXPORT_IMAGES.get(e_img.value, '符号链接')}"
-                        + (" · zip" if e_zip.value else ""))
-                    exp_note.set_visibility(True)
-                    ui.notify("「导出标注」还没接后端（票 08）：未写出导出目录", type="warning")
+                async def do_export(_btn=None) -> None:
+                    fmt = fmt_state["v"]
+                    task = state.get("exp_task") or "detect"
+                    support = EXPORT_FORMATS[fmt][1]
+                    if support is not None and task not in support:
+                        exp_note.set_text(f"{EXPORT_FORMATS[fmt][0]} 不支持 {TASK_TYPE_ZH.get(task, task)} 任务")
+                        exp_note.set_visibility(True)
+                        return
+                    scope = e_scope.value
+                    if scope == "split" and not (e_split_sel.options or {}).get(e_split_sel.value or ""):
+                        exp_note.set_text("该数据集还没有切分——按切分导出需先在训练表单建切分，或改选「全集」")
+                        exp_note.set_visibility(True)
+                        return
+                    ds_name = state.get("exp_ds") or ""
+                    op = ops.begin(f"ds:{ds_name}:export", f"导出标注 · {EXPORT_FORMATS[fmt][0]}",
+                                   scope=ds_name)
+                    try:
+                        with _busy(_btn):
+                            r = await _io(ds.export_annotations, ds_name, fmt,
+                                          scope=scope,
+                                          split_uid=(e_split_sel.value or None)
+                                          if scope == "split" else None,
+                                          images=e_img.value, zip_package=e_zip.value)
+                        op.finish()
+                    except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
+                        ui.notify(f"导出失败：{exc}", type="negative")
+                        return
+                    export_dialog.close()
+                    msg = (f"已导出 {sum(r['counts'].values())} 张（{EXPORT_FORMATS[fmt][0]} · "
+                           f"{'按切分' if scope == 'split' else '全集'}）→ {r['path']}")
+                    if r.get("drops") or r.get("broken"):
+                        msg += f" · 投影丢弃 {r['drops']} 条 / 不可投影 {len(r['broken'])} 张（只提示，已按负样本处理）"
+                    if r.get("zip"):
+                        msg += f" · zip {r['zip']}"
+                    ui.notify(msg, type="positive")
 
             # ── 切片（Tiling）：dry-run 预览确认门 + 进度；参数变更即失效须重新预览
             with ui.dialog() as tiling_dialog, ui.card().classes("w-[30rem] gap-2"):

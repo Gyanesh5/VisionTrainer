@@ -1653,6 +1653,48 @@ def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> d
                            "needs_confirm": report["needs_confirm"]}}
 
 
+# ---------------------------------------------------------------- 三维外部导出（票 08）
+
+def export_annotations(name: str, format_id: str, scope: str = "all",
+                       split_uid: str | None = None, images: str = "link",
+                       zip_package: bool = False, root: Path | None = None,
+                       progress=None) -> dict:
+    """三维外部导出（纯外部用途，**不读不写格式池**）。
+
+    - scope="all"：全集 = 真源全部合格文件（在盘 ∧ 未排除）；
+    - scope="split"：所选切分（split_uid 缺省取最近）的**实效口径**——排除与缺失被剔，
+      输出 train/val 两套；split_uid="" 同全集；
+    - images="link"|"copy"；zip=True 原目录之外再落一份压缩包。
+    支持矩阵按 exporters.SUPPORTED 置灰口径校验（VOC 仅 detect）。丢弃只提示不阻断。
+    """
+    from . import exporters
+
+    meta, ds_dir = _managed_dataset(name, root, "导出标注")
+    task_type = meta["task_type"]
+    classes = read_classes(ds_dir)
+    if not exporters.supports(format_id, task_type):
+        raise DatasetError("invalid_args", exporters.unsupported_reason(format_id, task_type))
+    if images not in ("link", "copy"):
+        raise DatasetError("invalid_args", f"images 只支持 link|copy：{images}")
+
+    if scope == "split" and split_uid != "":
+        split = (_resolve_stats_split(ds_dir, split_uid) if split_uid
+                 else split_lib.latest_split(ds_dir))
+        if split is None:
+            raise DatasetError("state_conflict", "数据集还没有切分：按切分导出需先建切分")
+        eff = split_lib.effective_set(ds_dir, split)
+        members = {"train": list(eff["train"]), "val": list(eff["val"])}
+        suffix = f"-{split['uid']}"
+    else:
+        members = {"": split_lib.eligible_names(ds_dir, approved_only=False)}
+        suffix = ""
+
+    result = exporters.export_dataset(ds_dir, task_type, classes, format_id, members,
+                                      images_mode=images, zip_package=zip_package,
+                                      progress=progress)
+    return {**result, "scope": scope, "format_id": format_id}
+
+
 # ---------------------------------------------------------------- 格式池与逐 Run 入口（票 07，ADR 0012）
 
 def check_pool(name: str, split: dict, effective: dict,

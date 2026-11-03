@@ -126,6 +126,16 @@ class SplitPlanBody(BaseModel):
     memo: str = ""
 
 
+class ExportBody(BaseModel):
+    """三维导出（票 08）：格式 × 范围 × 图片处置；zip 可选。"""
+
+    format: Literal["yolo", "coco", "voc"]
+    scope: Literal["all", "split"] = "all"
+    split_uid: str | None = None      # scope=split 时的切分（缺省最近，"" 同全集）
+    images: Literal["link", "copy"] = "link"
+    zip: bool = False
+
+
 class SplitMemoBody(BaseModel):
     """仅编辑 memo——成员/参数/血缘不可变，无删除端点（票 05 / ADR 0010）。"""
 
@@ -359,6 +369,17 @@ def effective_split(name: str, uid: str):
     """实效集预览（与出队同口径，只读）：`{train, val, dropped{missing[], excluded[]}, counts}`。"""
     try:
         return svc.effective_split(name, uid)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/export")
+def export_annotations(name: str, body: ExportBody):
+    """三维外部导出（票 08）：结果落 <ds>/exports/<ts>-<fmt>[-<uid>]/，自包含目录。"""
+    try:
+        return svc.export_annotations(name, body.format, scope=body.scope,
+                                      split_uid=body.split_uid, images=body.images,
+                                      zip_package=body.zip)
     except DatasetError as exc:
         return _error_response(exc)
 
