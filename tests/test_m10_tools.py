@@ -166,11 +166,11 @@ def test_query_history_runs_filter(factory):
 
 def test_query_dataset_profile(factory):
     with factory() as s:
-        s.add(DatasetStat(dataset="good", manifest_uid="m1", task_type="detect",
+        s.add(DatasetStat(dataset="good", source_fingerprint="fp1", task_type="detect",
                           payload={"aggregates": {"n_images": 9}, "rows": [{"big": "row"}]}))
         s.commit()
     out = build_default_registry(factory).dispatch("query_dataset_profile", {"dataset": "good"})
-    assert out["manifest_uid"] == "m1" and out["task_type"] == "detect"
+    assert out["source_fingerprint"] == "fp1" and out["task_type"] == "detect"
     assert out["profile"]["aggregates"] == {"n_images": 9}
     assert "rows" not in out["profile"]  # 逐图行等大键截断
 

@@ -262,9 +262,17 @@ def _class_instance_counts(name: str) -> dict[str, int] | None:
     if not payload:
         return None
     counts: dict[str, int] = {}
-    for side in (payload.get("agg", {}).get("by_split") or {}).values():
-        for cls, n in (side.get("by_class") or {}).items():
+    sides = payload.get("by_split")
+    if sides:
+        for side in sides.values():
+            for cls, n in (side.get("by_class") or {}).items():
+                counts[str(cls)] = counts.get(str(cls), 0) + int(n or 0)
+        return counts
+    for r in payload.get("per_image") or []:  # 全集视图：逐图原料行累加
+        for cls, n in (r.get("label_counts") or {}).items():
             counts[str(cls)] = counts.get(str(cls), 0) + int(n or 0)
+        if payload.get("task_type") == "classify" and r.get("cls"):
+            counts[str(r["cls"])] = counts.get(str(r["cls"]), 0) + 1
     return counts
 
 
@@ -583,10 +591,18 @@ HEAT_GRID = 20  # 与 datasets.stats.HEATMAP_GRID 保持一致（前端不再引
 
 
 def _class_dist_options(payload: dict) -> dict:
-    """逐切分类别分布（堆叠柱：train/val 实例数）——点柱筛图。"""
-    by_split = payload.get("agg", {}).get("by_split", {})
+    """类别分布（堆叠柱：train/val 实例数；全集视图并成单柱）——点柱筛图。"""
+    by_split = payload.get("by_split") or {}
     train_c = by_split.get("train", {}).get("by_class", {})
     val_c = by_split.get("val", {}).get("by_class", {})
+    if not by_split:  # 全集视图：单柱呈现，训练分布语义交给切分视图
+        all_c: dict[str, int] = {}
+        for r in payload.get("per_image") or []:
+            for c, k in (r.get("label_counts") or {}).items():
+                all_c[c] = all_c.get(c, 0) + k
+            if payload.get("task_type") == "classify" and r.get("cls"):
+                all_c[r["cls"]] = all_c.get(r["cls"], 0) + 1
+        train_c, val_c = all_c, {}
     cats = list(dict.fromkeys([*(payload.get("classes") or []), *train_c, *val_c]))
     if payload["task_type"] == "classify":
         cats = list(dict.fromkeys([*train_c, *val_c]))  # 分类任务类别来自 flags，不套 classes.txt
@@ -5124,125 +5140,179 @@ document.addEventListener('scroll', function(e){
                 # 按键被吞；input/textarea 保留——输入框打字不得触发判定
                 ui.keyboard(on_key=_on_key, ignore=["input", "textarea"])
 
-            # ── 健康报告页签：四图 + 下钻筛图 + 在 X-AnyLabeling 中打开（01/02 号票）
+            # ── 健康报告页签（01/02 号票；票 06 一行制）：切分选择器 + 含排除开关 → 读时视图
             def _render_health(name: str, meta: dict) -> None:
-                try:
-                    payload = ds.dataset_stats(name)
-                except Exception:  # noqa: BLE001
-                    payload = None
-                if not payload:
-                    with ui.column().classes("w-full items-center gap-2 q-pa-md"):
-                        ui.icon("monitor_heart", size="28px").classes("opacity-30")
-                        ui.label("暂无健康报告画像").classes("text-sm opacity-60")
-                        ui.label("重新校验即可顺带生成（同一遍历，不额外扫盘）").classes("text-xs opacity-40")
-                        valh_btn = ui.button("重新校验并生成", icon="fact_check",
-                                             on_click=lambda: do_validate(name, valh_btn)).props("outline dense")
-                    return
-                s = payload.get("summary", {})
-                boxable = s.get("boxable")
-                # 「标注」= 标注条数（与类别分布/体检同口径）；分类任务无框概念，flag 即标注，按已标图数计
-                n_ann = (sum(r.get("n") or 0 for r in payload.get("per_image") or [])
-                         if boxable else s.get("labeled", 0))
-                _stats_txt = " · ".join(
-                    [f"图片 {s.get('images', 0)}", f"标注 {n_ann}", f"train {s.get('train', 0)}",
-                     f"val {s.get('val', 0)}", f"负样本 {s.get('background', 0)}",
-                     f"切分 {payload.get('manifest_uid', '—')}"])
-                _stat = ui.label(_stats_txt).classes("text-[11px] tabular-nums opacity-70")
-                with _stat:
-                    ui.tooltip("标注条数（框/多边形/旋转框），非图片数")
-                _lbl = ui.label("点柱 / 框选可筛图").classes("text-[11px] opacity-45")
-                with _lbl:
-                    ui.tooltip("直方图点柱、热力图框选（右上角矩形工具）→ 筛出图片清单，可一键直达 X-AnyLabeling")
+                """控制行常驻，图表区随口径切换读时重建——排除/恢复/新建切分零重算。"""
+                hstate: dict = {"split_uid": None, "include_excluded": False}
+                controls = ui.row().classes("w-full items-center gap-3 flex-wrap q-pb-xs")
+                body_box = ui.column().classes("w-full")
 
-                drill_box = ui.column().classes("w-full")
-
-                def rerender_drill() -> None:
-                    _render_drill_list(payload, drill_box)
-
-                # 点柱/点格/框选筛图后统一滚动跟随到筛图结果（drill 列表在图
-                # 区上/下方皆可能出视口，nearest 只补最小滚动量；列表在视口内则不动）
-                def _drill_and_follow() -> None:
-                    rerender_drill()
-                    _scroll_to(drill_box)
-
-                def _on_class(e) -> None:
-                    if not e.name:
-                        return
-                    d = state["drill"]
-                    cur = (e.name, e.series_name)
-                    d["class"] = None if d.get("class") == cur else cur
-                    _drill_and_follow()
-
-                def _on_bucket(e) -> None:
+                async def _build() -> None:
                     try:
-                        b = int(e.name)
-                    except (TypeError, ValueError):
+                        splits, payload = await asyncio.gather(
+                            _io(ds.list_splits, name),
+                            _io(ds.dataset_stats, name, split_uid=hstate["split_uid"],
+                                include_excluded=hstate["include_excluded"]))
+                        print("HEALTH-BUILD gathered", bool(splits), payload is not None, flush=True)
+                    except Exception as exc:  # noqa: BLE001
+                        body_box.clear()
+                        with body_box:
+                            ui.label(f"健康报告加载失败：{exc}").classes("text-xs text-red-500")
                         return
-                    d = state["drill"]
-                    d["bucket"] = None if d.get("bucket") == b else b
-                    _drill_and_follow()
+                    if getattr(body_box, "is_deleted", False):
+                        return  # 读期间详情已切到别的数据集
+                    controls.clear()
+                    with controls:
+                        if splits:
+                            opts = {"": "最近切分", "__all__": "全集"}
+                            opts.update({s["uid"]: f"{s['uid']} · {_fmt_ts(s.get('created_at'))}"
+                                         for s in splits})
+                            sel = ui.select(opts, label="统计口径", with_input=False).props(
+                                "dense outlined style=min-width:14rem")
+                            with sel:
+                                ui.tooltip("一行制原料读时组成：最近切分=created_at 最新；"
+                                           "全集=source/ 全体；历史切分=该 uid 成员")
+                            cur = "" if hstate["split_uid"] is None else (
+                                "__all__" if hstate["split_uid"] == "" else hstate["split_uid"])
+                            sel.set_value(cur)
 
-                def _on_brush(e) -> None:
-                    areas = e.args.get("areas") if isinstance(e.args, dict) else None
-                    rect = _rect_from_areas(areas)
-                    # category 轴的 coordRange 是格索引 → 归一化 0-1
-                    if rect is not None:
-                        rect = [v / HEAT_GRID for v in rect]
-                    state["drill"]["rect"] = rect
-                    _drill_and_follow()
+                            def _pick(e) -> None:
+                                hstate["split_uid"] = None if e.value == "" else (
+                                    "" if e.value == "__all__" else e.value)
+                                asyncio.get_running_loop().create_task(_build())
 
-                def _on_heat_cell(e) -> None:
-                    """点热力图格 = 选该格区域（框选的轻量替代，交互更易发现）。"""
-                    v = getattr(e, "value", None)
-                    if not isinstance(v, (list, tuple)) or len(v) < 2:
+                            sel.on_value_change(_pick)
+                        sw = ui.checkbox("含排除", value=hstate["include_excluded"])
+
+                        def _toggle(e) -> None:
+                            hstate["include_excluded"] = e.value
+                            asyncio.get_running_loop().create_task(_build())
+
+                        sw.on_value_change(_toggle)
+                        with sw:
+                            ui.tooltip("勾选后排除在册成员也进统计（默认剔除；恢复出账即自动回效）")
+                    body_box.clear()
+                    with body_box:
+                        _draw(payload)
+
+                def _draw(payload) -> None:
+                    if not payload:
+                        with ui.column().classes("w-full items-center gap-2 q-pa-md"):
+                            ui.icon("monitor_heart", size="28px").classes("opacity-30")
+                            ui.label("暂无健康报告画像").classes("text-sm opacity-60")
+                            ui.label("重新校验即可顺带生成（同一遍历，不额外扫盘）").classes("text-xs opacity-40")
+                            valh_btn = ui.button("重新校验并生成", icon="fact_check",
+                                                 on_click=lambda: do_validate(name, valh_btn)).props("outline dense")
                         return
-                    j, i = int(v[0]), int(v[1])
-                    rect = [j / HEAT_GRID, (j + 1) / HEAT_GRID, i / HEAT_GRID, (i + 1) / HEAT_GRID]
-                    d = state["drill"]
-                    d["rect"] = None if d.get("rect") == rect else rect
-                    _drill_and_follow()
+                    s = payload.get("summary", {})
+                    boxable = s.get("boxable")
+                    # 「标注」= 标注条数（与类别分布/体检同口径）；分类任务无框概念，flag 即标注，按已标图数计
+                    n_ann = (sum(r.get("n") or 0 for r in payload.get("per_image") or [])
+                             if boxable else s.get("labeled", 0))
+                    sel_txt = "全集" if payload.get("split_uid") is None else f"切分 {payload['split_uid']}"
+                    if payload.get("stale"):
+                        sel_txt += " · 原料过期（重新校验后刷新）"
+                    _stats_txt = " · ".join(
+                        [f"图片 {s.get('images', 0)}", f"标注 {n_ann}", f"train {s.get('train', 0)}",
+                         f"val {s.get('val', 0)}", f"负样本 {s.get('background', 0)}", sel_txt])
+                    _stat = ui.label(_stats_txt).classes("text-[11px] tabular-nums opacity-70")
+                    with _stat:
+                        ui.tooltip("标注条数（框/多边形/旋转框），非图片数")
+                    _lbl = ui.label("点柱 / 框选可筛图").classes("text-[11px] opacity-45")
+                    with _lbl:
+                        ui.tooltip("直方图点柱、热力图框选（右上角矩形工具）→ 筛出图片清单，可一键直达 X-AnyLabeling")
 
-                with ui.row().classes("w-full gap-4 items-start flex-wrap"):
-                    with ui.column().classes("flex-1 min-w-[17rem]"):
-                        with ui.label("类别分布").classes("text-xs font-semibold opacity-70"):
-                            ui.tooltip("逐切分统计；点柱筛选图片清单")
-                        ch_cls = ui.echart(_class_dist_options(payload)).classes("w-full h-56")
-                        ch_cls.on_point_click(_on_class)
-                    if boxable:
-                        with ui.column().classes("flex-1 min-w-[17rem]"):
-                            with ui.label("每图目标数直方图").classes("text-xs font-semibold opacity-70"):
-                                ui.tooltip("点柱筛选图片清单")
-                            ch_hist = ui.echart(_obj_hist_options(payload)).classes("w-full h-56")
-                            ch_hist.on_point_click(_on_bucket)
-                if boxable:
+                    drill_box = ui.column().classes("w-full")
+
+                    def rerender_drill() -> None:
+                        _render_drill_list(payload, drill_box)
+
+                    # 点柱/点格/框选筛图后统一滚动跟随到筛图结果（drill 列表在图
+                    # 区上/下方皆可能出视口，nearest 只补最小滚动量；列表在视口内则不动）
+                    def _drill_and_follow() -> None:
+                        rerender_drill()
+                        _scroll_to(drill_box)
+
+                    def _on_class(e) -> None:
+                        if not e.name:
+                            return
+                        d = state["drill"]
+                        cur = (e.name, e.series_name)
+                        d["class"] = None if d.get("class") == cur else cur
+                        _drill_and_follow()
+
+                    def _on_bucket(e) -> None:
+                        try:
+                            b = int(e.name)
+                        except (TypeError, ValueError):
+                            return
+                        d = state["drill"]
+                        d["bucket"] = None if d.get("bucket") == b else b
+                        _drill_and_follow()
+
+                    def _on_brush(e) -> None:
+                        areas = e.args.get("areas") if isinstance(e.args, dict) else None
+                        rect = _rect_from_areas(areas)
+                        # category 轴的 coordRange 是格索引 → 归一化 0-1
+                        if rect is not None:
+                            rect = [v / HEAT_GRID for v in rect]
+                        state["drill"]["rect"] = rect
+                        _drill_and_follow()
+
+                    def _on_heat_cell(e) -> None:
+                        """点热力图格 = 选该格区域（框选的轻量替代，交互更易发现）。"""
+                        v = getattr(e, "value", None)
+                        if not isinstance(v, (list, tuple)) or len(v) < 2:
+                            return
+                        j, i = int(v[0]), int(v[1])
+                        rect = [j / HEAT_GRID, (j + 1) / HEAT_GRID, i / HEAT_GRID, (i + 1) / HEAT_GRID]
+                        d = state["drill"]
+                        d["rect"] = None if d.get("rect") == rect else rect
+                        _drill_and_follow()
+
                     with ui.row().classes("w-full gap-4 items-start flex-wrap"):
                         with ui.column().classes("flex-1 min-w-[17rem]"):
-                            with ui.label("标注尺寸热力图").classes("text-xs font-semibold opacity-70"):
-                                ui.tooltip("每个标注的宽×高占整图比例分布；颜色越亮该尺寸区间标注越多")
-                            # SVG 渲染器同中心热力图：canvas 渲染器渐进分层会让 heatmap 空层置顶
-                            ui.echart(_size_heat_options(payload), renderer="svg").classes("w-full h-56")
-                        with ui.column().classes("flex-1 min-w-[17rem]"):
-                            with ui.label("标注中心热力图").classes("text-xs font-semibold opacity-70"):
-                                ui.tooltip("点格或右上角矩形工具框选，筛出图片清单")
-                            # SVG 渲染器：heatmap 在 canvas 渲染器下受渐进分层影响会出现
-                            # 空层置顶（图空白且点击不达 series）；SVG 无此分层怪癖
-                            ch_heat = ui.echart(_center_heat_options(payload), renderer="svg").classes("w-full h-56")
-                            ch_heat.on_point_click(_on_heat_cell)
-                            ch_heat.on("chart:brushEnd", _on_brush, ["areas"])
-                    # M9 E：目标尺寸画像（COCO 32²/96² 阈值按 640 基准尺度分档，分辨率无关）
-                    osz = (payload.get("agg") or {}).get("obj_size")
-                    if osz:
-                        with ui.row().classes("w-full items-center gap-2 flex-wrap text-[11px]"):
-                            ui.icon("straighten").classes("text-[14px] opacity-50")
-                            with ui.label("目标尺寸").classes("opacity-60"):
-                                ui.tooltip("COCO 口径，按 640 基准换算：小 <32² · 中 32²–96² · 大 ≥96² px")
-                            ui.label(" · ".join(
-                                f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
-                                for k, zh in (("small", "小"), ("medium", "中"), ("large", "大")))).classes(
-                                "text-[11px] tabular-nums opacity-70")
-                else:
-                    ui.label("分类任务无目标框：直方图 / 尺寸热力图 / 中心热力图不适用").classes("text-xs opacity-40")
-                rerender_drill()
+                            with ui.label("类别分布").classes("text-xs font-semibold opacity-70"):
+                                ui.tooltip("逐切分统计；点柱筛选图片清单")
+                            ch_cls = ui.echart(_class_dist_options(payload)).classes("w-full h-56")
+                            ch_cls.on_point_click(_on_class)
+                        if boxable:
+                            with ui.column().classes("flex-1 min-w-[17rem]"):
+                                with ui.label("每图目标数直方图").classes("text-xs font-semibold opacity-70"):
+                                    ui.tooltip("点柱筛选图片清单")
+                                ch_hist = ui.echart(_obj_hist_options(payload)).classes("w-full h-56")
+                                ch_hist.on_point_click(_on_bucket)
+                    if boxable:
+                        with ui.row().classes("w-full gap-4 items-start flex-wrap"):
+                            with ui.column().classes("flex-1 min-w-[17rem]"):
+                                with ui.label("标注尺寸热力图").classes("text-xs font-semibold opacity-70"):
+                                    ui.tooltip("每个标注的宽×高占整图比例分布；颜色越亮该尺寸区间标注越多")
+                                # SVG 渲染器同中心热力图：canvas 渲染器渐进分层会让 heatmap 空层置顶
+                                ui.echart(_size_heat_options(payload), renderer="svg").classes("w-full h-56")
+                            with ui.column().classes("flex-1 min-w-[17rem]"):
+                                with ui.label("标注中心热力图").classes("text-xs font-semibold opacity-70"):
+                                    ui.tooltip("点格或右上角矩形工具框选，筛出图片清单")
+                                # SVG 渲染器：heatmap 在 canvas 渲染器下受渐进分层影响会出现
+                                # 空层置顶（图空白且点击不达 series）；SVG 无此分层怪癖
+                                ch_heat = ui.echart(_center_heat_options(payload), renderer="svg").classes("w-full h-56")
+                                ch_heat.on_point_click(_on_heat_cell)
+                                ch_heat.on("chart:brushEnd", _on_brush, ["areas"])
+                        # M9 E：目标尺寸画像（COCO 32²/96² 阈值按 640 基准尺度分档，分辨率无关）
+                        osz = (payload.get("agg") or {}).get("obj_size")
+                        if osz:
+                            with ui.row().classes("w-full items-center gap-2 flex-wrap text-[11px]"):
+                                ui.icon("straighten").classes("text-[14px] opacity-50")
+                                with ui.label("目标尺寸").classes("opacity-60"):
+                                    ui.tooltip("COCO 口径，按 640 基准换算：小 <32² · 中 32²–96² · 大 ≥96² px")
+                                ui.label(" · ".join(
+                                    f"{zh} {osz.get(k, 0)}（{osz.get(k, 0) / max(osz.get('total', 1), 1):.0%}）"
+                                    for k, zh in (("small", "小"), ("medium", "中"), ("large", "大")))).classes(
+                                    "text-[11px] tabular-nums opacity-70")
+                    else:
+                        ui.label("分类任务无目标框：直方图 / 尺寸热力图 / 中心热力图不适用").classes("text-xs opacity-40")
+                    rerender_drill()
+
+                asyncio.get_running_loop().create_task(_build())
 
             def _render_drill_list(payload: dict, box) -> None:
                 box.clear()
@@ -5268,7 +5338,8 @@ document.addEventListener('scroll', function(e){
                         for r, why in rows[:60]:
                             with ui.row().classes("w-full items-center gap-2"):
                                 _img_name_link(r["image"], r["name"], "text-xs flex-1 min-w-0 truncate")
-                                ui.badge(r["split"]).props("outline square").style("font-size:9px")
+                                if r.get("split"):
+                                    ui.badge(r["split"]).props("outline square").style("font-size:9px")
                                 if why:
                                     ui.label("·".join(why)).classes("text-[10px] opacity-50 max-w-40 truncate")
                                 cp = ui.button(icon="content_copy",
@@ -5511,9 +5582,15 @@ document.addEventListener('scroll', function(e){
                                 "text-red-600" if _bad else "opacity-70")
                         ui.label("类别均衡" if _ok else "类别失衡").classes(
                             "opacity-70" if _ok else "text-red-600")
-                        if audit.get("from_cache"):
+                        if audit.get("stale"):
+                            ui.label("过期——真源已变，重跑体检后失效").classes(
+                                "text-amber-600").tooltip(
+                                "体检指纹 ≠ 当前 source_fingerprint；缓存仍可看，重跑只对变化文件重新计算")
+                        elif audit.get("from_cache"):
                             ui.label("缓存命中").classes("opacity-50")
-                        ui.label(f"{_fmt_ts(audit.get('checked_at'))} · 体检范围 {audit.get('files', 0)} 张（活跃清单成员）"
+                        _scope = ("按所选切分泄漏读时计算" if audit.get("split_uid")
+                                  else "全集（未切分）")
+                        ui.label(f"{_fmt_ts(audit.get('checked_at'))} · 体检范围 {audit.get('files', 0)} 张（source/ 全体 · {_scope}）"
                                  ).classes("text-[11px] opacity-50")
                     if audit.get("skipped_undecodable"):
                         ui.label(f"{audit['skipped_undecodable']} 张不可解码已跳过（见校验规则）"

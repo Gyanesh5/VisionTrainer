@@ -243,17 +243,14 @@ def test_relabel_refresh_incremental(tmp_path, tmp_db):
 # ---------------------------------------------------------------- 同图重复（审计 D）
 
 def test_audit_duplicates_within(tmp_path):
-    src = tmp_path / "d"
-    src.mkdir()
+    src = tmp_path / "d" / "source"      # 票 06 一行制：体检吃 <ds>/source/ 全体
+    src.mkdir(parents=True)
     _png(src / "x.png")
     same = _rect("car", (10, 10, 110, 110))
     shifted = _rect("car", (12, 12, 112, 112))     # 高度重叠 ~0.9 → 复核档
     _label_file(src / "x.json", [same, dict(same), shifted,
                                  _rect("bus", (10, 10, 110, 110))])  # bus 与 car 同位不算（异类）
-    manifest = {"uid": "u", "seed": 1, "ratio": 0.5, "stratify": False,
-                "files": [{"image": str(src / "x.png"), "label": str(src / "x.json")}],
-                "train": [str(src / "x.png")], "val": []}
-    report = compute_audit(manifest)
+    report = compute_audit(tmp_path / "d", "fp")
     dw = report["duplicates_within"]
     kinds = sorted(i["kind"] for i in dw["items"])
     # 三个同类形状两两成对：same×副本=exact；same×偏移 与 副本×偏移 = review×2
@@ -273,9 +270,8 @@ def test_stats_obj_size(tmp_path):
             {"label": "car", "cx": 0.5, "cy": 0.5, "w": 400.0, "h": 400.0},  # →256px 大
         ]},
     }]
-    manifest = {"uid": "u", "train": ["/x/a.png"], "val": []}
-    payload = build_stats(entries, manifest, "detect", ["car"], "ds")
-    osz = payload["agg"]["obj_size"]
+    payload = build_stats(entries, "detect", ["car"], "ds", "fp")
+    osz = payload["agg_all"]["obj_size"]
     assert osz["total"] == 3 and osz["small"] == 1 and osz["medium"] == 1 and osz["large"] == 1
     assert osz["small_ratio"] == round(1 / 3, 4)
     assert osz["thresholds"]["ref_imgsz"] == 640
@@ -292,9 +288,8 @@ def test_stats_obj_size_scale_invariant():
             {"label": "chip", "cx": 0.5, "cy": 0.5, "w": 107.0, "h": 138.0},
         ]},
     }]
-    manifest = {"uid": "u", "train": ["/x/big.png"], "val": []}
-    payload = build_stats(entries, manifest, "detect", ["chip"], "ds")
-    osz = payload["agg"]["obj_size"]
+    payload = build_stats(entries, "detect", ["chip"], "ds", "fp")
+    osz = payload["agg_all"]["obj_size"]
     assert osz["total"] == 1 and osz["small"] == 1 and osz["medium"] == 0 and osz["large"] == 0
 
 

@@ -270,19 +270,22 @@ def reconcile_on_open(name: str):
 
 
 @router.get("/{name}/stats")
-def dataset_stats(name: str):
-    """健康报告（M6）：无画像返回 null（UI 提示先重新校验）。"""
+def dataset_stats(name: str, split_uid: str | None = None,
+                  include_excluded: bool = False):
+    """健康报告读时视图（票 06 一行制）：split_uid 缺省=最近切分、空串=全集、
+    显式 uid=该切分；include_excluded 默认剔除排除在册；无原料返回 null。"""
     try:
-        return svc.dataset_stats(name)
+        return svc.dataset_stats(name, split_uid=split_uid,
+                                 include_excluded=include_excluded)
     except DatasetError as exc:
         return _error_response(exc)
 
 
 @router.get("/{name}/audit")
-def cached_audit(name: str):
-    """体检报告缓存读（M6）：未体检过返回 null。"""
+def cached_audit(name: str, split_uid: str | None = None):
+    """体检缓存 + 按所选切分即时计算泄漏（票 06）：未体检 null，指纹失配带 stale。"""
     try:
-        return svc.cached_audit(name)
+        return svc.cached_audit(name, split_uid=split_uid)
     except DatasetError as exc:
         return _error_response(exc)
 

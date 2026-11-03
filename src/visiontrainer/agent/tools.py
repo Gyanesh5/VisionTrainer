@@ -184,7 +184,8 @@ def _query_dataset_profile(Session):
                 raise ToolError(f"数据集无画像：{dataset}")
             payload = {k: v for k, v in (row.payload or {}).items()
                        if k not in _PROFILE_TRIM_KEYS}
-            return {"dataset": row.dataset, "manifest_uid": row.manifest_uid,
+            # 票 06 一行制 + spec §2.4：画像以 source_fingerprint 标识新旧（manifest_uid 退役）
+            return {"dataset": row.dataset, "source_fingerprint": row.source_fingerprint,
                     "task_type": row.task_type, "computed_at": str(row.computed_at),
                     "profile": payload}
     return handler

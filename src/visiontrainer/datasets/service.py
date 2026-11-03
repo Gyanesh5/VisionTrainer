@@ -37,9 +37,10 @@ from PIL import Image
 
 from . import classops
 from . import split as split_lib
-from .audit import compute_audit, fingerprint_of, load_cached, save_cached
+from .audit import compute_audit, leak_view, load_cached, save_cached
 from .formats import write_label, yolo_lines
 from .projection import TASK_MODE, TASK_TYPES
+from . import stats as stats_lib
 from .stats import build_stats, get_stats, save_stats
 from .tiling import JPEG_QUALITY, TILE_GRID_MAX, TILE_OVERLAP_MAX, TILE_TASKS, plan_image, summarize
 from .validate import IMAGE_EXTS, list_images, scan_entries, validate_dataset
@@ -56,7 +57,7 @@ SOURCE_MODES = ("empty", "images", "labeled")
 TRANSFER_MODES = ("copy", "move")
 RUN_ACTIVE_STATUSES = ("queued", "running", "stopping")
 SPLIT_MODES = split_lib.SPLIT_MODES  # 新建切分两模式：fresh（全部重洗）/ inherit（继承归属）
-FULL_SET_UID = "full-set"         # 出生未切分时画像用的「全集」伪切分 uid（spec §2.1 全集口径）
+# 票 06 一行制：画像无「全集伪切分」——全集视图由 compose_view(split=None) 表达
 
 # dataset.json 的落盘字段集（spec §3.1 唯一键集；票 05 起不再有清单两字段）
 _META_KEYS = ("name", "task_type", "form", "created_at", "origin", "validation_summary",
@@ -242,39 +243,9 @@ def _new_validation_summary(report: dict, fingerprint: str, prev: dict | None) -
     }
 
 
-def _full_set_view(entries: list[dict]) -> dict:
-    """「全集」伪切分：票 03 出生只校验 + 画像、不切分，画像按 spec §2.1 的全集口径出。
-
-    它不是切分实体（不落 `splits/`、不建派生），只是「还没有 train/val 维度」时统计聚合的
-    形状适配——全图入 train、val 空；一旦数据集有了切分，画像一律按切分 uid 建行。
-    """
-    paths = sorted(e["image"] for e in entries)
-    return {
-        "uid": FULL_SET_UID,
-        "seed": 0,
-        "ratio": 1.0,
-        "stratify": False,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "files": [{"image": e["image"], "label": e["label"],
-                   "primary_label": e.get("primary_label")} for e in entries],
-        "train": paths,
-        "val": [],
-    }
-
-
 def _latest_split(name: str, root: Path | None = None) -> dict | None:
     """「最近切分」＝ created_at 最新那一条（票 05 裁决：没有活跃指针，也不查 dataset.json）。"""
     return split_lib.latest_split(_ds_dir(name, root))
-
-
-def _stats_view(ds_dir: Path, entries: list[dict]) -> dict:
-    """画像聚合基准视图：最新切分的成员视图，未切分则全集伪切分（spec §2.1 全集口径）。
-
-    成员视图一律用 `split.files_view`（实体只存相对文件名，消费方要绝对路径 + 同名 JSON），
-    service 侧不再自己拼第二套成员账。
-    """
-    latest = split_lib.latest_split(ds_dir)
-    return split_lib.files_view(ds_dir, latest) if latest else _full_set_view(entries)
 
 
 # ---------------------------------------------------------------- 出生（唯一入口）
@@ -416,8 +387,9 @@ def create_dataset(
                 report, source_fingerprint(source_dir), None),
         }
         _write_meta(ds_dir, meta)
-        save_stats(name, build_stats(scan["entries"], _full_set_view(scan["entries"]),
-                                     task_type, classes, name))
+        # 票 06 一行制：画像只存原料（逐图行 + 全集聚合），切分视图读时组成
+        save_stats(name, build_stats(scan["entries"], task_type, classes, name,
+                                     source_fingerprint(source_dir)))
     except Exception:
         shutil.rmtree(ds_dir, ignore_errors=True)  # 半成品目录自清理（非已登记数据集，不适用回收区规则）
         raise
@@ -594,9 +566,9 @@ def validate_dataset_by_name(name: str, root: Path | None = None,
         report, source_fingerprint(src), raw.get("validation_summary"))
     _write_meta(ds_dir, raw)
     _prune_excluded(ds_dir)
-    # 画像随校验刷新（最新切分优先；未切分数据集按全集口径）
-    save_stats(name, build_stats(scan["entries"], _stats_view(ds_dir, scan["entries"]),
-                                 task_type, classes, name))
+    # 画像随校验刷新（票 06 一行制：只重算原料，切分视图读时组成、零切分耦合）
+    save_stats(name, build_stats(scan["entries"], task_type, classes, name,
+                                 source_fingerprint(src)))
     return report
 
 
@@ -1187,19 +1159,25 @@ def preview_split(name: str, *, mode: str, seed: int, ratio: float, stratify: bo
     params、血缘、分组、与参照 val 的重合 M/N、可比性、可用时的跨切分泄漏组数、本次划分的
     实效集）；params/lineage/grouped 一律以**切分层解析后的值**说话——继承模式下参照锁定了
     seed/ratio/stratify，调用方另给的值不生效，预览必须显示真实将要落盘的口径。
-    service 侧只补两件切分层看不见的事：
+    service 侧补三件切分层看不见的事：
     - `reuses_existing`：候选 uid 是否命中既有切分（命中则 `create_split` 复用、不产生第二份文件）；
-    - `incomparable_warning`：与既有 Run 不可比的中文警示（前端直接显示，不自己判布尔）。
+    - `incomparable_warning`：与既有 Run 不可比的中文警示（前端直接显示，不自己判布尔）；
+    - `dup_leak_groups`：体检缓存的重复组 × 候选划分的泄漏组数（票 06：预览复用同一份
+      重复组显示「将产生跨切分泄漏 N 组」；未体检过为 None，不冒充 0）。
     """
     meta, ds_dir = _managed_or_404(name, root, "预览新建切分")
     kwargs = _plan_kwargs(meta, mode, seed, ratio, stratify, approved_only, parent_uid)
     p = _entity_call(split_lib.preview_split, ds_dir, memo=memo, **kwargs)
     known = {s["uid"] for s in split_lib.list_splits(ds_dir)}
+    cached = load_cached(name)
+    dup_leaks = (leak_view(cached, {"train": p["train"], "val": p["val"]}, ds_dir)
+                 if cached else None)
     return {
         **p,
         "reuses_existing": p["uid"] in known,
         "incomparable_warning": ("" if p["comparable"] else
                                  "新划分的 val 名单与参照切分不同——落盘后与既有 Run 不可直接比较"),
+        "dup_leak_groups": (len(dup_leaks) if dup_leaks is not None else None),
     }
 
 
@@ -1224,12 +1202,9 @@ def create_split(name: str, *, mode: str, seed: int, ratio: float, stratify: boo
     split = _entity_call(split_lib.load_split, ds_dir, planned["uid"])
     task_type, classes = meta["task_type"], read_classes(ds_dir)
     view = split_lib.files_view(ds_dir, split)
-    fresh = not (ds_dir / "derived" / split["uid"]).is_dir()
-    if fresh:
+    if not (ds_dir / "derived" / split["uid"]).is_dir():
         _derive(ds_dir, view, task_type, classes, progress=progress)
-    if fresh or not get_stats(name, split["uid"]):  # 画像随新切分建一行（复用既有切分不重扫盘）
-        scan = scan_entries(_source_dir(ds_dir), task_type, classes)
-        save_stats(name, build_stats(scan["entries"], view, task_type, classes, name))
+    # 票 06 一行制：新建切分**不写画像行**——健康报告读时按切分实体组成（零重算）
     return split
 
 
@@ -1249,31 +1224,6 @@ def effective_split(name: str, uid: str, root: Path | None = None) -> dict:
     ds_dir = _ds_dir(name, root)
     split = _entity_call(split_lib.load_split, ds_dir, uid)
     return _entity_call(split_lib.effective_set, ds_dir, split)
-
-
-def _split_uid_or_full(name: str, root: Path | None = None) -> str:
-    """画像/体检的建行取键：有切分按**最新切分**，未切分按全集口径（spec §2.1）。
-
-    票 05 硬删活跃指针后这是唯一的取键入口：排除、恢复、改标都不换键。
-    """
-    latest = split_lib.latest_split(_ds_dir(name, root))
-    return latest["uid"] if latest else FULL_SET_UID
-
-
-def _audit_view(name: str, root: Path | None = None) -> tuple[dict, dict]:
-    """体检的基准成员视图 (切分 uid 视图, 数据集清单视图)：未切分按全集口径。
-
-    体检算的是盘上文件的重复/泄漏，成员口径跟着「最新切分」走（票 05 裁决，无活跃指针）；
-    未切分数据集没有切分可跟，就按 `source/` 全体算——与画像的全集口径同一把尺。
-    """
-    _managed_dataset(name, root, "质量体检")
-    ds_dir = _ds_dir(name, root)
-    latest = split_lib.latest_split(ds_dir)
-    if latest is not None:
-        return split_lib.files_view(ds_dir, latest)
-    task_type = _read_meta(ds_dir / "dataset.json")["task_type"]
-    entries = scan_entries(_source_dir(ds_dir), task_type, read_classes(ds_dir))["entries"]
-    return _full_set_view(entries)
 
 
 # ---------------------------------------------------------------- 切片（Tiling）
@@ -1302,7 +1252,7 @@ def _tile_view(name: str, root: Path | None) -> dict:
     """切片输入成员视图：`source/` 全体（排除在册的图不入切片计划）。
 
     票 05 硬切后切片不再吃切分清单——它切的是真源，产物数据集出生也不切分（spec §2.1）。
-    复用画像的全集视图形状（`{files:[{image,label,primary_label}], …}`），切片计划只认这个形状。
+    切片计划只认 `{files:[{image,label,…}]}` 形状。
     """
     ds_dir = _ds_dir(name, root)
     raw = _read_meta(ds_dir / "dataset.json")
@@ -1310,7 +1260,7 @@ def _tile_view(name: str, root: Path | None) -> dict:
     entries = [e for e in scan_entries(_source_dir(ds_dir), raw["task_type"],
                                        read_classes(ds_dir))["entries"]
                if Path(e["image"]).name not in excluded]
-    return _full_set_view(entries)
+    return {"files": [{"image": e["image"], "label": e["label"]} for e in entries]}
 
 
 def _tile_items(meta: dict, view: dict, rows: int, cols: int, overlap: float) -> list[dict]:
@@ -1463,10 +1413,10 @@ def tile_dataset(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
         report = validate_dataset(src_dir, task_type, classes, scan=scan)
         (ds_dir / "validation_report.json").write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-        # 票 05 裁决：切片产物出生**不切分**——只校验 + 画像（全集口径），
-        # 切分留待训练表单（首个切分恒 fresh，且恒按下面的 tiling.groups 分源图组）
-        save_stats(new_name, build_stats(scan["entries"], _full_set_view(scan["entries"]),
-                                        task_type, classes, new_name))
+        # 票 05 裁决：切片产物出生**不切分**——只校验 + 画像（切分留待训练表单，
+        # 首个切分恒 fresh 且恒按 tiling.groups 分源图组）；票 06 一行制：只存原料
+        save_stats(new_name, build_stats(scan["entries"], task_type, classes, new_name,
+                                         source_fingerprint(src_dir)))
 
         now = datetime.now().isoformat(timespec="seconds")
         summary = _tile_summary(items, keep_empty, name, rows, cols, overlap)
@@ -1558,37 +1508,105 @@ def restore_files(name: str, files: list[str], root: Path | None = None) -> dict
     return {"restored": sorted(names), "restored_total": len(names), "excluded_total": len(ex)}
 
 
-def dataset_stats(name: str, root: Path | None = None) -> dict:
-    """健康报告查询（M6）：一行画像，按**最新切分**建行（未切分按全集口径）。
+def _resolve_stats_split(ds_dir: Path, split_uid: str | None) -> dict | None:
+    """画像视图的切分选择：None → 最近切分，"" → 全集，显式 uid → 该实体（缺失 404）。"""
+    if split_uid == "":
+        return None
+    if split_uid is None:
+        return split_lib.latest_split(ds_dir)
+    return _entity_call(split_lib.load_split, ds_dir, split_uid)
 
-    外部数据集无健康报告（400）。排除/恢复/新建切分都不重写这行——画像行只随校验与切分出生写。
+
+def dataset_stats(name: str, split_uid: str | None = None,
+                  include_excluded: bool = False, root: Path | None = None) -> dict | None:
+    """健康报告读时视图（票 06 一行制，api.md v1.4）。
+
+    split_uid：None=最近切分（默认）、""=全集、显式 uid=该切分（404 若不存在）；
+    include_excluded=False（默认）剔除排除在册成员。原料一行（校验/出生时刷新），
+    本函数零写入零扫盘；原料指纹落后真源时带 stale 标记（详情页对账会自动刷新）。
+    外部数据集 400，原料缺失返回 None（UI 显示「重新校验并生成」）。
     """
-    _managed_dataset(name, root, "健康报告")
-    return get_stats(name, _split_uid_or_full(name, root))
+    meta, ds_dir = _managed_dataset(name, root, "健康报告")
+    raw = get_stats(name)
+    if raw is None:
+        return None
+    split = _resolve_stats_split(ds_dir, split_uid)
+    exclude_names = None
+    if not include_excluded:
+        exclude_names = set(load_excluded(ds_dir))
+    view = stats_lib.compose_view(raw, split, exclude_names)
+    view["stale"] = source_fingerprint(_source_dir(ds_dir)) != (raw.get("source_fingerprint") or "")
+    return view
 
 
 def run_quality_audit(name: str, progress=None, root: Path | None = None) -> dict:
-    """跑体检（M6 03 号票，长操作）：指纹命中缓存直接回，否则全量计算并缓存。
+    """跑体检（票 06 一行制，长操作）：真源全体为对象，指纹一致秒回缓存。
 
-    体检对象是**最新切分**的成员（未切分按 `source/` 全体的全集口径）；缓存行按同一把 uid 键
-    （`_split_uid_or_full`），排除与恢复不换键——它们不改划分内容。
+    缓存 = 切分无关的部分（逐文件 sha256/phash 记录 + 重复组 + 同图重叠 + 全集失衡），
+    重跑只对 size+mtime_ns 变化的文件重新哈希（`reused` 计数即增量证据）；
+    跨切分泄漏不在缓存里——按最近切分 leak_view 读时计算后随视图返回。
     """
-    view = _audit_view(name, root)
-    fp = fingerprint_of(view)
-    cached = load_cached(name, view["uid"])
+    _managed_dataset(name, root, "质量体检")
+    ds_dir = _ds_dir(name, root)
+    fp = source_fingerprint(_source_dir(ds_dir))
+    cached = load_cached(name)
     if cached and cached.get("fingerprint") == fp:
-        return {**cached, "from_cache": True}
-    report = compute_audit(view, progress=progress)
-    save_cached(name, view["uid"], report)
-    return {**report, "from_cache": False}
+        payload = cached
+        from_cache = True
+    else:
+        payload = compute_audit(ds_dir, fp, prev=cached, progress=progress)
+        save_cached(name, payload)
+        from_cache = False
+    return _audit_view_payload(name, ds_dir, payload, from_cache)
 
 
-def cached_audit(name: str, root: Path | None = None) -> dict | None:
-    """读缓存体检报告（无则 None，UI 据此显示「尚未体检」）。"""
+def cached_audit(name: str, split_uid: str | None = None,
+                 root: Path | None = None) -> dict | None:
+    """读缓存体检 + 按所选切分即时计算泄漏（api.md v1.4：未体检 null，失配带 stale）。"""
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不做质量审计")
-    return load_cached(name, _split_uid_or_full(name, root))
+    payload = load_cached(name)
+    if payload is None:
+        return None
+    ds_dir = _ds_dir(name, root)
+    view = _audit_view_payload(name, ds_dir, payload, from_cache=True,
+                               split_uid=split_uid)
+    view["stale"] = source_fingerprint(_source_dir(ds_dir)) != payload.get("fingerprint")
+    return view
+
+
+def _audit_view_payload(name: str, ds_dir: Path, payload: dict, from_cache: bool,
+                        split_uid: str | None = None) -> dict:
+    """体检载荷 → 消费视图：重复组/泄漏条目附当前切分归属，泄漏读时计算。"""
+    split = (_resolve_stats_split(ds_dir, split_uid) if split_uid
+             else split_lib.latest_split(ds_dir))
+    sides: dict[str, str] = {}
+    if split is not None:
+        sides = {n: "train" for n in split.get("train") or []}
+        sides.update({n: "val" for n in split.get("val") or []})
+    source = _source_dir(ds_dir)
+    dup = payload.get("duplicates_within") or {}
+    view = {
+        "checked_at": payload.get("checked_at"),
+        "fingerprint": payload.get("fingerprint"),
+        "files": payload.get("files"),
+        "reused": payload.get("reused"),
+        "skipped_undecodable": payload.get("skipped_undecodable"),
+        "exact_groups": [[{"image": str(source / n), "name": n, "split": sides.get(n)}
+                          for n in g] for g in payload.get("exact_groups") or []],
+        "near_groups": [[{"image": str(source / n), "name": n, "split": sides.get(n)}
+                         for n in g] for g in payload.get("near_groups") or []],
+        "leaks": leak_view(payload, split, ds_dir),
+        "imbalance": payload.get("imbalance"),
+        "duplicates_within": dup,
+        "summary": {**(payload.get("summary") or {}),
+                    "leaks": 0, "split_uid": split.get("uid") if split else None},
+        "from_cache": from_cache,
+        "split_uid": split.get("uid") if split else None,
+    }
+    view["summary"]["leaks"] = len(view["leaks"])
+    return view
 
 
 def ack_drops(name: str, root: Path | None = None) -> dict:
@@ -1807,14 +1825,14 @@ def review_queue(name: str, root: Path | None = None) -> dict:
     票 05 改源（api.md v1.4）：迭代源从「活跃清单成员」换成真源本身——审查先于切分存在，
     出生即可审，不必先建切分；**无 train/val 归属维度**（切分语义归训练域）。负样本
     （无标注 JSON）与排除在册图不入前进序列；unlabeled 计 source/ 全体无 JSON 图（负样本
-    候选，只报数不进队列）。可疑度的体检来源按体检建行键（`_split_uid_or_full`）取缓存。
+    候选，只报数不进队列）。可疑度的体检来源按一行制缓存（dataset UNIQUE）取。
     """
     from . import review as rv
 
     meta, ds_dir = _managed_dataset(name, root, "标注审查")
     source = _source_dir(ds_dir)
     excluded = load_excluded(ds_dir)
-    susp = rv.compute_suspicion(meta, {"uid": _split_uid_or_full(name, root)}, name)
+    susp = rv.compute_suspicion(meta, {"uid": None}, name)
 
     counts = {"pending": 0, "approved": 0, "rejected": 0, "skipped": 0, "modified": 0}
     items, unlabeled = [], 0

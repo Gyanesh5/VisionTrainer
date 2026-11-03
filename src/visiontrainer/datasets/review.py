@@ -145,7 +145,7 @@ def compute_suspicion(meta: dict, manifest: dict, dataset: str) -> dict[str, dic
     # ② 审计缓存命中（只读缓存，未跑过体检则缺席）
     from .audit import load_cached
 
-    audit = load_cached(dataset, manifest.get("uid") or "")
+    audit = load_cached(dataset)  # 票 06 一行制：体检缓存 dataset UNIQUE，无清单键
     if audit:
         for g in audit.get("exact_groups") or []:
             for it in g:

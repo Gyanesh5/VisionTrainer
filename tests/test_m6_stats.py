@@ -1,8 +1,8 @@
-"""M6 01 号票：健康报告聚合测试（build_stats / recompose / classify / 下钻过滤）。"""
+"""M6 01 号票 + 票 06 一行制：build_stats 原料 / compose_view 读时视图 / 下钻过滤。"""
 
 from __future__ import annotations
 
-from visiontrainer.datasets.stats import build_stats
+from visiontrainer.datasets.stats import build_stats, compose_view
 
 
 def _entry(image: str, objs: list[dict], w=640, h=480, primary=None, meta_override=None):
@@ -10,16 +10,14 @@ def _entry(image: str, objs: list[dict], w=640, h=480, primary=None, meta_overri
             "meta": meta_override if meta_override is not None else {"w": w, "h": h, "objs": objs}}
 
 
-def _manifest(train: list[str], val: list[str], uid="m1") -> dict:
-    files = [{"image": p, "label": None, "primary_label": None} for p in sorted(set(train) | set(val))]
-    return {"uid": uid, "seed": 42, "ratio": 0.5, "stratify": False, "files": files,
-            "train": sorted(train), "val": sorted(val)}
+def _split(train: list[str], val: list[str], uid="m1") -> dict:
+    return {"uid": uid, "train": sorted(train), "val": sorted(val)}
 
 
 A, B, NEG = "/x/a.png", "/x/b.png", "/x/neg.png"
 
 
-def test_build_stats_detect():
+def _raw() -> dict:
     entries = [
         _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5, "w": 64, "h": 48}], primary="car"),
         _entry(B, [{"label": "car", "cx": 0.1, "cy": 0.9, "w": 32, "h": 24},
@@ -27,45 +25,76 @@ def test_build_stats_detect():
                primary="car"),
         _entry(NEG, []),
     ]
-    payload = build_stats(entries, _manifest([A], [B, NEG]), "detect", ["car", "person"], "ds")
-    assert [r["image"] for r in payload["per_image"]] == [A, B, NEG]
-    assert [r["split"] for r in payload["per_image"]] == ["train", "val", "val"]
-    agg = payload["agg"]
-    assert agg["by_split"]["train"]["by_class"] == {"car": 1}
-    assert agg["by_split"]["val"]["by_class"] == {"car": 1, "person": 1}
-    assert agg["by_split"]["val"]["background"] == 1
-    assert dict(agg["obj_hist"]) == {0: 1, 1: 1, 2: 1}  # 负样本（0 目标）也入直方图
-    heat = agg["heatmap"]
+    return build_stats(entries, "detect", ["car", "person"], "ds", "fp01")
+
+
+def test_build_stats_raw_payload_no_split():
+    """一行制原料：逐图行无 train/val 归属，聚合只有全集聚合。"""
+    raw = _raw()
+    assert [r["image"] for r in raw["per_image"]] == [A, B, NEG]
+    assert all("split" not in r for r in raw["per_image"])  # 原料不带切分维度
+    assert raw["source_fingerprint"] == "fp01"
+    assert raw["agg_all"]["summary"] == {"images": 3, "labeled": 2, "background": 1,
+                                         "boxable": True}
+    assert dict(raw["agg_all"]["obj_hist"]) == {0: 1, 1: 1, 2: 1}  # 负样本（0 目标）也入直方图
+
+
+def test_compose_view_split_numbers_match_membership():
+    """切分视图：by_split/summary 与直接按名单统计一致（票 06 验收②）。"""
+    raw = _raw()
+    view = compose_view(raw, _split([A], [B, NEG]))
+    assert view["split_uid"] == "m1"
+    assert [r["split"] for r in view["per_image"]] == ["train", "val", "val"]
+    assert view["by_split"]["train"]["by_class"] == {"car": 1}
+    assert view["by_split"]["val"]["by_class"] == {"car": 1, "person": 1}
+    assert view["by_split"]["val"]["background"] == 1
+    assert dict(view["agg"]["obj_hist"]) == {0: 1, 1: 1, 2: 1}
+    heat = view["agg"]["heatmap"]
     assert heat[10][10] == 1  # (0.5, 0.5) → 第 10 格
-    assert sum(sum(row) for row in heat) == 3  # 三个中心点全入格
+    assert sum(sum(row) for row in heat) == 3
     # 标注尺寸热力图：归一化 (0.1,0.1)/(0.05,0.05)/(0.01,0.01)（640×480 图）各落一格
-    sh = agg["size_heat"]
+    sh = view["agg"]["size_heat"]
     assert sh[2][2] == 1 and sh[1][1] == 1 and sh[0][0] == 1
-    assert sum(sum(row) for row in sh) == 3
-    assert payload["summary"] == {"images": 3, "labeled": 2, "train": 1, "val": 2,
-                                  "background": 1, "boxable": True}
+    assert view["summary"] == {"images": 3, "labeled": 2, "train": 1, "val": 2,
+                               "background": 1, "boxable": True}
+    assert view["agg_all"]["summary"]["images"] == 3  # 全集聚合随视图带回
 
 
-def test_manifest_outside_files_dropped():
-    """清单外文件（扫描发现的新图）不入画像。"""
-    entries = [_entry(A, []), _entry("/x/new.png", [])]
-    payload = build_stats(entries, _manifest([A], []), "detect", ["car"], "ds")
-    assert [r["image"] for r in payload["per_image"]] == [A]
+def test_compose_view_full_set_and_excluded():
+    """全集视图无 by_split、split=None；排除剔除只影响视图不动原料。"""
+    raw = _raw()
+    full = compose_view(raw, None)
+    assert full["by_split"] is None and full["split_uid"] is None
+    assert full["summary"]["images"] == 3
+    assert all(r["split"] is None for r in full["per_image"])
+
+    trimmed = compose_view(raw, _split([A], [B, NEG]), exclude_names={"neg.png"})
+    assert [r["image"] for r in trimmed["per_image"]] == [A, B]
+    assert trimmed["summary"]["images"] == 2 and trimmed["summary"]["val"] == 1
+    # 原料行原封不动（一行制：剔除只发生在视图）
+    assert len(raw["per_image"]) == 3
 
 
-def test_classify_no_centers_flag_classes():
-    entries = [
+def test_compose_view_excludes_out_of_split_and_reads_history_split():
+    """切分视图只看成员；显式历史切分实体读时即得该口径。"""
+    raw = build_stats([_entry(A, []), _entry("/x/new.png", [])],
+                      "detect", ["car"], "ds", "fp02")
+    view = compose_view(raw, _split([A], []))
+    assert [r["image"] for r in view["per_image"]] == [A]  # 清单外文件不入切分视图
+
+
+def test_compose_view_classify():
+    raw = build_stats([
         _entry("/x/a.png", [], meta_override={"flag": "cat"}),
         _entry("/x/b.png", [], meta_override={"flag": "dog"}),
         _entry("/x/c.png", [], meta_override={"flag": "cat"}),
-    ]
-    payload = build_stats(entries, _manifest(["/x/a.png", "/x/c.png"], ["/x/b.png"]),
-                          "classify", ["cat", "dog"], "ds")
-    assert payload["summary"]["boxable"] is False
-    assert payload["agg"]["by_split"]["train"]["by_class"] == {"cat": 2}
-    assert payload["agg"]["by_split"]["val"]["by_class"] == {"dog": 1}
-    assert all(not r.get("centers") for r in payload["per_image"])
-    assert payload["agg"]["obj_hist"] == []  # 无框概念
+    ], "classify", ["cat", "dog"], "ds", "fp03")
+    view = compose_view(raw, _split(["/x/a.png", "/x/c.png"], ["/x/b.png"]))
+    assert view["summary"]["boxable"] is False
+    assert view["by_split"]["train"]["by_class"] == {"cat": 2}
+    assert view["by_split"]["val"]["by_class"] == {"dog": 1}
+    assert all(not r.get("centers") for r in view["per_image"])
+    assert view["agg"]["obj_hist"] == []  # 无框概念
 
 
 def test_by_class_counts_instances():
@@ -75,11 +104,12 @@ def test_by_class_counts_instances():
                    {"label": "car", "cx": 0.6, "cy": 0.6, "w": 32, "h": 24},
                    {"label": "person", "cx": 0.2, "cy": 0.8, "w": 16, "h": 32}]),
     ]
-    payload = build_stats(entries, _manifest([A], []), "detect", ["car", "person"], "ds")
-    sp = payload["agg"]["by_split"]["train"]
+    raw = build_stats(entries, "detect", ["car", "person"], "ds", "fp04")
+    view = compose_view(raw, _split([A], []))
+    sp = view["by_split"]["train"]
     assert sp["by_class"] == {"car": 2, "person": 1}  # 实例数，非图数
     assert sp["images"] == 1
-    assert payload["per_image"][0]["labels"] == ["car", "person"]  # 筛图仍按类名去重
+    assert view["per_image"][0]["labels"] == ["car", "person"]  # 筛图仍按类名去重
 
 
 # ---------------------------------------------------------------- 下钻过滤（02 号票前端谓词的纯函数底座）
@@ -92,7 +122,8 @@ def test_drill_filter_predicate():
         _entry(B, [{"label": "car", "cx": 0.05, "cy": 0.05},
                    {"label": "person", "cx": 0.1, "cy": 0.1}]),        # 2 目标，中心左上
     ]
-    payload = build_stats(entries, _manifest([A], [B]), "detect", ["car", "person"], "ds")
+    payload = compose_view(build_stats(entries, "detect", ["car", "person"], "ds", "fp05"),
+                           _split([A], [B]))
 
     assert [r["image"] for r, _ in _drill_rows(payload, {"class": ("car", "train")})] == [A]
     assert [r["image"] for r, _ in _drill_rows(payload, {"bucket": 2})] == [B]

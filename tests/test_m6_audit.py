@@ -10,7 +10,7 @@ import pytest
 from conftest import build_dataset
 
 from visiontrainer.datasets import service as svc
-from visiontrainer.datasets.audit import compute_audit, fingerprint_of
+from visiontrainer.datasets.audit import compute_audit, leak_view
 from visiontrainer.datasets.service import DatasetError
 
 
@@ -42,70 +42,80 @@ def _label(path: Path, labels: list[str]) -> Path:
     return path
 
 
-def _manifest(tmp_path: Path, files: list[tuple[str, str]], train: list[str], val: list[str]) -> dict:
-    """files = [(文件名, 类别)]；合成 manifest（compute_audit 只吃清单）。"""
-    paths = {}
+def _pattern_png(path: Path, seed: str, size=64) -> Path:
+    """确定性纹理图：逐像素由 seed 派生——不同名不同图，phash 有区分度。"""
+    from PIL import Image
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    h = abs(hash(seed)) % 251 + 4
+    img = Image.new("L", (size, size))
+    px = img.load()
+    for y in range(size):
+        for x in range(size):
+            px[x, y] = (x * h + y * (h // 3 + 1) + x * x) % 256
+    img.convert("RGB").save(path, format="PNG")
+    return path
+
+
+def _ds_dir(tmp_path: Path, files: list[tuple[str, str]]) -> Path:
+    """files = [(文件名, 类别)]；搭一个最小数据集目录（source/ + JSON），体检吃真源全体。"""
+    d = tmp_path / "ds"
+    (d / "source").mkdir(parents=True, exist_ok=True)
     for name, cls in files:
-        img = _png(tmp_path / f"{name}.png", color=(hash(name) % 255, 0, 0))
-        _label(tmp_path / f"{name}.json", [cls])
-        paths[name] = str(img)
-    return {
-        "uid": "audit1", "seed": 42, "ratio": 0.5, "stratify": False,
-        "files": [{"image": paths[n], "label": str(tmp_path / f"{n}.json"), "primary_label": c}
-                  for n, c in files],
-        "train": [paths[n] for n in train], "val": [paths[n] for n in val],
-    }
+        _png(d / "source" / f"{name}.png", color=(hash(name) % 255, 0, 0))
+        _label(d / "source" / f"{name}.json", [cls])
+    return d
 
 
 def test_exact_and_near_duplicates_and_leaks(tmp_path):
     d = tmp_path
-    # a / a2 完全同内容；b / b2 同图微改（sha 不同、phash 相同段）；c 独立
-    _png(d / "a.png", (10, 10, 10))
+    # a / a2 完全同内容；b / b2 单像素差（phash 距离 0，sha 不同）；c 独立纹理
+    _pattern_png(d / "a.png", "alpha")
     (d / "a2.png").write_bytes((d / "a.png").read_bytes())
-    b = _png(d / "b.png", (200, 5, 5))
-    _png(d / "b2.png", (200, 5, 5))
+    _pattern_png(d / "b.png", "beta")
+    (d / "b2.png").write_bytes((d / "b.png").read_bytes())
     from PIL import Image
 
-    with Image.open(d / "b2.png") as im:  # 单像素差异：phash 距离仍为 0，sha 不同
+    with Image.open(d / "b2.png") as im:
         rgb = im.convert("RGB")
         rgb.putpixel((0, 0), (0, 255, 0))
         rgb.save(d / "b2.png")
-    _png(d / "c.png", (0, 255, 0))
-    for n in ("a", "a2", "b", "b2", "c"):
-        _label(d / f"{n}.json", ["car"])
+    _pattern_png(d / "c.png", "gamma")
 
-    manifest = {
-        "uid": "u1", "seed": 1, "ratio": 0.5, "stratify": False,
-        "files": [{"image": str(d / f"{n}.png"), "label": str(d / f"{n}.json"), "primary_label": "car"}
-                  for n in ("a", "a2", "b", "b2", "c")],
-        "train": [str(d / "a.png"), str(d / "b.png"), str(d / "c.png")],
-        "val": [str(d / "a2.png"), str(d / "b2.png")],
-    }
-    report = compute_audit(manifest)
+    ds_dir = _ds_dir(d, [("a", "car"), ("a2", "car"), ("b", "car"), ("b2", "car"), ("c", "car")])
+    for n in ("a", "a2", "b", "b2", "c"):  # 覆盖上文的特殊内容
+        (ds_dir / "source" / f"{n}.png").write_bytes((d / f"{n}.png").read_bytes())
+
+    report = compute_audit(ds_dir, "fp-audit")
     assert report["skipped_undecodable"] == 0
-    assert report["summary"]["exact"] == 1          # a/a2
+    assert report["summary"]["exact"] == 1          # a/a2（文件名组，切分无关）
     assert report["summary"]["near"] == 1           # b/b2
-    assert report["summary"]["leaks"] == 2          # 两组都跨切分
-    kinds = {lk["kind"] for lk in report["leaks"]}
-    assert kinds == {"exact", "near"}
+    assert "leaks" not in report["summary"]         # 泄漏不在缓存里（读时计算）
     assert report["imbalance"]["ok"] is True        # 单类不告警
+
+    # 泄漏视图：a/a2 与 b/b2 各跨 train/val；换成同侧切分即零泄漏
+    split = {"uid": "u1", "train": ["a.png", "b.png", "c.png"], "val": ["a2.png", "b2.png"]}
+    leaks = leak_view(report, split, ds_dir)
+    assert {lk["kind"] for lk in leaks} == {"exact", "near"}
+    assert len(leaks) == 2
+    for lk in leaks:
+        assert {it["split"] for it in lk["items"]} == {"train", "val"}
+        assert all((ds_dir / "source" / it["name"]).is_file() for it in lk["items"])
+    same_side = leak_view(report, {"uid": "u2", "train": ["a.png", "a2.png", "b.png", "b2.png"],
+                                   "val": ["c.png"]}, ds_dir)
+    assert same_side == []
+    assert leak_view(report, None, ds_dir) == []    # 全集/未切分无泄漏概念
 
 
 def test_imbalance_warning(tmp_path):
-    manifest = _manifest(tmp_path,
-                         [("i0", "car")] + [(f"i{n}", "person") for n in range(1, 6)],
-                         train=["i0", "i1"], val=["i2", "i3", "i4"])
-    # 数量：car 1 / person 4 —— 未达最小绝对量（20），不告警
-    r = compute_audit(manifest)
+    d = _ds_dir(tmp_path, [("i0", "car")] + [(f"i{n}", "person") for n in range(1, 6)])
+    # 数量：car 1 / person 5 —— 未达最小绝对量（20），不告警
+    r = compute_audit(d, "fp-imb1")
     assert r["imbalance"]["ok"] is True
 
-    files = [("a", "car")] * 1 + [("p", "person")] * 30  # car 1 vs person 30 → 失衡
-    uniq = []
-    for idx, (n, c) in enumerate(files):
-        uniq.append((f"{c}{idx:03d}", c))
-    manifest2 = _manifest(tmp_path / "imb", uniq, train=[u[0] for u in uniq[:10]],
-                          val=[u[0] for u in uniq[10:]])
-    r2 = compute_audit(manifest2)
+    d2 = _ds_dir(tmp_path / "imb", [("car000", "car")] + [(f"person{i:03d}", "person")
+                                                          for i in range(30)])
+    r2 = compute_audit(d2, "fp-imb2")
     assert r2["imbalance"]["ok"] is False
     assert r2["imbalance"]["rule"]  # 判定依据必须可见
 
@@ -113,20 +123,12 @@ def test_imbalance_warning(tmp_path):
 def test_undecodable_skipped_not_crash(tmp_path):
     from conftest import PNG_MAGIC
 
-    bad = tmp_path / "bad.png"
-    bad.write_bytes(PNG_MAGIC)  # 假 PNG：解码失败
-    _png(tmp_path / "ok.png")
-    _label(tmp_path / "ok.json", ["car"])
-    manifest = {
-        "uid": "u", "seed": 1, "ratio": 0.5, "stratify": False,
-        "files": [{"image": str(bad), "label": None, "primary_label": None},
-                  {"image": str(tmp_path / "ok.png"), "label": str(tmp_path / "ok.json"),
-                   "primary_label": "car"}],
-        "train": [str(bad)], "val": [str(tmp_path / "ok.png")],
-    }
-    r = compute_audit(manifest)
+    d = _ds_dir(tmp_path, [("ok", "car")])
+    (d / "source" / "bad.png").write_bytes(PNG_MAGIC)  # 假 PNG：解码失败
+    r = compute_audit(d, "fp-bad")
     assert r["skipped_undecodable"] == 1
     assert r["files"] == 2
+    assert r["records"]["bad.png"]["phash"] is None  # 记录在案但 phash 缺席
 
 
 # ---------------------------------------------------------------- 服务级：缓存 + 排除处置
@@ -159,6 +161,9 @@ def test_exclude_files_only_writes_excluded_log(tmp_path, datasets_root, tmp_db,
     name = "exctest"
     build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
     old_split = svc.latest_split(name)
+    from visiontrainer.datasets.stats import get_stats as _raw_stats
+
+    raw_before = _raw_stats(name)
     old_stats = svc.dataset_stats(name)
     victim = old_split["train"][0]
 
@@ -170,8 +175,13 @@ def test_exclude_files_only_writes_excluded_log(tmp_path, datasets_root, tmp_db,
     assert svc.latest_split(name)["uid"] == old_split["uid"]
     assert [s["uid"] for s in svc.list_splits(name)] == [old_split["uid"]]
     assert (datasets_root / name / "derived" / old_split["uid"] / "data.yaml").is_file()
-    # 画像行不动（一行制：排除不换键不重算）
-    assert svc.dataset_stats(name) == old_stats
+    # 画像原料行不动（一行制：排除不写账不重算），读时视图即时缩水（票 06 验收①）
+    from visiontrainer.datasets.stats import get_stats as _raw_stats
+
+    assert _raw_stats(name) == raw_before
+    view_after = svc.dataset_stats(name)
+    assert view_after["summary"]["images"] == old_stats["summary"]["images"] - 1
+    assert all(r["name"] != victim for r in view_after["per_image"])
     # 成员消失只在实效集出现（恢复即回效）
     eff = svc.effective_split(name, old_split["uid"])
     assert victim in eff["dropped"]["excluded"] and victim not in eff["train"] + eff["val"]
@@ -205,33 +215,31 @@ def _mk_yolo(tmp_path: Path) -> Path:
 
 
 def test_fingerprint_changes_with_mtime(tmp_path):
-    p = _png(tmp_path / "f.png")
-    m = {"uid": "u", "seed": 1, "ratio": 0.5, "stratify": False,
-         "files": [{"image": str(p), "label": None, "primary_label": None}],
-         "train": [str(p)], "val": []}
-    fp1 = fingerprint_of(m)
+    """体检行级指纹 = source_fingerprint：图片 size/mtime_ns 变化即失效。"""
+    from visiontrainer.datasets.service import source_fingerprint
+
+    d = _ds_dir(tmp_path, [("f", "car")])
+    fp1 = source_fingerprint(d / "source")
     import os
     import time
 
-    os.utime(p, (time.time() + 10, time.time() + 10))
-    assert fingerprint_of(m) != fp1
+    os.utime(d / "source" / "f.png", (time.time() + 10, time.time() + 10))
+    assert source_fingerprint(d / "source") != fp1
 
 
 def test_fingerprint_changes_with_label_edit(tmp_path):
-    """标注 JSON 变更必须使审计缓存失效（05 号票 D7①：指纹纳入 label stat）。"""
-    p = _png(tmp_path / "f.png")
-    lbl = tmp_path / "f.json"
-    lbl.write_text("{}", encoding="utf-8")
-    m = {"uid": "u", "seed": 1, "ratio": 0.5, "stratify": False,
-         "files": [{"image": str(p), "label": str(lbl), "primary_label": None}],
-         "train": [str(p)], "val": []}
-    fp1 = fingerprint_of(m)
+    """标注 JSON 变更必须使体检缓存失效（05 号票 D7① 口径随指纹延续）。"""
+    from visiontrainer.datasets.service import source_fingerprint
+
+    d = _ds_dir(tmp_path, [("f", "car")])
+    lbl = d / "source" / "f.json"
+    fp1 = source_fingerprint(d / "source")
     import os
     import time
 
     lbl.write_text('{"shapes": []}', encoding="utf-8")
     os.utime(lbl, (time.time() + 10, time.time() + 10))
-    assert fingerprint_of(m) != fp1
+    assert source_fingerprint(d / "source") != fp1
 
 
 def test_thumb_bytes_roundtrip(tmp_path):
