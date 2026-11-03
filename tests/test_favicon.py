@@ -8,7 +8,8 @@ from pathlib import Path
 from PIL import Image
 
 
-def test_favicon_wired_to_packaged_file():
+def test_favicon_wired_to_packaged_file(ui_client):
+    """ui_client 会话级装配带 UI 的应用，NiceGUI 全局 core.app 由此而来。"""
     from nicegui import core
 
     p = Path(core.app.config.favicon)
@@ -21,6 +22,6 @@ def test_favicon_wired_to_packaged_file():
     assert {(16, 16), (32, 32)} <= {s for s in img.info.get("sizes", ())}  # 标签栏两档必带
 
 
-def test_page_head_links_favicon(client):
-    html = client.get("/").text
+def test_page_head_links_favicon(ui_client):
+    html = ui_client.get("/").text
     assert 'href="/favicon.ico"' in html

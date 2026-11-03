@@ -125,7 +125,21 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     return app
 
 
-app = create_app()
+_app: FastAPI | None = None
+
+
+def get_app() -> FastAPI:
+    """进程内单例：装配只在首次访问时发生——导入本模块不建库引擎、不建目录。"""
+    global _app
+    if _app is None:
+        _app = create_app()
+    return _app
+
+
+def __getattr__(name: str):
+    if name == "app":                      # 兼容 `from visiontrainer.main import app` 与 uvicorn 工厂串
+        return get_app()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def main() -> None:
@@ -145,7 +159,7 @@ def main() -> None:
     access = logging.getLogger("uvicorn.access")
     access.propagate = False
     access.addHandler(logging.StreamHandler())
-    uvicorn.run(app, host=server.get("host", "127.0.0.1"), port=server.get("port", 8600),
+    uvicorn.run(get_app(), host=server.get("host", "127.0.0.1"), port=server.get("port", 8600),
                 log_config=None)
 
 
