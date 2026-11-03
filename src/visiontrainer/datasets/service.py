@@ -11,12 +11,19 @@ validation_summary（+ 可选 tiling / flip_idx）。类别表、排除日志、
 dataset.json——读时经 `read_classes` / `excluded.json` / `validation_report.json` 现组。
 `manifests` / `active_manifest` 暂留：切分实体（splits/<uid>/split.json）由票 05 落地，
 本票删除会打断训练链路。
+
+票 04 在本文件加了三件事：加图 `add_images`、类别表四动作（追加/改名/重排/删除 +
+`rollback_classes` 回滚 + `detect_rename_suspects` 疑似改名识别）、改标回流的指纹对账
+`reconcile_on_open`。其中**类别改名是继审查两键（ADR 0003）、自动修复几何（ADR 0005）
+之后的第三条平台标注写路径**（ADR 0009），真源原语收在 `classops.py`：备份落
+`<数据集根>/<名>/backups/<时间戳>/`，逐文件原子写，审查判定按 `shapes_hash` 继承。
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import threading
@@ -25,6 +32,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from . import classops
 from .audit import compute_audit, fingerprint_of, load_cached, save_cached
 from .formats import write_label, yolo_lines
 from .projection import TASK_MODE, TASK_TYPES
@@ -33,6 +41,8 @@ from .split import (build_grouped_manifest, build_manifest, excluded_manifest,
 from .stats import build_stats, get_stats, recompose, save_stats
 from .tiling import JPEG_QUALITY, TILE_GRID_MAX, TILE_OVERLAP_MAX, TILE_TASKS, plan_image, summarize
 from .validate import IMAGE_EXTS, scan_entries, validate_dataset
+
+_logger = logging.getLogger(__name__)
 
 VALID_TASK_TYPES = set(TASK_TYPES)
 
@@ -140,9 +150,9 @@ def _prune_excluded(ds_dir: Path) -> list[str]:
 def source_fingerprint(source_dir: Path) -> str:
     """统一指纹（spec §2.1）：sha256(sorted(文件名, size, mtime_ns))，覆盖 source/ 全部图片与 JSON。
 
-    只 stat 不读内容。**票 04 缝**：详情页「指纹变化 → 后台自动重校验 + 画像」的自动对账
-    归票 04 落地；本票列表页只做目录 mtime 粗判（`_may_have_changes`），两者共用此指纹
-    字段作为账本落点，票 04 直接消费、不再另造判据。
+    只 stat 不读内容。票 04 已把它落成对账判据：详情页打开时 `reconcile_on_open` 用它判新旧
+    （变了才重校验 + 重算画像），列表页的 `_may_have_changes` 仍是目录 mtime 粗判（便宜），
+    两者共用摘要里的同一个字段，不另造判据。
     """
     parts: list[str] = []
     if not source_dir.is_dir():
@@ -262,26 +272,13 @@ def _manifest_for_stats(ds_dir: Path, meta: dict, entries: list[dict]) -> dict:
 # ---------------------------------------------------------------- 出生（唯一入口）
 
 def _probe_source_labels(src: Path) -> set[str]:
-    """探测已标目录里的全部类别名：所有 shape label + flags 为真键。
+    """探测目录里的全部类别名：所有 shape label + flags 为真键。
 
     预填与「表外类别阻断」共用此口径——绝不漏看任何一个 label（永不静默丢弃）。
+    实现收在 `classops.labels_of_files`（出生探测与加图阻断同一把尺子），
     半截 JSON 跳过不炸（校验阶段会以 bad_json 红灯记账）。
     """
-    found: set[str] = set()
-    for j in sorted(src.rglob("*.json")):
-        try:
-            data = json.loads(j.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        for s in data.get("shapes") or []:
-            if isinstance(s, dict) and s.get("label"):
-                found.add(str(s["label"]))
-        for k, v in (data.get("flags") or {}).items():
-            if v:
-                found.add(str(k))
-    return found
+    return classops.labels_of_files(src.rglob("*.json"))
 
 
 def _plan_ingest(src: Path, mode: str) -> list[Path]:
@@ -565,7 +562,7 @@ def validate_dataset_by_name(name: str, root: Path | None = None,
 
     progress_cb(phase, cur, total)：扫描阶段逐 20 张回调（UI 进度条用）。
     「清单漂移报告」机制随票 03 退役；排除条目清理按 spec §3.1 详情页对账口径
-    （已不在 source/ 的条目删除）。票 04 把「指纹变化自动触发本函数」接进详情页。
+    （已不在 source/ 的条目删除）。票 04 的「指纹变化自动触发本函数」见 `reconcile_on_open`。
     """
     root = root or get_datasets_root()
     meta = get_dataset(name, root)
@@ -594,31 +591,518 @@ def validate_dataset_by_name(name: str, root: Path | None = None,
     return report
 
 
-def rename_classes(name: str, classes: list[str], root: Path | None = None) -> dict:
-    """类别改名/重排（显式操作）：重写 classes.txt（唯一真源）并重建全部派生结构。
+# ---------------------------------------------------------------- 类别表四动作 / 加图 / 改标回流（票 04）
 
-    注：spec §2.1 的「改名同步改写真源 JSON shape label + 备份 + 审查继承」属类别四动作
-    票（04/06）范围；本票维持 classes.txt 与派生重转换的既有语义。
+def _managed_dataset(name: str, root: Path | None, action: str) -> tuple[dict, Path]:
+    """受管动作的统一前置：数据集存在 + 必须是托管形态。
+
+    外部数据集（YOLO 目录）平台零写入（只读承诺），加图与类别表四动作对它一律
+    `invalid_args` 拒掉——错误 envelope 会把这句话原样送到页面上。
     """
     meta = get_dataset(name, root)
-    if meta["form"] != "managed":
-        raise DatasetError("invalid_args", "外部数据集的类别不在平台管辖内")
-    if not classes or len(set(classes)) != len(classes):
-        raise DatasetError("invalid_args", "classes 必须非空且不重复")
+    if meta.get("form") != "managed":
+        raise DatasetError("invalid_args",
+                           f"「{action}」只作用于受管数据集：{name} 是外部数据集"
+                           "（平台对外部目录零写入，类别表由 data.yaml 自己说了算）")
+    return meta, _ds_dir(name, root)
+
+
+def _clean_classes(classes: list[str], action: str) -> list[str]:
+    """类别表入参清洗：非空、无空名、无重名；返回顺序即 classes.txt 的行序（类别号）。"""
+    if not classes:
+        raise DatasetError("invalid_args", f"{action}至少要给一个类别名")
+    names = [str(c).strip() for c in classes]
+    if not all(names):
+        raise DatasetError("invalid_args", f"{action}的类别名不能为空")
+    dupes = sorted({c for c in names if names.count(c) > 1})
+    if dupes:
+        raise DatasetError("invalid_args", f"{action}的类别名重复：{'、'.join(dupes)}")
+    return names
+
+
+def _summary_of(ds_dir: Path) -> dict:
+    """动作收尾后回读的落盘摘要（指纹/张数/丢弃账目都以校验层写下的为准）。"""
+    return _read_meta(ds_dir / "dataset.json").get("validation_summary") or {}
+
+
+def rename_classes(name: str, classes: list[str], root: Path | None = None) -> dict:
+    """类别改名（票 04 四动作之一，**平台第三条标注写路径**，ADR 0009）。
+
+    classes 是**按行序与现表逐位对齐**的新类别表：第 i 行旧名 → 第 i 行新名，一次同时态
+    改写（`a↔b` 互换 = 一次改名，不是两次，也不会链式套用）。改名只换**名字**不换**类别号**：
+    实例随名字走，第 i 行仍是第 i 号类别，因此与既有 Run/模型继续可比。
+    要改类别号本身（把实例搬到别的号上）走 `reorder_classes`——那里有确认门。
+
+    写路径三件套（与 ADR 0003 审查两键、ADR 0005 几何正规化同款口径）：
+    1. 改写前先开备份目录 `<数据集根>/<名>/backups/<时间戳>/`，落改写前的 `classes.txt`
+       与动作账目 `backup.json`，再把每个被改写的真源 JSON 原件按相对 source/ 的路径镜像进去；
+    2. JSON 逐文件 tempfile+fsync+os.replace 原子写，绝不半截落盘；
+    3. 审查判定继承：改写后按新内容重算 `vt_review.shapes_hash`（ADR 0005 的确定性改写
+       不改变标注意图），state / reason / note / decided_at 原样不动——改名不该把
+       人已经判过的图打回待审。
+
+    Args:
+        name: 托管数据集名。
+        classes: 与现表行数相同、名字互不重复的新类别表（行序对齐即改名映射）。
+        root: 数据集根，缺省取配置。
+
+    Returns:
+        {classes, renamed（旧名→新名映射）, backup_dir, rewritten（改写的 JSON 文件名）,
+         shapes（改写的 label 数）, skipped（跳过的坏 JSON 账目）, validation,
+         validation_summary}。派生结构不在此重建：格式池按 classes_sha 在下次出队的
+         新鲜度门（`ensure_fresh_derivation`）字节对账懒刷新（ADR 0009 / 票 02）。
+
+    Raises:
+        DatasetError: invalid_args 行数与现表不符或名字重复/为空（detail.classes_before
+            带改写前表，前端可原样复述）、外部数据集（平台零写入）。
+    """
+    _managed_dataset(name, root, "类别改名")
     root = root or get_datasets_root()
     ds_dir = _ds_dir(name, root)
+    before = read_classes(ds_dir)
+    new_classes = _clean_classes(classes, "类别改名")
+    if len(new_classes) != len(before):
+        raise DatasetError("invalid_args",
+                           f"改名要按行逐位对齐：现表 {len(before)} 行，新表 {len(new_classes)} 行"
+                           "——增行走追加、删行走删除类别",
+                           {"classes_before": before, "classes_after": new_classes})
+    mapping = {old: new for old, new in zip(before, new_classes) if old != new}
+    source = _source_dir(ds_dir)
+
+    if mapping:
+        backup_dir = classops.new_backup_dir(ds_dir, "rename", before, new_classes, mapping)
+        result = classops.rewrite_labels(source, mapping, backup_dir)
+    else:
+        backup_dir = None
+        result = {"rewritten": [], "shapes": 0, "skipped": []}
+
+    _write_classes(ds_dir, new_classes)  # 提交点：类别表最后落盘，前面全是可回滚的准备动作
+    report = validate_dataset_by_name(name, root)
+    return {"classes": new_classes, "renamed": mapping,
+            "backup_dir": str(backup_dir) if backup_dir else None,
+            "rewritten": result["rewritten"], "shapes": result["shapes"],
+            "skipped": result["skipped"], "validation": report,
+            "validation_summary": _summary_of(ds_dir)}
+
+
+def rollback_classes(name: str, root: Path | None = None) -> dict:
+    """回滚最近一次类别写路径（票 04）：真源 JSON 与 classes.txt 一起回位。
+
+    单一落点 `<数据集根>/<名>/backups/<时间戳>/`（`rename_classes` 建的目录）：
+    目录里的标注原件按相对路径原子回位到 source/，`classes.txt` 回写改名前的表——
+    只回表不回 JSON（或反之）都会让类别账目对不上，所以两者必须一次做完。
+    备份区不自动清理，多次回滚按同一目录重放即可（幂等）。
+
+    Returns:
+        {restored（回位的相对文件名）, classes（回位后的类别表）, backup_dir,
+         action（回位的是哪次动作）, validation, validation_summary}。
+
+    Raises:
+        DatasetError: not_found 从未有过类别写路径（无备份目录可回）。
+    """
+    _managed_dataset(name, root, "回滚类别改动")
+    root = root or get_datasets_root()
+    ds_dir = _ds_dir(name, root)
+    backup_dir = classops.latest_backup_dir(ds_dir)
+    if backup_dir is None:
+        raise DatasetError("not_found",
+                           f"数据集「{name}」没有类别写路径的备份可回滚"
+                           "（backups/ 目录不存在）")
+    classes = classops.read_backup_classes(backup_dir)
+    if classes is None:
+        raise DatasetError("not_found",
+                           f"备份目录里没有改写前的类别表：{backup_dir / classops.BACKUP_CLASSES_FILE}")
+    source = _source_dir(ds_dir)
+    restored = classops.restore_backup_files(source, backup_dir)
     _write_classes(ds_dir, classes)
-    for brief in meta.get("manifests") or []:
-        manifest = _read_meta(ds_dir / "derived" / brief["uid"] / "split_manifest.json")
-        _derive(ds_dir, manifest, meta["task_type"], classes)
-    raw = _read_meta(ds_dir / "dataset.json")
-    _write_meta(ds_dir, raw)  # 类别表已不在 dataset.json——重写只为刷新清单侧字段
-    # 健康报告画像按新类别表重算 meta（逐图行的标注名来自 JSON 真源，保持原样）
-    payload = get_stats(name, raw.get("active_manifest") or FULL_SET_UID)
-    if payload:
-        payload["classes"] = classes
-        save_stats(name, payload)
-    return get_dataset(name, root)
+    report = validate_dataset_by_name(name, root)
+    action = classops.backup_action(backup_dir)
+    _logger.info("类别写路径回滚：%s ← %s（回位 %d 份标注，类别表回到 %s）",
+                 ds_dir.name, backup_dir, len(restored), classes)
+    return {"restored": restored, "classes": classes, "backup_dir": str(backup_dir),
+            "action": action, "validation": report, "validation_summary": _summary_of(ds_dir)}
+
+
+def append_classes(name: str, classes: list[str], root: Path | None = None) -> dict:
+    """类别追加（票 04 四动作之一）：直追加到 classes.txt 行尾，行序即类别号。
+
+    行尾新增不改任何既有类别号、不动真源一个字节，因此没有确认门。
+    提交后即时重校验 + 重算画像（新类别从此不再算「表外类别」红灯）。
+
+    Returns:
+        {classes（追加后的全表）, appended（本次追加的名）, validation, validation_summary}。
+
+    Raises:
+        DatasetError: invalid_args 空表/空名/重名；state_conflict 类别已在表内
+            （detail.duplicates 列重复项——改名走 rename_classes，不是再追加一行）。
+    """
+    _managed_dataset(name, root, "追加类别")
+    root = root or get_datasets_root()
+    ds_dir = _ds_dir(name, root)
+    existing = read_classes(ds_dir)
+    requested = _clean_classes(classes, "追加类别")
+    duplicates = [c for c in requested if c in existing]
+    if duplicates:
+        raise DatasetError("state_conflict",
+                           f"类别已在类别表内：{'、'.join(duplicates)}——要换名请用类别改名",
+                           {"duplicates": duplicates, "classes": existing})
+    _write_classes(ds_dir, existing + requested)
+    report = validate_dataset_by_name(name, root)
+    return {"classes": existing + requested, "appended": requested,
+            "validation": report, "validation_summary": _summary_of(ds_dir)}
+
+
+def reorder_classes(name: str, classes: list[str], root: Path | None = None,
+                    confirm: bool = False) -> dict:
+    """类别重排（票 04 四动作之一）：改的是**类别号本身**，过确认门才提交。
+
+    重排只写 classes.txt 的新行序——真源 JSON 的 label 一字不动（实例跟着名字走，
+    名字跟着新的行号走）。因为每个 Run/模型的逐类指标是按类别号记录的，行序一变
+    就与既有模型不可比：这是不可逆的账目断裂，服务侧才是权威判据，前端不得代替
+    放行（票 04 契约：未 confirm 一律 409 并逐项复述位移）。
+
+    Args:
+        name: 托管数据集名。
+        classes: 现表的**一个排列**（集合必须与现表完全一致；增删走另两个动作）。
+        root: 数据集根，缺省取配置。
+        confirm: 位移确认门。位移为空时天然放行；有位移且未确认则抛 state_conflict。
+
+    Returns:
+        {classes, moved（逐项位移 [{class, before, after}]，无位移时为 []）, reordered,
+         validation, validation_summary}。
+
+    Raises:
+        DatasetError: invalid_args 表外/缺失类别（detail.unknown / detail.missing）或
+            外部数据集；state_conflict 位移未确认（detail.moves + detail.confirm_required）。
+    """
+    _managed_dataset(name, root, "类别重排")
+    root = root or get_datasets_root()
+    ds_dir = _ds_dir(name, root)
+    before = read_classes(ds_dir)
+    wanted = _clean_classes(classes, "类别重排")
+    unknown = [c for c in wanted if c not in before]
+    missing = [c for c in before if c not in wanted]
+    if unknown or missing:
+        parts = []
+        if unknown:
+            parts.append(f"类别表里没有 {'、'.join(unknown)}")
+        if missing:
+            parts.append(f"少了 {'、'.join(missing)}")
+        raise DatasetError("invalid_args",
+                           "重排是现表的一个排列，不能增删类别：" + "、".join(parts),
+                           {"unknown": unknown, "missing": missing, "classes_before": before})
+    moves = [{"class": c, "before": before.index(c), "after": wanted.index(c)}
+             for c in wanted if before.index(c) != wanted.index(c)]
+    if moves and not confirm:
+        shift = "、".join(f"{m['class']} {m['before']}→{m['after']}" for m in moves)
+        raise DatasetError("state_conflict",
+                           f"重排会位移类别号：{shift}。每个 Run 的逐类指标按类别号记录，"
+                           "重排后与既有模型不可比——确认这些位移后再提交（confirm=true）",
+                           {"moves": moves, "confirm_required": True,
+                            "classes_before": before, "classes_after": wanted})
+    _write_classes(ds_dir, wanted)
+    report = validate_dataset_by_name(name, root)
+    return {"classes": wanted, "moved": moves, "reordered": bool(moves),
+            "validation": report, "validation_summary": _summary_of(ds_dir)}
+
+
+def delete_class(name: str, class_name: str, root: Path | None = None) -> dict:
+    """删除单个类别（票 04 四动作之一）：只放行**零实例**类。
+
+    删除不代删标注——真源里还有该名的实例就拦住，先把它们改标/归并到别的类别
+    （或走「疑似改名」处置）再来删。实例计数用 `classops.count_label_instances`：
+    shape label 逐个计，classify 的 flags 真键按图计，孤儿 JSON 也计（它就在真源里）。
+
+    Returns:
+        {classes（删后全表）, removed, moved（因删行而位移的既有类别号，可能为空）,
+         validation, validation_summary}。moved 非空时前端应向用户复述——删中间行
+        同样会位移后面的类别号，与重排一样破坏与既有模型的可比性。
+
+    Raises:
+        DatasetError: not_found 类别不在表内；state_conflict 仍有实例
+            （detail.instances 带计数，detail.class 带类名）；invalid_args 外部数据集。
+    """
+    _managed_dataset(name, root, "删除类别")
+    root = root or get_datasets_root()
+    ds_dir = _ds_dir(name, root)
+    classes = read_classes(ds_dir)
+    if class_name not in classes:
+        raise DatasetError("not_found", f"类别表里没有这个类别：{class_name}")
+    instances = classops.count_label_instances(_source_dir(ds_dir))
+    count = int(instances.get(class_name, 0))
+    if count:
+        raise DatasetError("state_conflict",
+                           f"类别「{class_name}」在真源里还有 {count} 个实例，删不掉——"
+                           "删除不代删标注：先在 X-AnyLabeling 把这些标注改到别的类别，"
+                           "或确认这其实是改名（详情页「疑似改名」可只改类别表）",
+                           {"class": class_name, "instances": count})
+    after = [c for c in classes if c != class_name]
+    moved = [{"class": c, "before": classes.index(c), "after": after.index(c)}
+             for c in after if classes.index(c) != after.index(c)]
+    _write_classes(ds_dir, after)
+    report = validate_dataset_by_name(name, root)
+    return {"classes": after, "removed": class_name, "moved": moved,
+            "validation": report, "validation_summary": _summary_of(ds_dir)}
+
+
+def detect_rename_suspects(name: str, root: Path | None = None) -> dict:
+    """识别 XAL Label Manager 造成的「未登记新名 + 零实例旧名」，返回成对候选（零写入）。
+
+    Label Manager 的批量改名只改写标注 JSON 的 label，类别表对此一无所知：旧名此刻
+    零实例、新名在表外且带实例。判据在**服务层**（ADR 0009「平台为类别表 master」），
+    前端不另算一套：
+    - 唯一未登记新名 × 唯一零实例旧类 → 无歧义成对，详情页给「只改类别表」处置
+      （`append_classes` 登记新名 + `delete_class` 删零实例旧名，真源 JSON 一字不动）；
+    - 多对只能按「名称序 × 行序」给候选并标 `ambiguous`，必须人工确认后再动。
+
+    Returns:
+        classops.find_rename_suspects 的账目（unregistered / empty_classes / pairs /
+        ambiguous / can_fix_by_table_only）+ {classes, instances}。
+    """
+    _managed_dataset(name, root, "疑似改名识别")
+    ds_dir = _ds_dir(name, root)
+    classes = read_classes(ds_dir)
+    instances = classops.count_label_instances(_source_dir(ds_dir))
+    return {**classops.find_rename_suspects(classes, instances),
+            "classes": classes, "instances": instances}
+
+
+# ---------------------------------------------------------------- 加图（票 04 契约 1）
+
+def _pair_json_for(image: Path) -> Path | None:
+    """图片的同词干标注 JSON（同目录优先，再宽松匹配同目录任意大小写）；没有返回 None。"""
+    cand = image.with_suffix(".json")
+    if cand.is_file():
+        return cand
+    for other in image.parent.glob(f"{image.stem}.*"):
+        if other.suffix.lower() == ".json":
+            return other
+    return None
+
+
+def _pair_image_for(label_path: Path) -> Path | None:
+    """标注 JSON 的同词干图片；没有返回 None（单给 JSON 不构成一次可入图的配对）。"""
+    for ext in sorted(IMAGE_EXTS):
+        cand = label_path.with_suffix(ext)
+        if cand.is_file():
+            return cand
+    return None
+
+
+def _expand_ingest_plan(paths: list[str], source_dir: Path) -> list[Path]:
+    """加图输入归一：目录 / 单文件 / 两者混着给都接受，图片自动带上同词干 JSON。
+
+    目录只收「图片 + 其同词干 JSON」，不会被无关文件（导出报告、缩略图缓存）拖进真源。
+
+    Args:
+        paths: 用户给的路径清单（字符串，目录或文件混着）。
+        source_dir: 该数据集的真源目录（用于识别「文件已在真源内」）。
+
+    Returns:
+        去重后的待入图文件清单（绝对路径）。
+
+    Raises:
+        DatasetError: invalid_args 路径为空/不存在、类型不支持、JSON 无同名图片，
+            或文件已在真源目录内（那种情形归 `reconcile_on_open` 认领，不是加图）。
+    """
+    if not paths:
+        raise DatasetError("invalid_args", "加图至少要给一个目录或文件路径")
+    src_root = source_dir.resolve()
+    picked: list[Path] = []
+    seen: set[Path] = set()
+
+    def _add(p: Path) -> None:
+        rp = p.resolve()
+        if rp in seen:
+            return
+        if rp == src_root or src_root in rp.parents:
+            raise DatasetError("invalid_args",
+                               f"文件已在真源目录内：{rp.name}——直接投放进 source/ 的文件"
+                               "不需要加图，打开详情页时按指纹对账自动纳入账目")
+        seen.add(rp)
+        picked.append(rp)
+
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            images = sorted(q for q in p.rglob("*")
+                            if q.is_file() and q.suffix.lower() in IMAGE_EXTS)
+            if not images:
+                raise DatasetError("invalid_args", f"目录里没有可入图的图片文件：{p}")
+            for img in images:
+                _add(img)
+                j = _pair_json_for(img)
+                if j is not None:
+                    _add(j)
+        elif p.is_file():
+            suffix = p.suffix.lower()
+            if suffix in IMAGE_EXTS:
+                _add(p)
+                j = _pair_json_for(p)
+                if j is not None:
+                    _add(j)
+            elif suffix == ".json":
+                img = _pair_image_for(p)
+                if img is None:
+                    raise DatasetError("invalid_args",
+                                       f"标注 JSON 没有同名图片，无法单独入图：{p.name}")
+                _add(img)
+                _add(p)
+            else:
+                raise DatasetError(
+                    "invalid_args",
+                    f"不支持的文件类型：{p.name}（只收图片 {sorted(IMAGE_EXTS)} 或同名标注 JSON）")
+        else:
+            raise DatasetError("invalid_args", f"路径不存在：{p}")
+    return picked
+
+
+def _ingest_conflicts(files: list[Path], source_dir: Path) -> list[dict]:
+    """同名冲突账目（零写入）：与真源撞名、同一批次内部撞名，两种一视同仁。
+
+    平铺真源里一个名字只能有一份标注，撞名要么覆盖（丢数据）要么并存（stem_conflict
+    红灯），都不是用户想要的——统一阻断，绝不自动改名（票 04 契约）。
+    """
+    by_name: dict[str, list[str]] = {}
+    for p in files:
+        by_name.setdefault(p.name, []).append(str(p))
+    conflicts: list[dict] = []
+    for name, origins in sorted(by_name.items()):
+        if (source_dir / name).is_file():
+            conflicts.append({"file": name, "reason": "exists_in_source", "sources": origins})
+        elif len(origins) > 1:
+            conflicts.append({"file": name, "reason": "duplicate_in_batch", "sources": origins})
+    return conflicts
+
+
+def add_images(name: str, paths: list[str], transfer: str = "copy",
+               root: Path | None = None, append_classes: list[str] | None = None,
+               progress_cb=None) -> dict:
+    """加图（票 04 契约 1）：把图（+ 同名标注 JSON）平铺落进托管数据集的真源 source/。
+
+    「直接往 source/ 投放文件也算数」不靠本函数——那是 `reconcile_on_open` 的指纹对账
+    负责的；本函数是「平台替你把文件放进去并当场记好账」的受管入口。
+    校验与画像复用出生/重新校验的同一套遍历（`validate_dataset_by_name`），判据不重写。
+
+    Args:
+        name: 托管数据集名（外部数据集零写入，直接拒）。
+        paths: 路径清单，目录与单文件可混给；目录只收图片及其同词干 JSON。
+        transfer: "copy"（默认）或 "move"；move 用 shutil.move 真搬走，
+            **不留反向符号链接**（XAL 打开的是真源，回指原址的链接会造双真相）。
+        root: 数据集根，缺省取配置。
+        append_classes: 表外类别的「一键追加后重试」载荷——须覆盖本次拦下的全部类别，
+            覆盖不了就是参数错（先归并标注再来），不予放行。
+        progress_cb: (phase, cur, total) 进度回调，phase ∈ 入图 / 扫描校验。
+
+    Returns:
+        {added（入图张数）, images（图片文件名）, classes（生效类别表）, appended_classes,
+         transfer, files（含 JSON 的全部入图文件名）, validation（重校验报告）,
+         validation_summary（落盘摘要，指纹已刷新）}。
+
+    Raises:
+        DatasetError: state_conflict 同名冲突（detail.conflicts）或标注携带表外类别且未带
+            append_classes（detail.source_labels）——两者都是阻断，不部分入图、不自动改名、
+            不静默丢标注；invalid_args 参数/路径不合法，或 append_classes 没能覆盖表外类别。
+    """
+    _managed_dataset(name, root, "加图")
+    if transfer not in TRANSFER_MODES:
+        raise DatasetError("invalid_args", f"transfer 必须是 {list(TRANSFER_MODES)}")
+    root = root or get_datasets_root()
+    ds_dir = _ds_dir(name, root)
+    source = _source_dir(ds_dir)
+    source.mkdir(parents=True, exist_ok=True)
+
+    files = _expand_ingest_plan(paths, source)
+    conflicts = _ingest_conflicts(files, source)
+    if conflicts:
+        names = "、".join(sorted({c["file"] for c in conflicts}))
+        raise DatasetError("state_conflict",
+                           f"加图被同名冲突阻断：{names}——平铺真源一个名字只能配一份标注，"
+                           "平台不自动改名也不会覆盖已有标注；请改名或从这批里剔除后再投",
+                           {"conflicts": conflicts})
+
+    classes = read_classes(ds_dir)
+    requested = _clean_classes(append_classes, "追加类别") if append_classes else []
+    offenders = sorted(classops.labels_of_files(
+        [p for p in files if p.suffix.lower() == ".json"]) - set(classes))
+    if offenders and not requested:
+        raise DatasetError("state_conflict",
+                           f"这批标注携带类别表之外的类别：{'、'.join(offenders)}"
+                           "——确认它们是新类别就带 append_classes 重发（登记进类别表再入图），"
+                           "否则先在 X-AnyLabeling 把它们归并到既有类别（不静默丢标注）",
+                           {"source_labels": offenders})
+    if offenders and not set(offenders) <= set(requested):
+        raise DatasetError("invalid_args",
+                           f"这批标注携带类别表之外的类别：{'、'.join(offenders)}"
+                           f"，而 append_classes 只给了 {'、'.join(requested)}"
+                           "——要么把这些类别一并登记，要么先在 X-AnyLabeling 归并到既有类别",
+                           {"source_labels": offenders, "append_classes": requested})
+    appended = [c for c in requested if c not in classes]
+    if appended:
+        # 先登记再入图：入图后校验才不会亮 unknown_labels。append_classes 是用户明示的
+        # 登记表动作，与本批是否真的触发过阻断无关——给了就照办，返回里 appended_classes 记账
+        _write_classes(ds_dir, classes + appended)
+
+    def _cb(phase: str):
+        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
+
+    image_names = sorted(p.name for p in files if p.suffix.lower() in IMAGE_EXTS)
+    _ingest(files, source, transfer, progress=_cb("入图"))
+    report = validate_dataset_by_name(name, root, progress_cb=progress_cb)
+    return {"added": len(image_names), "images": image_names,
+            "files": sorted(p.name for p in files), "classes": read_classes(ds_dir),
+            "appended_classes": appended, "transfer": transfer,
+            "validation": report, "validation_summary": _summary_of(ds_dir)}
+
+
+# ---------------------------------------------------------------- 改标回流：指纹对账（票 04 契约 3）
+
+def reconcile_on_open(name: str, root: Path | None = None, progress_cb=None) -> dict:
+    """详情页打开时的真源对账（票 04 改标回流入口）：统一指纹是唯一的新旧判据。
+
+    `source_fingerprint = sha256(sorted(文件名, size, mtime_ns))`（只 stat 不读内容，
+    spec §2.1 统一指纹）与 dataset.json 摘要里存的指纹比对：
+    - 一致 → 一次纯 stat 快路径，`changed: false`，**不重跑校验**（checked_at 保持原值）；
+    - 变了 → 重校验 + 重算画像（带进度回调），摘要里的指纹一并前移。
+
+    无常驻 watcher、无定时任务：账目只在「打开详情页」这个真人出现的时刻对账。
+    XAL 里改标保存后回平台，这一步就把新账目落地；审查状态的回退不需要写盘——
+    `review.read_state` 的双指纹裁决自然让改过的图回到 pending 并标「已修改」。
+    半截 JSON（XAL 写一半断电）由校验层记一次 bad_json 红灯、本函数计数返回，
+    **不抛未捕获异常**；下一次打开（内容修好后指纹再变）自愈。
+
+    Args:
+        name: 托管数据集名。
+        root: 数据集根，缺省取配置。
+        progress_cb: (phase, cur, total) 进度回调（phase="扫描校验"，仅变化时才有）。
+
+    Returns:
+        {changed, revalidated, fingerprint, previous_fingerprint, total_images,
+         negatives, corrupted（本次报告里的 bad_json 张数）, validation（变化时为报告，
+         未变化为 None）, validation_summary（落盘摘要）}。
+    """
+    meta, ds_dir = _managed_dataset(name, root, "真源对账")
+    root = root or get_datasets_root()
+    source = _source_dir(ds_dir)
+    fingerprint = source_fingerprint(source)
+    summary = (meta.get("validation_summary") or {})
+    previous = summary.get("source_fingerprint")
+
+    if fingerprint == previous:
+        return {"changed": False, "revalidated": False, "fingerprint": fingerprint,
+                "previous_fingerprint": previous,
+                "total_images": int(summary.get("total_images") or 0),
+                "negatives": int(summary.get("negatives") or 0),
+                "corrupted": 0, "validation": None, "validation_summary": summary}
+
+    report = validate_dataset_by_name(name, root, progress_cb=progress_cb)
+    return {"changed": True, "revalidated": True, "fingerprint": fingerprint,
+            "previous_fingerprint": previous,
+            "total_images": int(report.get("total_images") or 0),
+            "negatives": int(report.get("background") or 0),
+            "corrupted": int((report.get("counts") or {}).get("bad_json") or 0),
+            "validation": report, "validation_summary": _summary_of(ds_dir)}
+
 
 
 # ---------------------------------------------------------------- 切片（Tiling）

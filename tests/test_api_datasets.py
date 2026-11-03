@@ -46,8 +46,9 @@ def test_create_labeled_lifecycle(datasets_root, detect_source, client):
     r = client.post("/api/v1/datasets/plate/validate")
     assert r.status_code == 200 and r.json()["total_images"] == 10
 
-    # 类别改名/重排：classes.txt 唯一真源，响应携带组合视图
-    r = client.put("/api/v1/datasets/plate/classes", json={"classes": ["person", "car"]})
+    # 类别改名：classes.txt 唯一真源，响应携带组合视图
+    r = client.put("/api/v1/datasets/plate/classes",
+                   json={"action": "rename", "classes": ["person", "car"]})
     assert r.status_code == 200 and r.json()["classes"] == ["person", "car"]
     assert (datasets_root / "plate" / "classes.txt").read_text(
         encoding="utf-8").splitlines() == ["person", "car"]
@@ -135,3 +136,41 @@ def test_stratify_split_keeps_rare_class(datasets_root, detect_source):
     assert all("primary_label" in f for f in m["files"])
     val_joined = "\n".join(m["val"])
     assert "person" in val_joined, "分层切分后稀有类必须出现在 val"
+
+
+def test_classes_action_single_entry_gates(datasets_root, detect_source, client):
+    """四动作单入口（docs/api.md:29）：REST 只按 action 分派，gate 一律由服务侧判。"""
+    r = client.post("/api/v1/datasets", json=_create_body(source_path=str(detect_source)))
+    assert r.status_code == 200, r.text
+
+    # 该动作需要的参数没给 → API 层挡下，不落到服务侧猜
+    r = client.put("/api/v1/datasets/plate/classes", json={"action": "append"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_args"
+
+    # 追加直通：行尾新增不改既有类别号
+    r = client.put("/api/v1/datasets/plate/classes",
+                   json={"action": "append", "classes": ["truck"]})
+    assert r.status_code == 200 and r.json()["classes"] == ["car", "person", "truck"]
+
+    # 重排确认门：未确认 409 且 detail 复述逐项位移；确认后同一条请求落盘
+    r = client.put("/api/v1/datasets/plate/classes",
+                   json={"action": "reorder", "classes": ["truck", "car", "person"]})
+    assert r.status_code == 409 and r.json()["error"]["code"] == "state_conflict"
+    detail = r.json()["error"]["detail"]
+    assert detail["confirm_required"] is True
+    assert {m["class"] for m in detail["moves"]} == {"truck", "car", "person"}
+    r = client.put("/api/v1/datasets/plate/classes",
+                   json={"action": "reorder", "classes": ["truck", "car", "person"],
+                         "confirm": True})
+    assert r.status_code == 200 and r.json()["classes"] == ["truck", "car", "person"]
+
+    # 删除仅限零实例：car 有实例被拦并带计数，刚追加的 truck 天生零实例
+    r = client.put("/api/v1/datasets/plate/classes",
+                   json={"action": "delete", "class_name": "car"})
+    assert r.status_code == 409 and r.json()["error"]["detail"]["instances"] > 0
+    r = client.put("/api/v1/datasets/plate/classes",
+                   json={"action": "delete", "class_name": "truck"})
+    assert r.status_code == 200 and "truck" not in r.json()["classes"]
+
+    # 响应携带读时组合视图与重校验报告（四动作提交即重算账目）
+    assert r.json()["validation"]["total_images"] > 0

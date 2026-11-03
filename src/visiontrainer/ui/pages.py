@@ -142,22 +142,18 @@ def _source_dir_of(meta: dict) -> Path | None:
     return Path(ds.get_datasets_root()) / meta["name"] / "source"
 
 
-def _maybe_changed(meta: dict) -> bool:
-    """「可能有变更」粗判（spec §2.1：只用目录 mtime、不承重；指纹自动对账在票 04）。
+def _source_fingerprint_state(meta: dict) -> tuple[bool | None, str]:
+    """真源指纹对账状态（票 04 唯一新旧判据）：返回 (账本是否落后, 账本指纹)。
 
-    目录 mtime 晚于上次校验时间即提示：它只反映真源目录的增删，就地改标不动目录 mtime，
-    权威新旧判据是 source_fingerprint。解析失败/不可 stat 一律不给提示（不承重的账不猜）。
+    账本落后＝`source/` 当前 `source_fingerprint` ≠ `validation_summary.source_fingerprint`
+    （改标/加图/删图都算）。未建账（无真源、无指纹）返回 None——不承重的账不猜，
+    列表页的「可能有变更」是目录 mtime 粗判，与此处无关（spec §2.1）。
     """
     src = _source_dir_of(meta)
-    checked_at = _validation_of(meta).get("checked_at")
-    if src is None or not checked_at:
-        return False
-    try:
-        checked = datetime.fromisoformat(str(checked_at))
-        mtime = src.stat().st_mtime
-    except (ValueError, OSError):
-        return False
-    return datetime.fromtimestamp(mtime) > checked
+    stored = str(_validation_of(meta).get("source_fingerprint") or "")
+    if src is None or not src.is_dir() or not stored:
+        return None, stored
+    return ds.source_fingerprint(src) != stored, stored
 
 
 def _error_payload(exc: ds.DatasetError) -> object:
@@ -227,6 +223,75 @@ def _label_shapes(label_path: str | None) -> list[dict]:
         return []
     shapes = data.get("shapes") if isinstance(data, dict) else None
     return [s for s in (shapes or []) if isinstance(s, dict)]
+
+
+def _expand_add_paths(paths: list[str], skip: set[str]) -> list[str]:
+    """把「目录」展开成图片 + 同词干 JSON 的文件清单，并按 skip 剔除（同名冲突的一键处置）。
+
+    只服务「跳过这些文件后重试」这一次重发：图片清单口径与校验同源
+    （`validate.list_images`），JSON 按同词干配对带入，负样本（无 JSON 的图）照投。
+    """
+    from ..datasets.validate import list_images  # 与本页 GUIDANCE 同风格的按需引
+
+    out: list[str] = []
+    for raw in paths:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            for img in list_images(p):
+                if img.name in skip:
+                    continue
+                out.append(str(img))
+                sidecar = img.with_suffix(".json")
+                if sidecar.is_file():
+                    out.append(str(sidecar))
+        elif p.is_file() and p.name not in skip:
+            out.append(str(p))
+    return out
+
+
+def _class_instance_counts(name: str) -> dict[str, int] | None:
+    """逐类实例数（类别表四动作的显示依据）：读最近一次画像的类别分布。
+
+    只作提示，不作权威——删除非零实例类与未确认位移都由服务侧 409 拦（spec §2.1）；
+    画像缺位时返回 None，本区显示「实例数未知」而不是猜一个 0 把删除按钮点亮。
+    """
+    try:
+        payload = ds.dataset_stats(name)
+    except Exception:  # noqa: BLE001 — 提示性数据读失败不惊扰用户，页脚账目自会说
+        return None
+    if not payload:
+        return None
+    counts: dict[str, int] = {}
+    for side in (payload.get("agg", {}).get("by_split") or {}).values():
+        for cls, n in (side.get("by_class") or {}).items():
+            counts[str(cls)] = counts.get(str(cls), 0) + int(n or 0)
+    return counts
+
+
+def _rename_suspects(name: str) -> dict | None:
+    """疑似改名识别（票 04）：判据在**服务层**，这里只做读与降级，不在前端另算一套。
+
+    `--validatelabel exact` 是软守卫，拦得住新建/编辑标注、拦不住 Label Manager 的批量改名，
+    所以「表外新名带实例 × 表内旧名零实例」这个形状要由服务侧认定。
+    识别要遍历真源（全量读 label），只在详情页类别表区后台跑一次；读失败返回 None，
+    本区显示不可用而不是猜一个空表（空表会把「有疑似」这件事悄悄藏起来）。
+    """
+    try:
+        return ds.detect_rename_suspects(name)
+    except Exception:  # noqa: BLE001 — 提示性判定读失败不惊扰用户，按钮会说明原因
+        return None
+
+
+def _swap(classes: list[str], i: int, j: int) -> list[str]:
+    """相邻交换出新行序（重排按钮的本地预览）：返回新表，不改传入表。
+
+    越界原样返回——上移第 0 行、下移最后一行不该产生一次「无位移」的重排请求。
+    """
+    if not (0 <= i < len(classes) and 0 <= j < len(classes)):
+        return list(classes)
+    out = list(classes)
+    out[i], out[j] = out[j], out[i]
+    return out
 
 CHART_PALETTE = ["#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#dc2626", "#0891b2"]
 CHART_TEXT = "#94a3b8"  # 深浅两色模式下均可读的中性文字色
@@ -691,6 +756,11 @@ def _open_in_xal(image: str) -> None:
     单实例复用：已开窗口直接在其内加载并前置，不再另开新窗（探测与收发由 xal_open_entry 负责）。
     平台插件对齐桌面端手动启动（~/.local/share/applications 固定 xcb）：会话默认 QT_QPA_PLATFORM=
     wayland 在 Hyprland+NVIDIA 上是 Qt 卡顿路径，X-AnyLabeling 画布为 CPU 光栅绘制，xcb(XWayland) 流畅。
+
+    托管真源里的图额外带 `--dir`（该集 source/）与 `--classes`（该集 classes.txt）：入口据此
+    走换集序列 `may_continue → load_labels(clear_existing=True) → import_image_folder → load_file`，
+    冷启动恒带 `--labels … --validatelabel exact`（exact 是拦新建/编辑标注的**软守卫**，
+    不承诺拦住存量旧类与 Label Manager 改名，spec §2.1 XAL 协同）。
     """
     import os
     import subprocess
@@ -700,15 +770,46 @@ def _open_in_xal(image: str) -> None:
 
     py = load_config().get("training", {}).get("python") or sys.executable
     entry = Path(__file__).resolve().parents[1] / "training" / "xal_open_entry.py"
+    src_dir, classes = _xal_target(image)
+    argv = [py, str(entry), image]
+    if src_dir:
+        argv += ["--dir", src_dir]
+    if classes:
+        argv += ["--classes", classes]
     try:
         subprocess.Popen(
-            [py, str(entry), image],
+            argv,
             env={**os.environ, "QT_QPA_PLATFORM": "xcb"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True)
         ui.notify(f"已在 X-AnyLabeling 中打开 {Path(image).name}", type="positive")
     except OSError as exc:
         ui.notify(f"调起失败：{exc}（训练 python 须指向 X-AnyLabeling 环境，见设置页）", type="negative")
+
+
+def _xal_target(image: str) -> tuple[str | None, str | None]:
+    """真源图片 → (该集 source 目录, 该集 classes.txt)；非托管真源里的图两者归 None。
+
+    外部数据集没有平台类别表（零写入承诺），调起自然不带 `--labels`——类别表管辖只到托管集。
+    """
+    p = Path(image).expanduser().resolve()
+    if p.parent.name != ds.SOURCE_SUBDIR:
+        return None, None
+    classes = p.parent.parent / "classes.txt"
+    return str(p.parent), (str(classes) if classes.is_file() else None)
+
+
+def _xal_rescan(name: str) -> bool:
+    """本集 XAL 实例存活时推 rescan（票 04：加图完成后新图立即可标，不重启桌面端）。
+
+    无存活实例是幂等 no-op（入口侧承诺不为此冷启动一个没人看的 GUI 窗口）；
+    阻塞在 ack 上（连接 0.5s + ack 2s 超时），调用方一律走 `_io` 线程化。
+    """
+    from ..training.xal_open_entry import send_to_running_instance
+
+    root = Path(ds.get_datasets_root()) / name
+    return send_to_running_instance(
+        cmd="rescan", dir=str(root / ds.SOURCE_SUBDIR), classes=str(root / "classes.txt"))
 
 
 def _open_dir(path: str) -> None:
@@ -3505,6 +3606,38 @@ document.addEventListener('scroll', function(e){
 
             detail = ui.column().classes("w-full")
 
+            async def _auto_reconcile(name: str) -> None:
+                """打开详情页即对账真源（票 04 改标回流）：指纹落后就后台重校验 + 重算画像。
+
+                无常驻 watcher、无定时任务——对账只发生在「真人打开这一页」的时刻；
+                服务层在指纹一致时走一次纯 stat 的快路径，所以每次渲染问一句不心疼。
+                """
+                if state.get("reconciling"):
+                    return
+                state["reconciling"] = True
+                op = ops.begin(f"ds:{name}:reconcile", f"真源对账 · {name}", scope=name)
+                try:
+                    res = await _io(ds.reconcile_on_open, name, progress_cb=op.progress)
+                except ds.DatasetError as exc:
+                    op.fail(exc.message)
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    op.fail(str(exc))
+                    ui.notify(f"真源对账失败：{exc}", type="negative")
+                    return
+                finally:
+                    state["reconciling"] = False
+                op.finish()
+                if not res.get("changed"):
+                    return
+                bad = int(res.get("corrupted") or 0)
+                ui.notify(f"真源已变：重校验 {res.get('total_images')} 张完成 · "
+                          f"画像与指纹一并前移 · 改动过的图回到待审"
+                          + (f" · {bad} 张标注 JSON 半截（下次打开自愈）" if bad else ""),
+                          type="info")
+                refresh()
+                render_detail()
+
             def render_detail() -> None:
                 detail.clear()
                 name = state["selected"]
@@ -3519,6 +3652,10 @@ document.addEventListener('scroll', function(e){
                 state["ws"] = {}  # 折叠工作区注册表：key → {exp, box, built, meta}
                 task_zh = TASK_TYPE_ZH.get(meta["task_type"], meta["task_type"])
                 ok = _validation_of(meta).get("ok")
+                fp_changed = _source_fingerprint_state(meta)[0]
+                if meta["form"] == "managed" and fp_changed:
+                    # 琥珀徽章只是显示，对账才是动作：不等用户点任何同步按钮（票 04 契约 3）
+                    asyncio.get_running_loop().create_task(_auto_reconcile(name))
                 with detail, ui.card().classes("w-full gap-2"):
                     state["op_box"] = ui.column().classes("w-full gap-1")
                     state["op_scope"] = name
@@ -3530,8 +3667,11 @@ document.addEventListener('scroll', function(e){
                             if ok is not None:
                                 ui.badge("通过" if ok else "有问题").props(
                                     f"color={'green' if ok else 'red'} outline").style("font-size:10px")
-                            if _maybe_changed(meta):
-                                ui.badge("可能有变更").props("color=amber outline").style("font-size:10px")
+                            if _source_fingerprint_state(meta)[0]:
+                                ui.badge("账本落后真源").props("color=amber outline").style(
+                                    "font-size:10px").tooltip(
+                                    "source/ 当前指纹与上次校验记录的指纹不一致——"
+                                    "打开详情页即自动对账（重校验 + 重算画像），无常驻监视")
                         # ── 页头工具条：加图 / 导出标注 / 在 X-AnyLabeling 中打开（spec §2.1）
                         with ui.row().classes("items-center gap-2 flex-wrap justify-end"):
                             if meta["form"] == "managed":
@@ -3582,7 +3722,7 @@ document.addEventListener('scroll', function(e){
                     if key == "source":
                         _render_ws_source(meta)
                     elif key == "classes":
-                        _render_ws_classes(meta)
+                        _render_ws_classes(meta, ws["box"])
                     elif key == "validation":
                         _render_ws_validation(meta)
                     elif key == "audit":
@@ -3719,22 +3859,366 @@ document.addEventListener('scroll', function(e){
                 if origin.get("at"):
                     _meta_row("出生时间", _fmt_ts(origin["at"]))
                 if src is not None:
+                    changed, stored = _source_fingerprint_state(meta)
                     _meta_row("真源目录", str(src), str(src) if src.is_dir() else None)
-                    _meta_row("变动", "目录 mtime 晚于上次校验——可能有未入账图片/标注"
-                              if _maybe_changed(meta) else "与上次校验时的目录一致")
+                    _meta_row("变动", {
+                        True: "当前指纹与账本指纹不一致——真源有未入账的改标/加图/删图，"
+                              "打开本页已自动对账（重校验 + 重算画像）",
+                        False: "与账本指纹一致（source_fingerprint 相同）",
+                    }.get(changed, "尚无校验账本（未建指纹）")
+                              + (f" · 账本 {stored[:12]}" if stored else ""))
 
-            def _render_ws_classes(meta: dict) -> None:
-                """类别表工作区：classes.txt 的行序视图（行序即类别 id，平台为 master）。"""
-                classes = meta.get("classes") or []
-                if not classes:
-                    ui.label("类别表为空").classes("text-xs opacity-40")
-                    return
-                tbl = ui.table(columns=[{"name": "id", "label": "id", "field": "id", "align": "left"},
-                                        {"name": "name", "label": "类别", "field": "name", "align": "left"}],
-                               rows=[{"id": i, "name": c} for i, c in enumerate(classes)], row_key="id")
-                _style_table(tbl)
-                ui.label(f"共 {len(classes)} 类 · 真源 classes.txt").classes(
+            # ── 类别表工作区（票 04 四动作：追加 / 改名 / 重排 / 删除，平台为 master）
+            def _render_ws_classes(meta: dict, box) -> None:
+                """classes.txt 的行序视图 + 四动作入口（行序即类别号，ADR 0009）。
+
+                阻断的权威在服务侧（非零实例删除 409、未确认位移 409），此处按钮置灰
+                只是提前提示；动作落盘后即时重校验 + 画像，存活 XAL 实例收 rescan（带
+                classes 即先 load_labels(clear_existing=True)）刷新类别表。
+                """
+                name = meta["name"]
+                classes = list(meta.get("classes") or [])
+                counts = _class_instance_counts(name)
+
+                def _count_of(cls: str) -> int | None:
+                    return None if counts is None else int(counts.get(cls, 0))
+
+                async def _written(msg: str, kind: str = "positive") -> None:
+                    """四动作共同收尾：通知 → 刷新在开的 XAL 实例类别表 → 重读账目并留住本区。"""
+                    ui.notify(msg, type=kind)
+                    if await _io(_xal_rescan, name):
+                        ui.notify("在开的 X-AnyLabeling 已刷新类别表与新清单", type="info")
+                    state["ws_open"] = "classes"
+                    refresh()
+                    render_detail()
+
+                async def do_append() -> None:
+                    """追加直通：行尾新增不动任何既有类别号，因此没有确认门。"""
+                    extra = [s.strip() for s in str(a_add.value or "").replace("，", ",").split(",")
+                             if s.strip()]
+                    if not extra:
+                        ui.notify("要追加的类别为空——逗号分隔，例如：scratch,dent", type="warning")
+                        return
+                    op = ops.begin(f"ds:{name}:cls_append", f"追加类别 · {name}", scope=name)
+                    try:
+                        await _io(ds.append_classes, name, extra)
+                    except ds.DatasetError as exc:
+                        op.fail(exc.message)
+                        ui.notify(f"追加失败：{exc.message}", type="negative")
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
+                        ui.notify(f"追加失败：{exc}", type="negative")
+                        return
+                    op.finish()
+                    await _written(f"已追加 {len(extra)} 类：{'、'.join(extra)}"
+                                   "（行尾新增，既有类别号与真源标注一律不动）")
+
+                async def do_rename(old: str, new: str, btn=None) -> None:
+                    """改名＝平台第三条标注写路径（ADR 0009）：类别表 + 真源 JSON 的 label 同步。
+
+                    btn 可空——疑似改名的「只改类别表」也走这条路（那一行旧名换成新名，行序不变），
+                    真源里旧名已零实例，改写标注这一步自然什么也不动。
+                    """
+                    if not new:
+                        ui.notify("新类别名为空——改名得先填目标名", type="warning")
+                        return
+                    if new in classes:
+                        ui.notify(f"「{new}」已在类别表里——改名只换一行、不合并两类", type="warning")
+                        return
+                    new_list = [new if c == old else c for c in classes]
+                    op = ops.begin(f"ds:{name}:cls_rename", f"改名类别 {old}→{new} · {name}",
+                                   scope=name)
+                    with _busy(btn):
+                        try:
+                            await _io(ds.rename_classes, name, new_list)
+                        except ds.DatasetError as exc:
+                            op.fail(exc.message)
+                            ui.notify(f"改名失败：{exc.message}", type="negative")
+                            return
+                        except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
+                            ui.notify(f"改名失败：{exc}", type="negative")
+                            return
+                    op.finish()
+                    n = _count_of(old)
+                    await _written(f"已改名 {old} → {new}"
+                                   + (f"：真源里 {n} 个实例的标注 label 一并改写" if n else
+                                      "：真源里没有该名的实例，只动了类别表")
+                                   + " · 原文件已备份可回滚，审查判定（状态/理由/判定时间）继承")
+
+                def _moves(new_order: list[str], exc=None) -> list[tuple[str, int, int]]:
+                    """位移清单（确认门复述用）：(类名, 旧号, 新号)，只列真动了的。
+
+                    以服务端 409 的 `detail.moves`（`{class, before, after}`）为准——
+                    位移的算法在那边；本地逐位对齐只作兜底，免得 detail 换了形状时复述成空白。
+                    """
+                    detail = getattr(exc, "detail", None) or {}
+                    moved = detail.get("moves")
+                    if isinstance(moved, list):
+                        out = [(str(m["class"]), int(m.get("before", 0)), int(m.get("after", 0)))
+                               for m in moved if isinstance(m, dict) and "class" in m]
+                        if out:
+                            return out
+                    return [(c, classes.index(c), new_order.index(c))
+                            for c in new_order if c in classes and classes.index(c) != new_order.index(c)]
+
+                async def do_reorder(new_order: list[str], confirm: bool, gate=None) -> None:
+                    """重排过确认门：先按 confirm=False 问服务侧，409 即弹门；确认后带 confirm=True 重发。"""
+                    name_now = meta["name"]
+                    op = ops.begin(f"ds:{name_now}:cls_reorder",
+                                   f"重排类别 · {name_now}", scope=name_now)
+                    try:
+                        await _io(ds.reorder_classes, name_now, new_order, confirm=confirm)
+                    except ds.DatasetError as exc:
+                        op.finish()  # 要你复述位移不是失败，是确认门
+                        if not confirm:
+                            _ask_reorder(new_order, exc)
+                            return
+                        ui.notify(f"重排失败：{exc.message}", type="negative")
+                        return
+                    except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
+                        ui.notify(f"重排失败：{exc}", type="negative")
+                        return
+                    op.finish()
+                    if gate is not None:
+                        gate.clear()
+                    await _written(f"已重排 {len(new_order)} 行类别表（classes.txt 行序即新类别号）"
+                                   " · 与既有 Run/模型的类别号不再可比")
+
+                def _ask_reorder(new_order: list[str], exc) -> None:
+                    """位移确认门（本区内联复述，不另开对话框）：位移 + 可比性断裂。"""
+                    if gate is not None:
+                        gate.clear()
+                        with gate:
+                            with ui.card().classes("w-full gap-1 q-pa-sm").style(
+                                    "background:rgba(245,158,11,.10)"):
+                                ui.label("重排会改类别号本身——确认？").classes(
+                                    "text-xs font-semibold text-amber-500")
+                                for c, old_i, new_i in _moves(new_order, exc):
+                                    ui.label(f"· {c}：{old_i} → {new_i}").classes(
+                                        "text-[11px] opacity-80")
+                                ui.label("每个 Run 的指标按类别号记录，重排后与既有模型不可比；"
+                                         "真源标注不动（改的是行序），格式池按 classes_sha 出队懒刷新").classes(
+                                    "text-[11px] opacity-70")
+                                ui.label(f"服务侧原话：{exc.message}").classes(
+                                    "text-[11px] opacity-60 break-all")
+                                with ui.row().classes("w-full items-center gap-1"):
+                                    ok = ui.button("确认位移并重排", icon="swap_vert",
+                                                   on_click=lambda: do_reorder(
+                                                       new_order, True, gate)).props(
+                                        "unelevated dense size=sm")
+                                    ok.tooltip("带 confirm=true 重发——确认门在此，不在前端")
+                                    ui.button("取消", on_click=gate.clear).props("flat dense size=sm")
+                        gate.set_visibility(True)
+
+                async def do_delete(cls: str, btn=None) -> None:
+                    """删除单类：仅零实例类放行；非零实例由服务侧 409 拦住并报实例数。"""
+                    op = ops.begin(f"ds:{name}:cls_delete", f"删除类别 {cls} · {name}", scope=name)
+                    with _busy(btn):
+                        try:
+                            await _io(ds.delete_class, name, cls)
+                        except ds.DatasetError as exc:
+                            op.fail(exc.message)
+                            detail = getattr(exc, "detail", None) or {}
+                            n_inst = detail.get("instances")
+                            ui.notify(f"删除类别被拦住：{exc.message}"
+                                      + (f"（该类还有 {n_inst} 个实例）" if n_inst else ""),
+                                      type="negative")
+                            return
+                        except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
+                            ui.notify(f"删除失败：{exc}", type="negative")
+                            return
+                    op.finish()
+                    await _written(f"已从类别表删除「{cls}」（零实例类，真源标注不动；"
+                                   "其后类别号前移，与既有模型不可比）")
+
+                async def do_rollback(btn=None) -> None:
+                    """回滚最近一次类别写路径：classes.txt 与真源 JSON 一起回位（备份落点唯一）。
+
+                    改名/重排/删除都往 backups/<时间戳>/ 里留一份改写前的标注原件与类别表；
+                    只回其一必让类别账目错位，因此服务侧一次做完两件事。没备份时是 404。
+                    """
+                    op = ops.begin(f"ds:{name}:cls_rollback", f"回滚类别改动 · {name}", scope=name)
+                    with _busy(btn):
+                        try:
+                            res = await _io(ds.rollback_classes, name)
+                        except ds.DatasetError as exc:
+                            op.fail(exc.message)
+                            ui.notify(f"回滚失败：{exc.message}", type="negative")
+                            return
+                        except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
+                            ui.notify(f"回滚失败：{exc}", type="negative")
+                            return
+                    op.finish()
+                    await _written(
+                        f"已回滚「{res.get('action') or '最近一次类别改动'}」："
+                        f"{len(res.get('restored') or [])} 份标注原件与类别表一起回位"
+                        f"（备份 {res.get('backup_dir')}）· 回位后已重校验")
+
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label("类别表").classes("text-xs font-semibold")
+                    ui.label(f"{len(classes)} 类 · 行序即类别号 · 真源 classes.txt").classes(
+                        "text-[11px] opacity-50")
+                    rb = ui.button("回滚最近一次类别改动", icon="restore",
+                                   on_click=lambda: do_rollback()).props("flat dense size=xs")
+                    rb.tooltip("backups/<时间戳>/ 里的 classes.txt 与真源标注原件一起回位——"
+                               "只回其一必让类别账目错位，故两件事一次做完；从未改过类别则无备份")
+                ui.label("调起 X-AnyLabeling 恒带 --labels <本集>/classes.txt --validatelabel exact："
+                         "exact 只是拦新建/编辑标注的软守卫，不承诺拦住存量旧类与 Label Manager 改名"
+                         "——根治靠新建/加图阻断与本区的疑似改名识别").classes(
                     "text-[11px] opacity-50")
+
+                if not classes:
+                    ui.label("类别表为空——先追加至少一个类别").classes("text-xs opacity-40")
+
+                # ── 疑似改名处置（判据在服务侧：表外新名带实例 × 表内旧名零实例）
+                sus_box = ui.column().classes("w-full gap-1")
+                with sus_box:
+                    with ui.row().classes("w-full items-center gap-2"):
+                        ui.spinner(size="xs")
+                        ui.label("识别疑似改名中…（逐份读真源标注的 label 与实例数）").classes(
+                            "text-[11px] opacity-60")
+
+                def _render_suspects(sus: dict | None) -> None:
+                    """疑似改名卡片：成对候选逐条给「只改类别表」，多候选必须人工认配对。"""
+                    if sus is None:
+                        ui.label("疑似改名识别读不出真源标注——本区不猜；"
+                                 "改名与删除的实例判据仍以服务端为准").classes(
+                            "text-[11px] text-amber-500")
+                        return
+                    pairs = sus.get("pairs") or []
+                    if not pairs:
+                        return  # 没有这个形状，不打扰
+                    unreg = sus.get("unregistered") or []
+                    empt = sus.get("empty_classes") or []
+                    zero_names = [str(e.get("class")) for e in empt if e.get("class")]
+                    with ui.card().classes("w-full gap-1 q-pa-sm").style(
+                            "background:rgba(245,158,11,.10)"):
+                        ui.label("疑似改名：X-AnyLabeling 的 Label Manager 改出来的形状").classes(
+                            "text-xs font-semibold text-amber-500")
+                        ui.label("真源里有未登记的新名，同时类别表里有零实例的旧名——"
+                                 "确认后只改类别表（旧名那一行换成新名，行序不变），"
+                                 "真源标注已经是新名、不必改写").classes("text-[11px] opacity-70")
+                        with ui.row().classes("w-full gap-1 flex-wrap"):
+                            for u in unreg:
+                                ui.badge(f"未登记 {u.get('label')} ×{u.get('instances')}").props(
+                                    "color=amber outline").style("font-size:11px")
+                            for e in empt:
+                                ui.badge(f"零实例旧类 {e.get('class')}（第 {e.get('row')} 行）").props(
+                                    "color=grey outline").style("font-size:11px")
+                        if sus.get("ambiguous"):
+                            ui.label("多候选：服务侧按「名称序 × 行序」给出配对，"
+                                     "下面逐条确认认作哪一类的改名——认错了回滚上面那个按钮").classes(
+                                "text-[11px] text-amber-500")
+                        for pr in pairs[:8]:
+                            new = str(pr.get("new"))
+                            old = str(pr.get("old"))
+                            with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                                pick = ui.select(options=zero_names,
+                                                 value=old if old in zero_names else (
+                                                     zero_names[0] if zero_names else None),
+                                                 label="认作哪一类的改名").props(
+                                    "dense outlined options=[]").classes("flex-1 min-w-0")
+                                fix_btn = ui.button("只改类别表", icon="check_double",
+                                                    on_click=lambda l=new, p=pick:
+                                                    do_rename(p.value, l, None)).props(
+                                    "outline dense size=sm")
+                                fix_btn.tooltip(f"把「{pick.value}」那一行改成「{l}」："
+                                                "类别号不动、不改写任何标注 JSON、原文件自动备份")
+                                ui.label(f"真源里 {pr.get('instances')} 个实例已是「{new}」"
+                                         f"（{pr.get('basis')}）").classes(
+                                    "text-[11px] opacity-50")
+                        with ui.row().classes("w-full items-center gap-1"):
+                            add_new = ui.button("都不是改名——把这些新名追加进类别表",
+                                                icon="playlist_add",
+                                                on_click=lambda: _append_unregistered(
+                                                    [str(u.get("label")) for u in unreg])).props(
+                                "flat dense size=sm")
+                            add_new.tooltip("行尾新增，零实例旧类留在表里（它可能只是本轮没标到）")
+
+                async def _load_suspects() -> None:
+                    try:
+                        sus = await _io(_rename_suspects, name)
+                    except Exception as exc:  # noqa: BLE001
+                        sus = None
+                        ui.notify(f"疑似改名识别失败：{exc}", type="warning")
+                    if getattr(sus_box, "is_deleted", False):
+                        return  # 识别期间详情已切换/重渲染
+                    sus_box.clear()
+                    with sus_box:
+                        _render_suspects(sus)
+
+                asyncio.get_running_loop().create_task(_load_suspects())
+
+                gate = ui.column().classes("w-full gap-1").set_visibility(False)
+
+                def _append_unregistered(labels: list[str]) -> None:
+                    """疑似改名的另一种真相：确实是新类别——走追加直通，零实例旧类不强删。"""
+                    a_add.set_value(",".join(labels))
+                    asyncio.get_running_loop().create_task(do_append())
+
+                # ── 追加行（直通）
+                with ui.row().classes("w-full items-center gap-1 no-wrap"):
+                    a_add = ui.input(label="追加类别（逗号分隔）",
+                                     placeholder="scratch,dent").props("dense outlined").classes(
+                        "flex-1 min-w-0")
+                    ab = ui.button("追加", icon="playlist_add", on_click=lambda: do_append()).props(
+                        "unelevated dense size=sm")
+                    ab.tooltip("直通：追加只往行尾加，不改既有类别号，因此没有确认门")
+
+                # ── 逐类一行：id / 改名 / 实例数 / 上移下移（重排）/ 删除
+                rows_box = ui.column().classes("w-full gap-0.5")
+                for i, c in enumerate(classes):
+                    n = _count_of(c)
+                    with rows_box, ui.row().classes("w-full items-center gap-1 no-wrap"):
+                        ui.label(str(i)).classes("w-6 text-right text-[11px] opacity-50 shrink-0")
+                        inp = ui.input(value=c).props("dense outlined").classes("flex-1 min-w-0")
+                        rm_btn = ui.button("改名", icon="drive_file_rename_outline",
+                                           on_click=lambda o=c, v=inp, b=None: do_rename(
+                                               o, (v.value or "").strip(), b)).props(
+                            "outline dense size=sm")
+                        rm_btn.set_enabled(False)
+                        rm_btn.tooltip("类别改名会同步改写真源标注的 label（第三条平台写路径）："
+                                       "已备份可回滚、审查判定继承；非零实例类改动会落到标注上")
+
+                        def _sync_rename(v=inp, o=c, b=rm_btn) -> None:
+                            new = (v.value or "").strip()
+                            b.set_enabled(bool(new) and new != o and new not in classes)
+
+                        inp.on_value_change(lambda _e, v=inp, o=c, b=rm_btn: _sync_rename(v, o, b))
+                        if n is None:
+                            ui.badge("实例数未知").props("color=grey outline").style(
+                                "font-size:10px").tooltip("无画像账本——以服务端删除校验为准")
+                        else:
+                            ui.badge(f"{n} 实例").props(
+                                f"color={'grey' if n == 0 else 'blue'} outline").style("font-size:10px")
+                        up = ui.button(icon="arrow_upward", on_click=lambda idx=i: do_reorder(
+                            _swap(classes, idx, idx - 1), False)).props(
+                            "flat dense round size=xs color=primary")
+                        up.tooltip("上移一行＝改类别号；提交前复述位移再确认")
+                        if i == 0:
+                            up.props("disable")
+                        down = ui.button(icon="arrow_downward", on_click=lambda idx=i: do_reorder(
+                            _swap(classes, idx, idx + 1), False)).props(
+                            "flat dense round size=xs color=primary")
+                        down.tooltip("下移一行＝改类别号；提交前复述位移再确认")
+                        if i == len(classes) - 1:
+                            down.props("disable")
+                        del_btn = ui.button("删除", icon="remove_circle_outline").props(
+                            "flat dense size=xs color=negative")
+                        del_btn.on_click(lambda x=c, b=del_btn: do_delete(x, b))
+                        if n:
+                            del_btn.set_enabled(False)
+                            del_btn.tooltip(f"该类还有 {n} 个实例——删除只放行零实例类；"
+                                            "先在 X-AnyLabeling 里归并/改标到零实例再删（服务侧同样拦）")
+                        else:
+                            del_btn.tooltip("零实例类：只从 classes.txt 去掉这一行，真源标注不动")
+                ui.label("四动作提交后即时重校验 + 画像；类别号位移与实例数判据以服务端为准，"
+                         "此处按钮状态只是提示").classes("text-[11px] opacity-40")
 
             def _render_ws_validation(meta: dict) -> None:
                 """校验·画像工作区：校验账目（含修复与丢弃确认门）+ 健康报告画像。"""
@@ -5303,34 +5787,205 @@ document.addEventListener('scroll', function(e){
 
             state["open_create"] = open_create
 
-            # ── 加图（页头工具条入口；真源增补的后端在票 04，本票只立骨架）
-            with ui.dialog() as add_dialog, ui.card().classes("w-[26rem] gap-2"):
+            # ── 加图（票 04：真源 source/ 增补的平台入口，两种阻断都在对话框内给处置）
+            with ui.dialog() as add_dialog, ui.card().classes("w-[30rem] gap-2"):
                 add_title = ui.label("加图").classes("font-bold")
-                ui.label("向真源目录 source/ 增补图片与标注：来源目录 × 入图方式；"
-                         "同名冲突阻断不自动改名，携带表外类别时阻断并可一键追加。").classes("text-xs opacity-60")
+                ui.label("向真源目录 source/ 增补图片与标注：同名冲突不自动改名、表外类别不静默丢弃，"
+                         "两种阻断都在下面给一键处置。落盘后即时重校验 + 重算画像，"
+                         "在开的 X-AnyLabeling 收 rescan 刷新清单。").classes("text-xs opacity-60")
                 a_src = _path_picker_field("来源目录", placeholder="/home/you/new_images")
+                a_files = ui.textarea(label="文件清单（每行一个；图与同名 JSON 可混排）",
+                                      placeholder="/home/you/new/a.jpg\n/home/you/new/a.json").props(
+                    "dense outlined autogrow").classes("w-full")
+                ui.label("两处都填＝先展开目录再补清单里的额外文件；两处都空则不提交").classes(
+                    "text-[11px] opacity-50")
                 ui.label("入图方式").classes("text-xs opacity-70 q-mt-sm")
                 a_transfer = ui.radio(TRANSFER_ZH, value="copy").props("dense")
-                a_note = ui.label("").classes("text-xs text-amber-500").set_visibility(False)
+                ui.label("默认拷贝——「移动」会搬走你原目录里的文件，只在明确要搬家时选").classes(
+                    "text-[11px] opacity-50")
+                a_block = ui.column().classes("w-full gap-1").set_visibility(False)
+                a_op: dict[str, str | None] = {"key": None}
+                _op_progress_row(a_op)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=add_dialog.close).props("flat")
-                    ui.button("提交", icon="upload", on_click=lambda: do_add_images()).props("unelevated")
+                    a_ok = ui.button("提交", icon="upload",
+                                     on_click=lambda: do_add_images()).props("unelevated")
 
-                def do_add_images() -> None:
-                    """未接线：加图的服务端在票 04——此刻不做任何真源改动，也不报成功。"""
-                    a_note.set_text("「加图」尚未接线（后端在票 04）：本次没有改动真源目录。"
-                                    f"已登记的参数＝{(a_src.value or '').strip() or '（未填目录）'} · "
-                                    f"{TRANSFER_ZH.get(a_transfer.value, '拷贝')}。"
-                                    "眼下请把图片放进真源目录 source/，详情页打开即自动纳入账目。")
-                    a_note.set_visibility(True)
-                    ui.notify("「加图」还没接后端（票 04）：未对真源目录做任何改动", type="warning")
+                a_st: dict = {"running": False, "append": [], "paths": []}
+
+                def _collect_add_paths() -> list[str]:
+                    """目录一行 + 清单多行 → 有序去重的路径列表（目录原样交给服务端展开）。"""
+                    raw = [(a_src.value or "").strip()]
+                    raw += [s.strip().strip('"').strip("'")
+                            for s in str(a_files.value or "").splitlines()]
+                    out: list[str] = []
+                    for p in raw:
+                        if p and p not in out:
+                            out.append(p)
+                    return out
+
+                def _show_add_block(exc) -> None:
+                    """服务侧阻断原样落地：detail 里的冲突项 / 表外类别一条不藏，各带处置按钮。
+
+                    `detail.conflicts` 的每一项是 `{file, reason, sources}`（撞名的是**文件名**，
+                    `reason` 区分「真源已有」与「同批内部撞名」），`detail.source_labels` 是纯名字。
+                    """
+                    from ..datasets.validate import IMAGE_EXTS  # 剔冲突项时按同词干配对剔除
+
+                    reason_zh = {"exists_in_source": "真源 source/ 里已有同名文件",
+                                 "duplicate_in_batch": "这一批内部自己撞名"}
+                    detail = getattr(exc, "detail", None) or {}
+                    conflicts: list[dict] = []
+                    for c in (detail.get("conflicts") or []):
+                        if isinstance(c, dict):
+                            conflicts.append({
+                                "file": str(c.get("file") or ""),
+                                "reason": str(c.get("reason") or ""),
+                                "sources": [str(s) for s in (c.get("sources") or [])]})
+                        else:
+                            conflicts.append({"file": str(c), "reason": "", "sources": []})
+                    labels = [str(x) for x in (detail.get("source_labels") or [])]
+                    a_st["skip"] = {}
+                    for item in conflicts:
+                        p = Path(item["file"])
+                        drop = {p.name, p.with_suffix(".json").name}
+                        if p.suffix.lower() == ".json":
+                            drop |= {p.with_suffix(e).name for e in IMAGE_EXTS}
+                        # 同批撞名的各来源整体剔除：留一个就是「挑一份覆盖」，同样是丢数据
+                        drop |= {Path(s).name for s in item["sources"]}
+                        a_st["skip"][item["file"]] = drop
+                    a_block.clear()
+                    with a_block:
+                        with ui.card().classes("w-full gap-1 q-pa-sm").style(
+                                "background:rgba(245,158,11,.10)"):
+                            ui.label(exc.message).classes("text-[11px] opacity-70 break-all")
+                            if conflicts:
+                                ui.label(f"同名冲突 {len(conflicts)} 个——平台不改名、不覆盖，"
+                                         "已阻断整批入图").classes(
+                                    "text-xs font-semibold text-amber-500")
+                                for item in conflicts[:12]:
+                                    ui.label("· " + item["file"]
+                                             + (f"（{reason_zh.get(item['reason'], item['reason'])}）"
+                                                if item["reason"] else "")).classes(
+                                        "text-[11px] opacity-70 break-all")
+                                    for s in item["sources"][:3]:
+                                        ui.label(f"    来自 {s}").classes(
+                                            "text-[10px] opacity-50 break-all")
+                                if len(conflicts) > 12:
+                                    ui.label(f"…共 {len(conflicts)} 个").classes(
+                                        "text-[11px] opacity-50")
+                                with ui.row().classes("w-full items-center gap-1"):
+                                    cpy = ui.button("复制冲突清单", icon="content_copy",
+                                                    on_click=lambda: _copy_conflicts(
+                                                        [i["file"] for i in conflicts])).props(
+                                        "outline dense size=sm")
+                                    cpy.tooltip("拿这份清单去源目录改名，改完再提交一次")
+                                    skp = ui.button("跳过这些文件后重试", icon="skip_next",
+                                                    on_click=lambda: _retry_skip(
+                                                        conflicts)).props("unelevated dense size=sm")
+                                    skp.tooltip("冲突项的图片与同名标注一起剔除（不留孤儿标注），"
+                                                "其余原样重提")
+                            if labels:
+                                ui.label(f"标注里有类别表之外的类别 {len(labels)} 个——已阻断，"
+                                         "一个都没丢").classes("text-xs font-semibold text-amber-500")
+                                with ui.row().classes("w-full gap-1 flex-wrap"):
+                                    for lab in labels:
+                                        ui.badge(lab).props("color=amber outline").style(
+                                            "font-size:11px")
+                                ap = ui.button("一键追加这些类别后重试", icon="playlist_add",
+                                               on_click=lambda: _retry_append(
+                                                   labels)).props("unelevated dense size=sm")
+                                ap.tooltip("把它们追加进 classes.txt 行尾（既有类别号不动）后重提这一批")
+                            if not conflicts and not labels:
+                                ui.label("服务侧拦下了这次加图——上面是原话，未对真源做任何改动").classes(
+                                    "text-[11px] opacity-80")
+                    a_block.set_visibility(True)
+
+                async def _copy_conflicts(names: list[str]) -> None:
+                    await ui.clipboard.write("\n".join(names))
+                    ui.notify("冲突清单已复制——去源目录改名后再提交", type="info")
+
+                def _retry_skip(conflicts: list[dict]) -> None:
+                    """把「跳过冲突项」展开成显式文件清单重填——所见即所提，不再隐式带目录。"""
+                    skip: set[str] = set()
+                    for item in conflicts:
+                        skip |= a_st["skip"].get(item["file"]) or {Path(item["file"]).name}
+                    expanded = _expand_add_paths(_collect_add_paths(), skip)
+                    if not expanded:
+                        ui.notify("剔除冲突项后没有要加的文件了", type="warning")
+                        return
+                    a_src.set_value("")
+                    a_files.set_value("\n".join(expanded))
+                    ui.notify(f"已剔除 {len(skip)} 个文件（图与同名标注成对剔除），"
+                              f"按这 {len(expanded)} 项重提", type="info")
+                    asyncio.get_running_loop().create_task(do_add_images())
+
+                def _retry_append(labels: list[str]) -> None:
+                    """带 append_classes 重提：类别表行尾新增，真源标注不动。"""
+                    a_st["append"] = list(labels)
+                    asyncio.get_running_loop().create_task(do_add_images())
+
+                async def do_add_images() -> None:
+                    meta = state.get("add_meta") or {}
+                    name = meta.get("name")
+                    if not name:
+                        ui.notify("没拿到数据集——请回详情页再点「加图」", type="warning")
+                        return
+                    if a_st["running"]:
+                        ui.notify("上一批加图还在进行——等它结束（登记表里有这一项）", type="warning")
+                        return
+                    paths = _collect_add_paths()
+                    if not paths:
+                        ui.notify("填来源目录或文件清单，至少一处", type="warning")
+                        return
+                    append = list(a_st["append"] or [])
+                    a_st["append"] = []
+                    a_block.set_visibility(False)
+                    a_st["running"] = True
+                    op = ops.begin(f"ds:{name}:add_images", f"加图 · {name}", scope=name)
+                    a_op["key"] = op.key
+                    with _busy(a_ok):
+                        try:
+                            res = await _io(ds.add_images, name, paths,
+                                            transfer=a_transfer.value or "copy", root=None,
+                                            append_classes=append or None,
+                                            progress_cb=op.progress)
+                        except ds.DatasetError as exc:
+                            op.fail(exc.message)
+                            _show_add_block(exc)
+                            return
+                        except Exception as exc:  # noqa: BLE001
+                            op.fail(str(exc))
+                            ui.notify(f"加图失败：{exc}", type="negative")
+                            return
+                        finally:
+                            a_st["running"] = False
+                    op.finish()
+                    add_dialog.close()
+                    reached = await _io(_xal_rescan, name)
+                    # 服务侧回的是清单（images/classes 都是列表），计数在这里自己点清
+                    n_img = len(res.get("images") or [])
+                    n_cls = len(res.get("classes") or [])
+                    n_app = len(res.get("appended_classes") or [])
+                    ui.notify(f"已加入 {res.get('added', n_img)} 张（{TRANSFER_ZH.get(res.get('transfer'), '')}）："
+                              f"真源现 {n_img} 张新图入账 · 类别表 {n_cls} 类"
+                              + (f" · 顺带登记 {n_app} 个新类别 {'、'.join(res.get('appended_classes') or [])}"
+                                 if n_app else "")
+                              + (" · 在开的 X-AnyLabeling 已刷新清单" if reached else "")
+                              + " · 账目见校验·画像", type="positive")
+                    refresh()
+                    render_detail()
 
             def open_add_images(meta: dict) -> None:
                 state["add_meta"] = meta
                 add_title.set_text(f"加图 · {meta['name']}")
                 a_src.set_value("")
+                a_files.set_value("")
                 a_transfer.set_value("copy")
-                a_note.set_visibility(False)
+                a_block.clear()
+                a_block.set_visibility(False)
+                a_st["append"] = []
+                a_st["skip"] = {}
                 add_dialog.open()
 
             def open_source_in_xal(meta: dict) -> None:

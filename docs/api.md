@@ -25,8 +25,11 @@
 | POST | `/api/v1/datasets/external` | 注册外部标准 YOLO 目录（只读）。body: `{name, task_type, path}` |
 | GET | `/api/v1/datasets/{id}` | 详情：瘦身 metadata、validation_summary、classes、tiling、排除计数与审查进度；切分另走 `/splits` |
 | POST | `/api/v1/datasets/{id}/validate` | 重跑校验并在同一次遍历里聚合画像；报告含投影 drops、stem_conflict 与跨任务信息级 lint，不含漂移比对 |
-| POST | `/api/v1/datasets/{id}/images` | 加图（长操作）。body: `{paths:[目录或文件], transfer:copy\|move}`；同名冲突或未登记类别 409，后者返回可一键追加的类别清单；完成后校验+画像，存活 XAL 推 rescan |
-| PUT | `/api/v1/datasets/{id}/classes` | 类别表四动作。body: `{action:append\|rename\|reorder\|delete, ...}`；rename 原子改写类别表与真源 JSON 并继承审查，reorder 需确认，delete 仅零实例；成功后即时重校验+画像，存活 XAL 推 load_labels |
+| POST | `/api/v1/datasets/{id}/images` | 加图（长操作）。body: `{paths:[目录或文件], transfer:copy\|move, append_classes?:[...]}`；同名冲突或未登记类别 409，后者返回可一键追加的类别清单，带 `append_classes` 重发即先登记再入图；完成后校验+画像，存活 XAL 推 rescan |
+| PUT | `/api/v1/datasets/{id}/classes` | 类别表四动作。body: `{action:append\|rename\|reorder\|delete, classes?, class_name?, confirm?}`；rename 原子改写类别表与真源 JSON 并继承审查，reorder 需确认（未确认 409 复述逐项位移），delete 仅零实例；成功后即时重校验+画像，存活 XAL 推 load_labels |
+| GET | `/api/v1/datasets/{id}/rename-suspects` | 疑似改名识别（零写入）：`{unregistered[], empty_classes[], pairs[{old,new,instances}], ambiguous}`——XAL 的 Label Manager 只改标注 JSON 的 label，类别表一无所知；判据在服务层，处置走 `PUT /classes` 的 rename |
+| POST | `/api/v1/datasets/{id}/classes/rollback` | 回滚最近一次类别写路径：`classes.txt` 与真源 JSON 一起回位（备份落点唯一，只回其一必账目错位）；无备份 404，回滚后即时重校验+画像 |
+| POST | `/api/v1/datasets/{id}/reconcile` | 详情页打开的真源对账（改标回流入口）：指纹未变走一次纯 stat 快路径 `{changed:false}`；变了重校验 + 重算画像 `{changed:true, revalidated:true, corrupted}`，直接投放 `source/` 的文件由此自动纳入 |
 | DELETE | `/api/v1/datasets/{id}` | 整目录移入 `.trash/<name>-<ts>/`；有 Run 引用时响应确认信息，不物理删除 |
 | GET | `/api/v1/datasets/{id}/splits` | 切分历史列表，created_at 倒序；每项含 uid/memo/params/counts/lineage，外部数据集 404 |
 | POST | `/api/v1/datasets/{id}/splits/preview` | 新建切分预览（零写入）。body: `{mode:inherit\|fresh, parent_uid?, seed?, ratio?, stratify?, approved_only?, memo?}`；返回候选 uid、train/val 张数、val 重合 M/N、不可比警示、实效计数及可用时泄漏组数；首次训练仅 fresh |

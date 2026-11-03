@@ -3,6 +3,12 @@
 v1.4 票 03 硬切：`POST /datasets/import`、`POST /{name}/resplit`、`POST /{name}/sync-added`、
 `POST /{name}/switch-manifest` 已删除且不留兼容层；托管数据集唯一出生入口为
 `POST /datasets`（三态来源 create_dataset）。
+
+票 04 新增真源增补与类别表写路径：`POST /{name}/images`（加图）、
+`PUT /{name}/classes`（类别表四动作唯一入口，`action` 判别，docs/api.md 契约）、
+`GET /{name}/rename-suspects`（疑似改名识别，零写入）、`POST /{name}/classes/rollback`
+（一次回到上一份备份）、`POST /{name}/reconcile`（详情页打开的指纹对账＝改标回流入口）。
+两种加图阻断（同名冲突 / 未登记类别）都以 409 + `detail` 承载处置数据，供前端出二次动作按钮。
 """
 
 from __future__ import annotations
@@ -28,6 +34,13 @@ def _error_response(exc: DatasetError) -> JSONResponse:
         "code": exc.code, "message": exc.message, "detail": exc.detail}})
 
 
+def _action_classes(body: ClassActionBody) -> list[str]:
+    """append/rename/reorder 三个动作共用的取参：清单缺失即 invalid_args，不由服务侧猜。"""
+    if not body.classes:
+        raise DatasetError("invalid_args", f"action={body.action} 需要 classes 清单")
+    return body.classes
+
+
 class CreateBody(BaseModel):
     """托管数据集出生（唯一入口）：三态来源 + 拷贝/移动；空/图片目录/已标目录同一条校验管线。"""
 
@@ -45,8 +58,29 @@ class ExternalBody(BaseModel):
     path: str
 
 
-class ClassesBody(BaseModel):
-    classes: list[str]
+class ClassActionBody(BaseModel):
+    """类别表四动作（票 04）：一个入口、`action` 判别，参数随动作走。
+
+    `classes` 承载 append（追加清单）/ rename·reorder（按行序对齐的新表）；
+    `class_name` 承载 delete；`confirm` 只对 reorder 有意义——未确认时服务侧 409 复述位移。
+    """
+
+    action: Literal["append", "rename", "reorder", "delete"]
+    classes: list[str] | None = None
+    class_name: str | None = None
+    confirm: bool = False
+
+
+class AddImagesBody(BaseModel):
+    """加图（票 04）：paths 收目录或文件清单，入图默认拷贝、可选移动。
+
+    `append_classes` 是「一键追加这些类别后重试」的载体——首次提交带 None，
+    被未登记类别阻断后前端原样回传阻断清单再试一次。
+    """
+
+    paths: list[str]
+    transfer: Literal["copy", "move"] = "copy"
+    append_classes: list[str] | None = None
 
 
 class ExcludeBody(BaseModel):
@@ -131,10 +165,80 @@ def validate_dataset(name: str):
         return _error_response(exc)
 
 
-@router.put("/{name}/classes")
-def rename_classes(name: str, body: ClassesBody):
+@router.post("/{name}/images")
+def add_images(name: str, body: AddImagesBody):
+    """加图（票 04，长操作）：写入真源 `source/`，完成后即时重校验 + 画像。
+
+    两种阻断都是 409，处置数据随 `detail` 透传给前端出二次动作：
+    `detail.conflicts`＝同名冲突清单（阻断不自动改名，剔除后再投）、
+    `detail.source_labels`＝未登记类别清单（带 `append_classes` 重发即一键追加后重试）。
+    """
     try:
-        return svc.rename_classes(name, body.classes)
+        return svc.add_images(name, body.paths, body.transfer, append_classes=body.append_classes)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.put("/{name}/classes")
+def classes_action(name: str, body: ClassActionBody):
+    """类别表四动作的唯一 REST 入口（票 04，docs/api.md 契约）：gate 全在服务侧，此处只分派。
+
+    append 直通（行尾新增不改既有类别号）；rename 是平台第三条标注写路径（ADR 0009：同步
+    改写真源 JSON 的 shape label，原子写 + 自动备份 + 审查判定继承）；reorder 改的是类别号
+    本身，未经 confirm 一律 409 `state_conflict` 且 `detail` 带逐项位移，确认后重发才落；
+    delete 仅零实例类放行，否则 409 带实例数——删除不代删标注。
+    """
+    try:
+        if body.action == "append":
+            return svc.append_classes(name, _action_classes(body))
+        if body.action == "rename":
+            return svc.rename_classes(name, _action_classes(body))
+        if body.action == "reorder":
+            return svc.reorder_classes(name, _action_classes(body), confirm=body.confirm)
+        if not body.class_name:
+            raise DatasetError("invalid_args", "action=delete 必须给出 class_name")
+        return svc.delete_class(name, body.class_name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.get("/{name}/rename-suspects")
+def rename_suspects(name: str):
+    """疑似改名识别（票 04）：XAL 的 Label Manager 只改标注 JSON 的 label，类别表一无所知。
+
+    判据在服务层（前端不另算一套）：`unregistered` 表外带实例的新名 × `empty_classes` 零实例
+    旧类，配成 `pairs`；多候选时 `ambiguous=true`，必须人工确认。「只改类别表」的处置走
+    `PUT /{name}/classes`（逐位对齐改名，真源里旧名已零实例，自然一字不动）。零写入。
+    """
+    try:
+        return svc.detect_rename_suspects(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/classes/rollback")
+def rollback_classes(name: str):
+    """回滚最近一次类别写路径（票 04）：classes.txt 与真源 JSON 一起回位。
+
+    改名/重排/删除的备份落点唯一（`<数据集根>/<名>/backups/<时间戳>/`），只回其一必账目错位，
+    故一次做完；无备份时 404 `not_found`。回滚后即时重校验 + 画像。
+    """
+    try:
+        return svc.rollback_classes(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/reconcile")
+def reconcile_on_open(name: str):
+    """详情页打开的指纹对账（票 04 改标回流入口）。
+
+    `source_fingerprint` 未变 → 一次纯 stat 快路径（`changed: false`）；变了 → 重校验 +
+    重算画像（`revalidated: true`）。直接往 `source/` 投放的文件由此自动纳入账目，
+    无常驻监视、无定时任务。
+    """
+    try:
+        return svc.reconcile_on_open(name)
     except DatasetError as exc:
         return _error_response(exc)
 
