@@ -1,4 +1,6 @@
-# API 契约（v1 草案 · 12 号票产出）
+# API 契约（v1.4 · 2026-11-03）
+
+> v1.4 按 dataset-training-rehome 02–09 号票硬切换数据集、切分与训练输入契约；旧 `/import`、`/resplit`、`/sync-added`、`/switch-manifest`、`/relabel-refresh` 端点退役，不留兼容层。
 
 > 原则（08 号票）：契约层**框架无关**——UI 可整体替换，本文件与 `/api`、`/ws` 不动。
 > 单机自用无认证（Q4 决策）。所有业务端点前缀 `/api/v1`；`/api/health` 不版本化。
@@ -14,30 +16,34 @@
 | GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地） |
 | PUT | `/api/v1/config` | 白名单部分更新。body: `{server?:{host,port}, llm?:{base_url,api_key,model}, training?:{python,trainer_entry,export_entry,datasets_dir,runs_dir,model_lib_dir,check_occupancy}}`（节/键均可省略）；返回 `{config, restart_required}`——llm 即存即生效，server/training 改动须重启（设置页，2026-09-20） |
 
-### 数据集域（05 号票）
+### 数据集域（v1.4 按 02/03/05/06/07 重写）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/datasets` | 列表：task_type、managed/external、类别数、样本数、校验状态 |
-| POST | `/api/v1/datasets/import` | 导入 X-AnyLabeling 标注目录 → 托管数据集（后台：转换+校验+切分）。body: `{name, task_type, source_dir, split:{ratio, seed?, stratify?}}` |
+| GET | `/api/v1/datasets` | 列表：task_type、managed/external、类别数、样本数、校验摘要、source_fingerprint 与「可能有变更」粗判；不再返回 active_manifest |
+| POST | `/api/v1/datasets` | 新建托管数据集（长操作：入图 + 校验 + 画像，不切分）。body: `{name, task_type, classes:[...], source:{mode:empty\|images_dir\|annotated_dir, path?, transfer:copy\|move}}`；annotated_dir 的 classes 为探测预填后确认值，表外类别 409 并列清单；响应可带 drops `needs_confirm` |
 | POST | `/api/v1/datasets/external` | 注册外部标准 YOLO 目录（只读）。body: `{name, task_type, path}` |
-| GET | `/api/v1/datasets/{id}` | 详情：manifest、validation_report、classes |
-| POST | `/api/v1/datasets/{id}/validate` | 重跑五条校验规则；报告新增清单漂移账目 `drift`（`added`/`missing`/`excluded_present`/`new_classes`，概览琥珀条与同步确认门的数据源） |
-| POST | `/api/v1/datasets/{id}/resplit` | 重新切分 → 新 manifest id。body: `{ratio, seed?, stratify?}` |
-| POST | `/api/v1/datasets/{id}/sync-added` | 同步新增图片（长操作）：源目录清单外新图增量纳入切分——老图 train/val 归属不动，新图按当前（ratio, seed, stratify）只在自身范围内入切；生成新 manifest（旧版可切回）；排除日志中的文件不复活；新增携带未注册类别 409 阻断；完成后自动全量重校验 |
-| PUT | `/api/v1/datasets/{id}/classes` | 类别改名/重排（显式操作：重写 labels + 新 manifest） |
-| DELETE | `/api/v1/datasets/{id}?delete_files=` | 删除（磁盘默认保留，10 号票） |
+| GET | `/api/v1/datasets/{id}` | 详情：瘦身 metadata、validation_summary、classes、tiling、排除计数与审查进度；切分另走 `/splits` |
+| POST | `/api/v1/datasets/{id}/validate` | 重跑校验并在同一次遍历里聚合画像；报告含投影 drops、stem_conflict 与跨任务信息级 lint，不含漂移比对 |
+| POST | `/api/v1/datasets/{id}/images` | 加图（长操作）。body: `{paths:[目录或文件], transfer:copy\|move}`；同名冲突或未登记类别 409，后者返回可一键追加的类别清单；完成后校验+画像，存活 XAL 推 rescan |
+| PUT | `/api/v1/datasets/{id}/classes` | 类别表四动作。body: `{action:append\|rename\|reorder\|delete, ...}`；rename 原子改写类别表与真源 JSON 并继承审查，reorder 需确认，delete 仅零实例；成功后即时重校验+画像，存活 XAL 推 load_labels |
+| DELETE | `/api/v1/datasets/{id}` | 整目录移入 `.trash/<name>-<ts>/`；有 Run 引用时响应确认信息，不物理删除 |
+| GET | `/api/v1/datasets/{id}/splits` | 切分历史列表，created_at 倒序；每项含 uid/memo/params/counts/lineage，外部数据集 404 |
+| POST | `/api/v1/datasets/{id}/splits/preview` | 新建切分预览（零写入）。body: `{mode:inherit\|fresh, parent_uid?, seed?, ratio?, stratify?, approved_only?, memo?}`；返回候选 uid、train/val 张数、val 重合 M/N、不可比警示、实效计数及可用时泄漏组数；首次训练仅 fresh |
+| POST | `/api/v1/datasets/{id}/splits` | 按 preview 同 body 独立确认落盘；同划分命中既有 uid 直接复用，不随任务取消回滚 |
+| PATCH | `/api/v1/datasets/{id}/splits/{uid}` | 仅编辑 memo；train/val/params/lineage 不可变，无删除端点 |
+| GET | `/api/v1/datasets/{id}/splits/{uid}/effective` | 实效集预览（只读零写入，与出队同口径）：`{train, val, dropped:{missing[], excluded[]}}`；供「沿用最近/选历史」两态在建任务前显示「清单 N，实效 M」，新建切分的实效计数走 `/splits/preview` 载荷 |
+| POST | `/api/v1/datasets/{id}/export` | 纯外部导出（长操作）。body: `{format:yolo\|coco\|voc, scope:{mode:all\|split, split_uid?}, image_mode:symlink\|copy, zip?}`；按 supports×task_type 校验，返回路径、张数、投影 drops 数与可选 zip，不触碰格式池 |
 
-### 数据集域 M6 增补（健康报告 / 质量审计 / 排除处置，2026-09-20）
+### 数据集域 M6 + v1.4（健康报告 / 质量审计 / 排除处置）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/datasets/{id}/stats` | 健康报告画像（M6 01/02）：`{summary, per_image[], agg:{by_split, obj_hist, size_heat, heatmap, obj_size}}`；`size_heat` 标注归一化宽×高 20×20 网格、`heatmap` 标注中心同网格；`obj_size` 小/中/大按 COCO 32²/96² 阈值在 640 基准尺度分档（`thresholds.ref_imgsz`，分辨率无关）；无画像返回 `null`（UI 提示先重新校验）；随导入/重新校验同遍历生成，重切/排除后重组；外部数据集 400 |
-| GET | `/api/v1/datasets/{id}/audit` | 体检报告缓存读（M6 03）；未体检过返回 `null` |
-| POST | `/api/v1/datasets/{id}/audit` | 跑体检（长操作，指纹命中缓存秒回）。报告：`exact_groups`（sha256）/ `near_groups`（phash≤8 并查集）/ `leaks`（跨切分泄漏对）/ `imbalance`（失衡判定+规则文案）/ `skipped_undecodable`；`from_cache` 标记 |
-| POST | `/api/v1/datasets/{id}/exclude` | 从切分清单排除（M6 04，质量审计唯一处置）。body: `{files: [绝对路径], reason?}`；只删清单不洗牌（剩余文件 train/val 归属不变），生成新 manifest 并切 active，旧清单保留；排空 train/val → 409 |
-| POST | `/api/v1/datasets/{id}/restore` | 排除恢复（exclude 的对偶）。body: `{files}`；沿 prev_uid 链回溯各文件最近一次 train/val 归属并回原位（既有文件不动），生成新清单切 active、重建派生、清出排除日志、画像全量重算；全量恢复时文件集回到原版 uid 天然复现；文件已在清单内或未被排除过 → 400 |
-| POST | `/api/v1/datasets/{id}/switch-manifest` | 切回历史清单版本（整批恢复通道）。body: `{uid}`；文件集回到该版本（排除文件随之回归），按当前标注重建派生、重算健康报告、排除日志清出已回清单条目；uid 即当前活跃 → 409，不存在 → 404 |
+| GET | `/api/v1/datasets/{id}/stats?split_uid=&include_excluded=` | 一行制画像的**读时视图**（`compose_view`）：默认最近切分且剔除排除，`split_uid=` 空值表全集；返回 `{summary,per_image[],agg_all,by_split?,source_fingerprint}`——`by_split` 仅在有切分时附 `{train,val}{images,background,by_class}`；尺寸/中心热力图与 640 基准分档不变；排除、恢复、新建切分不写画像行，外部数据集 400 |
+| GET | `/api/v1/datasets/{id}/audit?split_uid=` | 一行制体检缓存 + 按当前切分即时计算的 `leak_view`；未体检返回 null，指纹失配带 stale 标记 |
+| POST | `/api/v1/datasets/{id}/audit` | 手动跑体检（长操作）：逐文件 sha256/phash 按 size+mtime_ns 增量复用，重建 exact/near/within/imbalance；leaks 仍由 GET 按 split_uid 即时计算 |
+| POST | `/api/v1/datasets/{id}/exclude` | 写排除日志。body: `{files:[相对 source/ 文件名], reason?}`；不生成切分、不重建画像或格式池，既有 Task 在出队实效集剔除 |
+| POST | `/api/v1/datasets/{id}/restore` | 从排除日志删键。body: `{files}`；原是切分成员者自动回效，无链回溯、无派生或画像重算；未排除文件 400 |
 
 ### 媒体端点（缩略图 HTTP 管线，2026-10-24）
 
@@ -49,30 +55,29 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,split,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——有效状态按双指纹现算（shapes 哈希变更 → pending+modified 标记）；负样本（无标注 JSON）不入队；可疑度分值与来源（校验/审计/错误分析）由平台聚合，队列按可疑度降序 |
-| POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单（`checked`/`vt_review`）原子写回标注 JSON（ADR 0003）；rejected 必填 reason（漏标/多标/框不准/类别错+note）；图不在活跃清单 404 |
+| GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——迭代源为 `source/` 下带 JSON 的图（v1.4 去掉清单归属 `split` 维度）；有效状态按双指纹现算（shapes 哈希变更 → pending + modified 标记）；负样本（无标注 JSON）与排除在册图不入前进序列；可疑度分值与来源（校验/审计/错误分析）由平台聚合，队列按可疑度降序 |
+| POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单原子写回 JSON，rejected 必填 reason；图不在 source/ 审查集合 404 |
 | POST | `/api/v1/datasets/{id}/review/export` | 导出驳回清单 markdown 至数据集目录（与改标清单同构：逐项图名+理由+XAL 直达行） |
-| POST | `/api/v1/datasets/{id}/relabel-refresh` | 标注变更联动（M9）：单图重转换刷新派生 YOLO txt（「导出标注」的 YOLO 路径）。body: `{image?, force?, format?}`（省略 image=全清单按 mtime 增量；force=全量重转换；format 当前仅 yolo，其余 400）；返回刷新数 |
-| POST | `/api/v1/datasets/{id}/drops-ack` | 确认接受丢弃（M9 确认门）：`drops_pending_ack=true` 时提交训练被 409 拒绝，确认后方可继续；同一批丢弃（签名相同）确认一次即粘住 |
+| POST | `/api/v1/datasets/{id}/drops-ack` | 确认当前投影丢弃签名；待确认状态按 `drops.count>0 ∧ signature≠acked` 现算，提交训练时有未确认 drops 则 409 |
 
-v1.2 同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/validate` 的 validation_report 新增发现类型——`drops`（丢弃清单：shape 数守恒，图/shape/类别/原因逐条）/ `degenerate`（零面积与 <2px）/ `out_of_bounds`（±1% 容差）/ `orphan`（图↔JSON↔txt）/ `polygon_invalid`·`obb_invalid`·`keypoints_invalid`（按 task_type 启用）；导入含 drops 时响应带 `needs_confirm`，确认动作后方可继续（确认门）；`GET .../audit` 报告新增 `duplicates_within`（同图重复两档：IoU>0.999 完全重复 / 0.85–0.95 复核，只报告）；`GET .../stats` 的 `sizes` 增加阈值线与 `small_ratio`；`POST /datasets/{id}/resplit` body 增加可选 `approved_only`（「只训已审」开关落点——true 时新清单只含 `checked:true` 图，旧清单保留可切回）；`GET /datasets/{id}` 与 `GET /datasets` 增加审查进度摘要；`POST /tasks` 提交确认附审查完成度提示（低占比黄牌提醒，不阻断）。无 WS 新事件（质检作业走 REST 轮询）；DB schema 维持 v4（审查状态寄生 JSON，不落库）。
+校验报告契约：新建/加图/validate 均含 `drops`、`degenerate`、`out_of_bounds`、`orphan`（图↔JSON）、任务特化问题与 `fixable` 标记；v1.4 增 `stem_conflict` 红灯和跨任务投影信息级 lint，`task_mismatch` 只剩不可投影者。`approved_only` 移至 splits preview/create body；`GET /datasets/{id}` 与列表保留审查进度摘要；`POST /tasks` 附审查完成度与实效集提示。审查状态仍寄生 JSON，v1.4 DB schema 为 v6。
 
 ### 数据集域切片（Tiling，2026-10-30，ADR 0004）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | POST | `/api/v1/datasets/{id}/tile/preview` | 切片预览（dry-run 零写入，数字与执行同口径）。body: `{rows?, cols?, overlap?, keep_empty?}`（默认 2/2/0.2/false，rows·cols ∈ 1–4、overlap ∈ 0–0.5）；返回 `{images, tiles_total, tiles_written, empty_dropped, frag_empty_dropped, assignments, kept_assignments, dropped_assignments, dropped_pct, shapes_nowhere, re_review, skipped[], params, default_name}`；外部/pose/classify 数据集 → 400 |
-| POST | `/api/v1/datasets/{id}/tile` | 执行切片 → 新托管数据集（源集零改动）。body: `{rows?, cols?, overlap?, name?, keep_empty?, ratio?, seed?, stratify?}`；规则：标注完整落入才归属（无裁剪，跨界靠重叠补救）、空片默认丢弃、按源图分组随机切分（同源小图同侧）、审查按一致性继承（残影片回待审）；返回 `{meta（含 tiling 血缘：source/rows/cols/overlap/keep_empty，及 last_validation）, summary}`；重名或无可产片 → 409 |
+| POST | `/api/v1/datasets/{id}/tile` | 执行切片 → 新托管数据集（源集零改动）。body: `{rows?, cols?, overlap?, name?, keep_empty?}`；完整落入、空片策略与审查继承不变；出生只校验+画像，不切分；返回 `{meta（含 tiling 血缘及 groups 映射）, validation_summary}`；重名或无可产片 409 |
 
-同步语义：切片集是普通托管数据集（`dataset.json` 的 `source_dir` 指向自己目录内的 `source/`，切片图与 labelme JSON 落盘于此），此后的校验/审查/重切分/训练链路零特判；`GET /datasets/{id}` 详情对切片集自动附审查进度摘要。
+同步语义：切片集是普通托管数据集，source/ 为真源；tiling.groups 持久化瓦片→源图关系，后续 splits preview/create 恒按源图分组，无组键文件各自成组。
 
 ### 数据集域自动修复（2026-10-30，ADR 0005）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| POST | `/api/v1/datasets/{id}/autofix` | 一键自动修复：越界钳制 / 多边形 make_valid（自交可能分裂）/ 旋转框凸包重排（乱序可修，退化不修）/ 误画折线闭合（仅 segment：linestrip→polygon 点不动）/ 关键点负坐标钳制 / 孤儿标注隔离——写回源标注 JSON（原子写、只动 shapes 几何点与折线的 shape_type，label/flags/审查键等原样保留），原文件备份至 `<数据集目录>/autofix/<时间戳>/backup/`、孤儿移入同目录 `orphans/`（源目录外防重扫）；已有审查判定继承（`vt_review.shapes_hash` 重算）；随后增量重转派生并全量重校验。返回 `{fixed_files, orphans_moved, fixes{码:数}, backup_dir, quarantine_dir, skipped[], relabel, validation{ok,fixables,counts,drops,needs_confirm}}`；外部数据集 → 400 |
+| POST | `/api/v1/datasets/{id}/autofix` | 一键自动修复：六类确定性几何正规化边界不变；原子写回真源、备份、孤儿隔离并继承审查判定；随后只做全量重校验+画像，格式池由出队懒刷新。返回 `{fixed_files,orphans_moved,fixes,backup_dir,quarantine_dir,skipped[],validation{ok,fixables,counts,drops,needs_confirm}}`；外部数据集 400 |
 
-同批契约变化：`POST /datasets/import` 与 `POST /datasets/{id}/validate` 的 validation_report 各 problem 项对可自动修问题带 `fixable: true`（obb_invalid 仅乱序为 true；drop 仅 segment 可闭合折线为 true），报告新增 `fixables` 计数；`ok` 口径改为只看不可自动修复项（fixable 问题不再判「有问题」），problems 全量保留（守恒账目不变）；审查可疑度的「校验」来源不再计 fixable 项。
+同批契约变化：`POST /datasets`、`POST /datasets/{id}/images` 与 `POST /datasets/{id}/validate` 的 validation_report 各 problem 项对可自动修问题带 `fixable: true`（obb_invalid 仅乱序为 true；drop 仅 segment 可闭合折线为 true），报告新增 `fixables` 计数；`ok` 口径改为只看不可自动修复项（fixable 问题不再判「有问题」），problems 全量保留（守恒账目不变）；审查可疑度的「校验」来源不再计 fixable 项。
 
 ### 系统域 M6 增补（启动自检，2026-09-20）
 
@@ -99,32 +104,34 @@ M8 同批契约变化：`GET /tasks/{id}/comparison` 与 `GET /compare` 增加 m
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/runs/{uid}/gpu` | GPU 采样序列（M7 01）：`{samples: [{t(首样本归零秒), util, mem_used, mem_total, temp}]}`；无采样返回空列表 |
-| POST | `/api/v1/runs/{uid}/retry` | 失败 Retry（M7 03）：以该 Run 运行快照参数从头重开新 Task（仅 failed/cancelled，其余 409；区别于 resume=last.pt 续训）；返回新 Task brief |
+| POST | `/api/v1/runs/{uid}/retry` | 失败 Retry（M7 03）：以该 Run 运行快照参数从头重开新 Task（仅 failed/cancelled，其余 409；区别于 resume=last.pt 续训）；新 Task 继承快照的 `(dataset, split_uid, format_id)` 三列而非重选「最近」；返回新 Task brief |
 
 M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`（烂轮早停标记，状态仍为 cancelled/stopping 落定）；`GET /tasks/{id}/comparison` 增加 `gpu_curves`（各轮显存曲线，有采样才带）与 `param_importance`（同数据集+同预训练权重历史 Run 的 Spearman 统计，样本不足为 null）；`POST /tasks` 的 agent 配置增加 `prune` / `prune_delta`（任务级覆盖）；config 白名单新增 `[notifications].desktop` 与 `[agent].prune_enabled / prune_delta`；DB schema v3（gpu_samples 表 + runs.pruned 列）。
 
-### 任务域（04/06/07 号票）
+### 任务域（04/06/07 号票；v1.4 按 03/04/07 重写训练输入）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| POST | `/api/v1/tasks` | 创建任务。body: `{name, base_model, dataset, manifest_id, epochs, imgsz, batch, patience, device, workers, seed, extra_args, agent}`；`base_model` = 预训练权重——官方模型名（ultralytics 首次自动下载）或本地 .pt 绝对路径（如历史 Run 的 best.pt），原样传训练子进程 `YOLO(...)`，不做存在性校验；`extra_args` 为对齐 ultralytics 8.4.100 的全量官方训练参数（见 `src/visiontrainer/training/params.py`，非法键/越界值 400 拒绝）；含 `agent:{max_rounds, approval, objective}` 即调参任务（06），Agent 轮内决策仍受其白名单 clamp |
-| GET | `/api/v1/tasks` | 列表（status、source、primary_metric、dataset、created_at；**2026-10-30 起每任务附 `runs` Run 概要列表**——uid/round_no/status/pruned/primary_metric/error/epochs（实际产出 epoch 数）/started_at/finished_at，在跑轮带 progress/prog_frac、排队轮带位次与 block_reason——与 `rounds` 计数并存，训练页按数据集分组每 Run 一行渲染；取消轮一律保留） |
+| POST | `/api/v1/tasks` | 创建任务。body: `{name, base_model, dataset, split_uid?, format_id?, epochs, imgsz, batch, patience, device, workers, seed, extra_args, agent}`；`split_uid` 省略即沿用最近切分（`created_at` 倒序首项，无 active 指针），显式 uid 不属该数据集 404，外部数据集走自带 data.yaml；`format_id` 省略即按 `backend_id → format_id` 注册表取（当前唯一 `ultralytics → yolo`），不可由用户选择；创建时按出队口径同算**实效集**（切分成员 − 盘上缺失 − 排除在册）并在响应回显 `{train, val, dropped{missing[], excluded[]}}`，剔除计数只提示不拒训、train 或 val 为空 → `state_conflict`(409)，有未确认投影 drops → 409；`base_model` = 预训练权重——官方模型名（ultralytics 首次自动下载）或本地 .pt 绝对路径（如历史 Run 的 best.pt），原样传训练子进程 `YOLO(...)`，不做存在性校验；`extra_args` 为对齐 ultralytics 8.4.100 的全量官方训练参数（见 `src/visiontrainer/training/params.py`，非法键/越界值 400 拒绝）；含 `agent:{max_rounds, approval, objective}` 即调参任务（06），Agent 轮内决策仍受其白名单 clamp |
+| GET | `/api/v1/tasks` | 列表（status、source、primary_metric、dataset、split_uid、format_id、created_at；**2026-10-30 起每任务附 `runs` Run 概要列表**——uid/round_no/status/pruned/primary_metric/error/epochs（实际产出 epoch 数）/started_at/finished_at，在跑轮带 progress/prog_frac、排队轮带位次与 block_reason——与 `rounds` 计数并存，训练页按数据集分组每 Run 一行渲染；取消轮一律保留） |
 | GET | `/api/v1/tasks/{id}` | 详情（含 runs 概要、Agent 轮次时间线数据与 `decisions` 决策归档——changes/clamps/analysis/param_importance 快照，M7 06） |
 | DELETE | `/api/v1/tasks/{id}?delete_files=` | 删除（级联删行，磁盘默认保留） |
 | POST | `/api/v1/tasks/{id}/approve` | 审批门裁决。body: `{action: "continue" \| "stop"}`（manual 模式） |
-| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照：冻结的当轮参数/权重标识/切分清单副本/类别表哈希/派生标签聚合哈希 `labels`，早于该功能的 Run 为 null）；开训前派生新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
+| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照，v1.4 冻结三段：`split{uid,params,memo,grouped}` / `effective{train[],val[],dropped{missing[],excluded[]}}` / `format{format_id,converter_version,projection_version,class_map,entry_path}`，连同当轮参数、权重标识、类别表哈希与标签聚合哈希 `labels`；早于该功能的 Run 为 null）；出队新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
 | DELETE | `/api/v1/runs/{uid}?delete_files=` | 删除单条训练记录（2026-10-31）：仅终态（done/failed/cancelled）可删，queued/running/stopping 409；只删该轮，其余轮次不受影响；子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策/部署登记）一并清理；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；`delete_files=true` 另删该轮 run_dir（删空任务时整任务目录）；磁盘默认保留 |
 | GET | `/api/v1/runs/{uid}/logs?tail=200` | 日志尾读（配合日志页轮询） |
 | POST | `/api/v1/runs/{uid}/stop` | 优雅停止：SIGTERM → trainer.stop → killpg（04） |
 | POST | `/api/v1/runs/{uid}/force-stop` | 强制终止：跳过优雅停止直接 killpg SIGKILL，watchdog 不在场时就地落 cancelled（stopping 卡死的兜底出口，2026-09-21） |
-| POST | `/api/v1/runs/{uid}/resume` | 从此 Run 续训 → 新 Run（**从不自动续训**，人肉触发） |
+| POST | `/api/v1/runs/{uid}/resume` | 从此 Run 续训 → 新 Run（**从不自动续训**，人肉触发）；恒钉该 Run 快照的原 `split_uid`，不走「最近」，实效集按当时盘上真相重算 |
 | POST | `/api/v1/runs/{uid}/report` | 生成 markdown 复盘报告（后台，完成经 `task.updated`）（07） |
+
+v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + format_id` 三列取代 `dataset_manifest_path`（schema 6 硬切换，不留兼容读）；建任务时实效集 train 或 val 为空 → `state_conflict`（409）拒训，存在未确认投影 drops → 409；`GET /tasks/{id}/comparison` 与跨 Task 对比按 `split_uid` 分组并逐项标注该 Run 的实效 val 张数，不同切分不暗示直接可比；错误分析 GT 恒读该 Run 的 `labels_frozen/` 冻结副本；MCP 与 Agent 只读画像工具以 `source_fingerprint` 取代 `manifest_uid`（`split_uid` 可选回显），Agent 复训同钉原 `split_uid`。
 
 ### 回注域（09 号票）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| POST | `/api/v1/runs/{uid}/deploy` | 导出 ONNX + 组装模型库目录 + 导出验证（后台任务链） |
+| POST | `/api/v1/runs/{uid}/deploy` | 导出 ONNX + 组装模型库目录 + 导出验证（后台任务链）；类别名回查读该 Run 快照的 `format.class_map`，不回读当前类别表 |
 | GET | `/api/v1/deployments` | 已部署清单（含 LRU 提示依据的顺序） |
 
 ## WebSocket

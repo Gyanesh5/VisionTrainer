@@ -15,5 +15,6 @@ Status: accepted（2026-09-22，源自 [05 号票](../../.scratch/annotation-qua
 ## Consequences
 
 - 审计指纹必须纳入标注 JSON 的 stat，否则改标/审查写键后审计缓存 stale——**本 ADR 同日已修**（`datasets/audit.py fingerprint_of`）。
-- 单图改标后需「单图重转换入口」刷新派生 YOLO txt（v1.2 波实现，`json_to_yolo_lines`+`write_label` 零件现成）。
-- 训练提交对审查完成度**仅提示不阻断**；「只训已审」派生开关是否做留 spec 增量拼装时再裁。
+- ~~单图改标后需「单图重转换入口」刷新派生 YOLO txt~~ **v1.4 修订（2026-11-03）**：显式重转入口退役，改标由详情页自动对账，格式池由出队新鲜度门逐图核对并懒刷新。
+- 训练提交对审查完成度**仅提示不阻断**；「只训已审」已由 v1.4 定为切分创建参数 `approved_only`，只在创建时烘焙，不在出队时回溯复核。
+- **v1.4 写路径边界**：本 ADR 的窄写范围仍只有 `checked`/`vt_review`；ADR 0005 的几何正规化与 ADR 0009 的类别改名是各自独立的受控写路径，不放宽本 ADR 白名单。

@@ -1,6 +1,6 @@
 # VisionTrainer 功能与架构 Spec
 
-Version 1.3 · 2026-10-31 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注，见 `.scratch/visiontrainer-build/issues/`）；v1.1 增补竞品对标优化 17 条 + quick-win（[M6/M7/M8]，来源 `.scratch/competitive-optimization/`）；v1.2 增补标注质量审查闭环（新条目标注 [R#]，来源 `.scratch/annotation-quality-review/` 地图 05–08 号票，存储决策见 [ADR 0003](adr/0003-review-state-in-annotation-json.md)）；**v1.3 重设计 Agent 域为底座 + 双决策提供方**（§2.5 重写，来源 `.scratch/agent-redesign/` 调研 + 访谈，决策见 [ADR 0006](adr/0006-agent-base-and-decision-providers.md)/[0007](adr/0007-approval-gate-human-on-the-loop.md)，实施 M10）
+Version 1.4 · 2026-11-03 · v1.0（2026-09-06）由 wayfinder 地图 13 张决策票汇编（票号以 [T#] 标注）；v1.1 增补竞品对标优化（M6/M7/M8）；v1.2 增补标注质量审查闭环（[R#]，ADR 0003）；v1.3 重设计 Agent 域为底座 + 双决策提供方（M10，ADR 0006/0007）；**v1.4 完成数据集↔训练域换位**（来源 `.scratch/dataset-training-rehome/` 01–09 号票，新条目标注 [v1.4-NN]，决策见 [ADR 0009](adr/0009-managed-dataset-owns-source-and-classes.md)、[0010](adr/0010-split-content-identity-and-effective-set.md)、[0011](adr/0011-projection-and-format-adapter-separation.md)、[0012](adr/0012-format-pool-and-per-run-entry.md)，实施 M11）
 
 单机 YOLO 训练平台：**数据集管理 → GPU 调度训练队列 → 实时曲线监控 → 结果归档对比**核心闭环，以 **Agent 自动调参**为核心卖点。标注由 [X-AnyLabeling](https://github.com/CVHub520/X-AnyLabeling) 桌面端承担，两端经数据集目录与模型库打通 [T0]；各页「在 X-AnyLabeling 中打开」按钮单实例复用（已开窗口直接加载目标图并前置，`training/xal_open_entry.py` 本地 socket 探测；未保存修改沿用桌面端「保存/放弃/取消」语义，2026-11-02）；调起子进程固定 `QT_QPA_PLATFORM=xcb` 对齐桌面端手动启动——Hyprland 会话默认 wayland 平台插件是 Qt 卡顿路径（CPU 光栅画布在 XWayland 下流畅，2026-11-02）。
 
@@ -8,8 +8,8 @@ Version 1.3 · 2026-10-31 · v1.0（2026-09-06）由 wayfinder 地图 13 张决�
 
 ```
 浏览器（NiceGUI 薄层 UI，中文）
-   │ REST /api/v1（19 端点，docs/api.md）  WS /ws/events（六事件）
-FastAPI + Runner（同进程；asyncio 单飞队列）──── SQLite（六表，SQLAlchemy 2.0）
+   │ REST /api/v1（docs/api.md）  WS /ws/events（七事件）
+FastAPI + Runner（同进程；asyncio 单飞队列）──── SQLite（SQLAlchemy 2.0，schema 6）
    │ Popen(start_new_session)                       │
 Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染管线
    ├─ on_fit_epoch_end callback → WS 推送           （前端曲线 + Agent 双消费端）
@@ -23,45 +23,66 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 ## 2. 功能规格
 
-### 2.1 数据集管理 [T5]
+### 2.1 数据集管理 [T5；v1.4 重写 02/03/04/05/06/07]
 
-- **双形态**：托管（平台管理）/ 外部（标准 YOLO 目录，只读不改写；X-AnyLabeling 标注目录必须走导入转托管）。
-- **根目录**：平台专属 `~/visiontrainer/datasets`（2026-09-17 用户裁决：目录须可识别归属且数据集与训练产物分离；config 可覆盖）。每个数据集 `task_type ∈ {detect, segment, obb, pose, classify}`。
-- **转换**：导入时自动 X-AnyLabeling JSON → YOLO（搬运 `custom_to_yolo`/`create_yolo_dataset`）；原始目录只注册路径不复制（图片 symlink）；**JSON 为唯一真源**。
-- **切分**：版本层 **Split manifest**（seed、比例默认 8:2、可选按类别分层、文件快照）；同数据集所有 Run 共用一份（Agent 各轮 val 恒定、指标可比）；清单漂移账目随校验入报告（`drift`：新增未纳入 / 已消失 / 排除在册 / 未注册类别）+ 概览琥珀条；「同步新增图片」确认门——老图 train/val 归属不动、新图按当前参数只在自身范围内入切、生成新清单版本（旧版可切回）、排除日志不复活、新增携带未注册类别阻断；空标注图默认负样本进 train。
-- **类别**：`classes.txt` 行序即 id 唯一真源；`data.yaml` 平台生成；改名/重排为显式操作。
-- **校验**：图片可解码 / JSON 可解析 / shapes 匹配 task_type / 类别存在 / 负样本计数；报告持久化 `validation_report.json`。
-- **健康报告** [M6]：导入/校验一次遍历聚合入 SQLite（dataset_stats）——逐切分 per-class 实例数分布（按标注条数计，与体检失衡检查同口径；点柱筛图仍按「含该类的图片」）、每图目标数直方图、标注尺寸热力图（归一化宽×高 20×20 格）、标注中心热力图；概要 chips 的「标注」同为标注条数（分类任务无框概念按已标图数计）；热图框选/点柱筛图 → 图片清单 +「在 X-AnyLabeling 中打开」。回答「数据长什么样」。
-- **质量审计** [M6]：按需「跑体检」+ 结果缓存——sha256 精确重复、感知哈希（imagehash，唯一新增依赖）近似重复与跨切分泄漏、类别失衡警告；**只报告不动标注真源**，处置限定「从切分清单排除文件」。
-- **校验修复指引** [M6]：五条规则各配「错误→原因→修法」三行文案，错误列表可视化。
-- **校验规则扩充** [R6]：导入/重转换即拦四条——A 转换零静默丢弃（shape 数守恒，丢弃>0 出**丢弃清单**+确认门，永不静默；plate-circle 式事故防回归）/ B 退化框（零面积 error 剔除进丢弃清单、<2px 警告）/ C 坐标越界（±1% 容差带内 clip+记录、超带列待修）/ K 孤儿配对（图↔JSON↔txt 三方对应）；任务特化三条按 task_type 启用——H segment 多边形 `shapely.is_valid`（自交/碎片/退化）/ I obb 四点退化·凸性·θ 归一化 / J pose 关键点列数与负坐标。shapely 为平台新依赖（纯几何零 torch）。
-- **自动修复** [R6，2026-10-30 用户裁决，ADR 0005]：平台可确定性修复的问题——越界钳制 / 多边形 make_valid（自交修复后可能分裂成多个多边形，翻 R6 初版「不自动 make_valid」裁决）/ 旋转框凸包重排（凸位置乱序可修；共线/零面积/内点退化仍归人工）/ 误画折线闭合（仅 segment：`linestrip`→`polygon` 点一字不动隐式闭合成环，闭合边是推断的、用户裁决可接受；polygon 只在 seg 模式被转换器接受，detect/obb 不标可修；两点的 line 与闭合后无面积者仍归人工）/ 关键点负坐标钳回 / 孤儿标注隔离（移数据集侧隔离区不删除，源目录外防重扫）——概览与校验页签琥珀条带计数 + **一键修复**按钮（确认门复述计数），执行后写回源标注 JSON（原子写、只动 shapes 几何点与折线的 shape_type，label/flags/`checked`/`vt_review` 等原样保留）、原文件备份至 `autofix/<时间戳>/backup/`、已有审查判定**继承**（`vt_review.shapes_hash` 重算，不回待审，切片一致性继承同款）、增量重转派生并全量重校验。口径三变化：可修复项在报告中带 `fixable` 标记且**不再计入校验「有问题」**（`ok` 只看需人工项）、概览问题区只展开需人工项的逐图修法指引、审查可疑度「校验」来源不计可修复项；bad_json / 图片不可读 / 形状与任务不符 / 未登记类别 / 几何退化丢弃仍须人工（修法指引保留）。
-- **审计与健康报告扩充** [R6]：质量审计新增**同图重复/高度重叠标注**（同 label IoU>0.999 完全重复档 + 0.85–0.95 人工复核档，两档均只报告不自动去重——派生忠实于 JSON 真源，去重是人的决定回 XAL 改）；健康报告目标尺寸画像小/中/大分档——COCO 32²/96² 阈值**按 640 基准尺度换算后判**（分辨率无关：高分辨率图的绝对像素口径会失真，5472×3648 里 107×138 的目标绝对面积是「大」、训练时实际是小目标）。
-- **标注审查** [R5,R7]：数据集详情页第四页签「标注审查」，进入即沉浸键盘流——大图+标注叠加（标注色按数据集类别序分配，同名类全数据集同色、跨图不漂移），`n` 通过 / `b` 驳回弹四理由（漏标/多标/框不准/类别错+备注，`1-4` 数字选）/ `s` 跳过 / `←→` 切图（大图查看器开着时键盘流同步换图），右侧胶片条（轻量状态过滤）。状态机**三态+跳过图级硬编码**；**状态寄生标注 JSON**（XAL v4 官方 `checked`⇔通过 + 平台自有 `vt_review` 键；平台首获窄写白名单——仅此两键、原子写、写后指纹回填，见 ADR 0003）；**双指纹失效**（mtime_ns+size 快筛 + shapes 哈希权威比对：标注内容变更即自动回待审亮「已修改」；XAL 内手动 Ctrl+Alt+K 标记互认为通过）；胶片条与前进顺序=可疑度降序（校验未过/审计命中/健康报告低分/错误分析 FN-FP/同图重复/质检榜单来源加权）；已排除图标徽章不入前进序列；驳回时提供「去排除」与「直达 XAL」入口；**驳回清单 markdown 导出**（与改标清单同构）。训练提交显示审查完成度提示（approved+skipped 占比低于阈值黄牌提醒，不阻断）。
-- **「只训已审」开关** [R8]：数据集级开关（默认关）——开启后重切生成的切分清单与派生结构**只含有效状态=通过（`checked:true`）的图**（待审/驳回/跳过不入；机制同排除：新 manifest、旧清单保留可切回）。
-- **标注变更联动** [R4,R5]：单图标注修改 → 单图重转换刷新派生 YOLO txt（`json_to_yolo_lines`+`write_label` 纯函数现成，亚毫秒）+ 健康报告随重新校验刷新；审计缓存指纹已纳入标注 JSON stat（2026-09-22 已修）。
-- **切片（Tiling）**：托管数据集的派生操作（详情页按钮，与重切分同级）——按行×列（1–4，默认 2×2）+ 每轴重叠率（默认 0.2，SAHI 同构推进：步长=片尺寸−重叠、每轴末片回退保整片不产窄条）切小图，**生成全新托管数据集**（默认名 `<源名>-tile{行}x{列}`；血缘记 `dataset.json` 的 `tiling` 键只记档不联动，源集零改动）。标注**完整落入才归属**（rectangle/polygon/rotation/circle 统一外接矩形规则、平移坐标、无裁剪无残缺标注——跨界目标靠重叠在邻片完整出现，比片还大的目标 dry-run 红字警示，见 [ADR 0004](adr/0004-tiling-complete-containment.md)）；空片（无归属标注，含带残影）默认丢弃、开关保留为负样本；出生**按源图分组随机重新切分**（同源小图永不跨侧防泄漏，分层按源图主类）并自动跑校验+健康画像（丢弃确认门同导入语义继承）；**审查判定按一致性继承**：片内目标全部完整归属或零目标 → 继承源图判定（经 `write_review` 重算哈希，含驳回理由）；片内存在有交集而未完整归属的目标（边缘残影）→ 回待审复审。执行前强制 dry-run 预览（原图/产片/空片丢弃/跨界丢弃及占比/无处完整/复审片计数 + 红橙警示）确认门后才落盘，失败清理半成品目录。支持 detect/segment/obb；pose/classify 与外部数据集不支持（按钮置灰）。
+- **双形态**：托管数据集由平台创建并拥有真源与类别表；外部数据集仍是标准 YOLO 目录，只读不改写、无平台切分选择器。[v1.4-02/03]
+- **根目录**：平台专属 `~/visiontrainer/datasets`（config 可覆盖），与训练产物分离。每个数据集 `task_type ∈ {detect, segment, obb, pose, classify}`。
+- **新建数据集** [v1.4-02/07]：名称 + 任务类型 + **类别表必填** + 图片来源三态（空 / 图片目录 / 已标 X-AnyLabeling 目录）。已标目录探测类别预填，确认后仍有表外类别则阻断并列清单；入图默认拷贝、可选移动。「导入」折为第三态，不再有独立入口或首次切分。UI 采用**两栏单屏**：左侧表单、右侧类别表。
+- **数据集页信息架构** [v1.4-05/07]：采用**单列状态流**——来源、类别表、校验/画像、体检四张状态卡打头，下方工作区折叠承载审查、排除恢复、切片等；页头工具条统一放「加图 / 导出标注 / 在 X-AnyLabeling 中打开」。切分版本列表、重切分、切回、重建派生标注与漂移琥珀条全部移除；排除在册计数直接进入排除恢复。
+- **真源与加图** [v1.4-02/06]：`source/` 平铺图片与同名 JSON，是平台拥有的唯一真源。平台加图支持目录/文件与拷贝/移动，同名冲突阻断不自动改名，携带未登记类别时阻断并可一键追加后重试；直接投放文件在详情页打开时自动纳入。若本集 XAL 实例存活，加图完成推 `rescan`，新图立即可标。「同步新增」与清单漂移报告退役。
+- **类别表平台为 master** [v1.4-02/06，ADR 0009]：`classes.txt` 行序即 id。追加直通；改名同步改写 `classes.txt` 与真源 JSON 的 shape label，备份 + 原子写 + 审查判定继承；重排经 id 位移与模型可比性断裂确认门；删除仅限零实例类。四动作提交后即时重校验与画像，格式池经 `classes_sha` 在下次出队懒刷新。XAL Label Manager 造成的「未登记新名 + 零实例旧名」识别为疑似改名，确认后只改类别表。
+- **XAL 协同** [v1.4-02/06/07]：每次调起恒带 `--labels <ds>/classes.txt --validatelabel exact`；`exact` 只是拦新建/编辑标注的**软守卫**，存量旧类与 Label Manager 可绕过，根治靠平台新建/加图阻断和疑似改名识别。单实例 socket 协议改为 `{cmd: open|rescan, image, dir, classes}` + ack；换集序列 `may_continue → load_labels(clear_existing=True) → import_image_folder → load_file`，类别表变更推 `load_labels`，加图推 `rescan`，未保存修改沿用保存/放弃/取消语义。
+- **改标回流与统一指纹** [v1.4-02/05]：`source_fingerprint = sha256(sorted(文件名, size, mtime_ns))` 覆盖 `source/` 全部图片与 JSON，是详情页对账、画像和体检共用的唯一新旧判据。打开详情页发现指纹变化即后台自动重校验 + 重算画像并显示进度；列表页仅以目录 mtime 粗判「可能有变更」；体检保持手动并显示「过期」。无常驻监视、无定时任务；半截 JSON 记一次损坏，下次打开自愈。
+- **回收区** [v1.4-02]：删集把整目录移至 `<root>/.trash/<name>-<ts>/`，仍有 Run 引用时确认门列数量；XAL 删图落 `<ds>/_delete_/`，平台清理其排除条目。图片级恢复只回图、不回已删 JSON，UI 明示；回收区不自动清理。
+- **校验** [v1.4-04/05]：图片可解码 / JSON 可解析 / 形状可投影 / 类别存在 / 负样本计数 / **文件 stem 唯一**；`stem_conflict` 为红灯并阻断派生。完整报告只落 `validation_report.json`，`dataset.json` 仅存摘要。可投影的跨任务形状产生信息级 lint（如 polygon→bbox N 个），不混入红灯；`task_mismatch` 只剩真正不可投影者。
+- **健康报告** [M6；v1.4-05 重写]：`dataset_stats` 改**一数据集一行**，按 `source_fingerprint` 识别新旧；payload 保存逐图原料与 `agg_all` 全集聚合，不再持久化逐切分结果。页面以最近切分 / 历史切分 / 全集选择器和「含排除」开关调用 `compose_view`，即时得到逐切分类别分布、每图目标数直方图、尺寸与中心热力图；排除/恢复/新建切分零重算。框选与点柱筛图、XAL 直达及既有尺寸分档口径不变。
+- **质量审计** [M6；v1.4-05 重写]：`dataset_audits` 同样一行制，缓存逐文件 sha256/phash（带 size/mtime_ns 以增量复用）、精确/近似重复组、同图重叠与全集失衡；跨切分泄漏由 `leak_view(groups, split)` 按当前选择即时计算，新建切分预览复用重复组显示「将产生跨切分泄漏 N 组」。仍只报告不改真源，处置写排除日志而非生成新切分。
+- **账目失效传播** [v1.4-05]：
 
-### 2.2 训练执行与调度 [T4, T1, ADR 0001]
+  | 事件 | 校验 + 画像 | 体检缓存 / 泄漏 | 审查状态 | 排除日志 | 格式池 |
+  |---|---|---|---|---|---|
+  | 改标 / 加图 / 删图 | 详情页打开按指纹自动 | 过期徽章；泄漏随体检 | 双指纹自失效 | 删图清理条目 | 出队懒刷新 |
+  | 自动修复 | 流程内即时 | 过期徽章 | 判定继承 | — | 出队懒刷新 |
+  | 排除 / 恢复 | 零重算，读时 join | 零重算，读时 join | — | 写 / 删键 | 出队过滤 |
+  | 类别表追加 / 重排 / 删除 | 即时 | 过期徽章 | — | — | `classes_sha` 懒刷新 |
+  | 类别表改名 | 改写动作内即时 | 过期徽章 | 判定继承 | — | 出队懒刷新 |
+  | 新建切分 | 零重算 | 立即可查泄漏视图 | — | — | 出队写训练入口 |
+  | 切片生新集 | 新集首次校验建行 | — | 一致性继承 | 空 | — |
 
+- **校验修复指引** [M6]：各规则配「错误→原因→修法」三行文案，错误列表可视化。
+- **校验规则扩充** [R6；v1.4-04/11]：投影层是唯一守恒点——shape 数守恒，丢弃 >0 出**丢弃清单** + 确认门，永不静默；退化框、坐标越界、图↔JSON 孤儿配对及 segment/obb/pose 任务特化规则沿用 R6。校验 lint、出队新鲜度门与外部导出共用投影，不再有独立「重转派生」阶段。
+- **自动修复** [R6，ADR 0005；v1.4-05]：越界钳制 / 多边形 make_valid / 旋转框凸包重排 / 误画折线闭合 / 关键点负坐标钳回 / 孤儿标注隔离的边界不变；写回真源须原子写、备份并继承审查判定。流程内即时重校验 + 画像，**不再增量重转派生**，格式池由出队门懒刷新。可修复项不计入校验「有问题」，语义问题与不可修几何仍须人工。
+- **审计与健康报告扩充** [R6]：同图重复/高度重叠标注仍分两档只报告；目标尺寸小/中/大按 COCO 32²/96² 阈值在 640 基准尺度判，分辨率无关。
+- **标注审查** [R5,R7；v1.4-02/05]：沉浸键盘流、三态+跳过、`checked`/`vt_review` 寄生键、双指纹失效、可疑度排序与驳回清单导出均不变；队列迭代源改为 `source/` 下带 JSON 的图，负样本与已排除图不入前进序列。平台写路径明确为三条：审查两键（ADR 0003）、自动修复几何（ADR 0005）、类别改名（ADR 0009），不提供通用平台内标注编辑。
+- **只训已审** [R8；v1.4-03]：`approved_only` 是新建切分参数，创建时只烘焙有效状态=通过的图；后续驳回不回溯既有切分，新过审也不自动进入，需新建切分·继承归属。训练提交仍只提示审查完成度，不阻断。
+- **切片（Tiling）** [ADR 0004；v1.4-03/05]：行×列、重叠率、完整落入才归属、空片策略、dry-run、审查一致性继承与 detect/segment/obb 支持范围不变。产物出生**不再自动切分**，只自动校验 + 画像；`dataset.json.tiling.groups` 持久化瓦片→源图组键，后续所有切分恒按源图分组，无组键文件各自成单元素组。
+- **导出标注** [v1.4-04/07]：纯外部用途，对话框为**格式 × 范围 × 图片**三维——YOLO/COCO/VOC 按 `supports × task_type` 置灰（VOC 仅 detect）；全集或按切分 uid 分 train/val；符号链接默认或复制可移机。结果落 `<ds>/exports/<ts>-<fmt>[-<split_uid>]/` 自包含目录，toast 报张数与投影 drops 数（只提示不阻断），可选 zip；不读不写格式池。「重建派生标注」退役无替代。
+
+### 2.2 训练执行与调度 [T4, T1, ADR 0001；v1.4 重写 03/04/07]
+
+- **切分实体与选择器** [v1.4-03/07，ADR 0010]：切分落 `<ds>/splits/<uid>/split.json`，语义归训练环节、物理随数据集备份与回收；无 active 指针，「最近」按 created_at。训练表单切分步采用**表单内三态分段**：沿用最近（默认，uid8/memo/train/val 张数/时间）/ 选历史（params、血缘、memo 可编辑）/ 新建。外部数据集无选择器，沿用自带 data.yaml。
+- **新建切分两模式** [v1.4-03/05/07]：**继承归属**为默认，锁参照 seed/ratio/stratify，既有成员归属不动，只放新进合格文件，approved_only 与 memo 可改；**全部重洗**按全部合格成员重算，首次训练强制此模式。新建预览常驻可折叠，必带 train/val 张数、与参照 val 重合 M/N、「与既有 Run 不可比」警示及可用时的跨切分泄漏组数；切片集只读显示「按源图分组」。切分在表单内独立确认落盘，任务取消不回滚；同划分命中既有 uid 直接复用。
+- **可比性不变式** [v1.4-03]：每个 Task 创建时选定 `(dataset, split_uid)`。**同切分 uid ⇔ val 名单一致 ⇔ 指标可比**；新建不同划分即新 uid，不与既有 Run 直接可比。Agent 复训、续训与 Retry 恒钉原 split_uid，不走「最近」；对比页按 split_uid 分组并标注各轮实效 val 张数。
+- **实效集** [v1.4-03，ADR 0010]：出队实效 train/val = 切分成员 − 盘上缺失 − 排除在册，只剔不加；建任务时同算预览「清单 N，实效 M：缺 a / 排除 b」。剔除计数提示不拒训，实效 train 或 val 为空则 `state_conflict` 拒训；恢复排除即让原成员自动回效。approved_only 不在消费时复核。
+- **数据格式绑定** [v1.4-04]：`backend_id → format_id` 注册表当前只有 `ultralytics → yolo`；Task 与快照记 format_id，训练表单只读一行「数据格式：YOLO（Ultralytics）」，不提供训练格式选择器。
 - **单飞 FIFO**：同一时刻一个 Run 在跑，完成自动取下一个；pynvml 外部占用检测，占用则队首留 queued 并提示原因。显存感知并行、CPU 兜底**不做**；`device` 字符串透传，零 DDP。
 - **执行内核**：平台自研 Runner（搬运 trainer.py 进程树管理），指标采集 = worker 内 `add_callback("on_fit_epoch_end")` 直推 + `results.csv` 轮询兜底，不做 stdout 解析。
 - **生命周期**：训练子进程 `start_new_session` 脱离；平台重启**孤儿收养**（pid + csv 恢复监控）；停止链 SIGTERM → `trainer.stop` → 超时 killpg SIGKILL。
-- **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态——续训成功不被历史失败轮压成 failed）。
-- **派生新鲜度门**（2026-10-31 用户裁决「派生遵从真源」）：出队冻结前把任务钉住的派生 txt 与真源标注 JSON 的当前投影**逐图内容比对**（非 mtime——转换器规则升级也能查出），漂移文件就地重转换并桌面告知——「改完标注直接开训」成为唯一正确用法，手动「导出标注」（格式选择器，当前仅 YOLO）保留但不再承重。标注 JSON 损坏、或漂移重转出现转换丢弃（unknown_class / 退化框等）→ **拒训**（Run failed，错误信息指路校验页）——宁可拒训，不静默旧账、也不静默脏账（清单内 bad_json 图此前会被静默派生成空标签当负样本训练，一并堵死）；纯新增不可转形状不改派生内容、不拦（校验报告 unknown_labels 与重校验后的丢弃确认门管辖）。外部数据集与 classify（无派生 txt）no-op。
-- **val 标签冻结副本**：启动即把派生 val 标签拷入 `<run_dir>/labels_frozen/val`，运行快照增记派生标签逐文件 sha256 的聚合哈希；**错误分析 GT 恒读冻结副本**（早于该功能的 Run 回退派生目录）——此后数据集改标/重建派生不影响旧 Run 的对账口径。
-- **训练记录列表**（2026-10-30 重构）：训练页列表按**数据集分组**（组头行可点击折叠/展开、开合状态记忆），组内**每条 Run 一行**（任务名 / 轮次 / 预训练权重 / 状态 / 进度 / 主指标 / 来源 / 开始时间）；**单表渲染**——组头行 colspan 横跨灰带、全部分组共用一个表头且列宽天然对齐（不逐组重复表头）；取消的轮次（含零 epoch 空轮）一律**保留为历史记录不回收**，终态进度显示实际产出（共 N epoch）；任务新在前、轮次升序（续训链连续可读），组序按最近活动在前；点行查看**该次运行**详情（不恒显最新轮），勾选跨组聚合（组头行不计入）、折叠组隐藏勾选行即出账。
-- **删除粒度**（2026-10-31 用户反馈：多轮任务删一轮不该连坐全部轮次）：单条 Run 记录可独立删除——详情页「删除本轮」或批量勾选**逐条**删勾选轮次（不再按任务去重），其余轮次不受影响；仅终态（done/failed/cancelled）可删，queued/running/stopping 409 先停止或取消；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；「删除任务」仍整任务删；Run 子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策/部署登记）随 Run 一并清理（Task 级删除同口径）；磁盘产物默认保留，勾选后删对应 run_dir（删空任务时整任务目录）。
-- **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供"续训"（新 Run）。
-- **预训练权重**：创建任务时权重为双形态——官方模型名（如 yolo11n，ultralytics 首次自动下载，随数据集 task_type 自动带出）或本地 .pt 绝对路径（如历史 Run 的 best.pt）；官方名与数据集任务不匹配时防呆拦截，本地路径任务类型不可推断（平台无 torch 不读权重）、不参与防呆。UI 表与任务名等显示处路径收短为文件名。
-- **运行快照** [M6]：Run 启动冻结全量训练输入（切分清单 + classes.txt 哈希 + 增强参数 + 预训练权重标识）入 Run manifest；历史 Run 可复现、跨 Run diff 完整。
+- **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态）。
+- **派生新鲜度门与出队六步** [v1.4-03/04，ADR 0011/0012]：①成员段计算实效集；②检查格式池 `converter_version / projection_version / classes_sha`，任一失配整池重建；③逐实效成员计算 `adapter.encode_image(project(JSON))` 并与池文件**逐字节比对**、不一致即重写并补齐图片链接，`broken` 或投影 drops 拒训；④移除真源已不存在者的池链接与标签；⑤写逐 Run 训练入口与 `labels_frozen/`；⑥快照冻结 `format{format_id, converter_version, projection_version, class_map, entry_path}`。改完标注直接开训是唯一正确用法，导出标注不再承重；外部数据集不走平台格式池。
+- **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**。v1.4 迁移会改写既有 Run 快照，新代码不保留旧派生目录回退分支。
+- **训练记录列表**（2026-10-30 重构）：训练页按数据集分组、每 Run 一行；组头折叠状态记忆、单表渲染、取消轮保留、终态显示实际 epoch、任务新在前且轮次升序、点行查看该次运行等既有口径不变。
+- **删除粒度**：单条终态 Run 可独立删除，其余轮次不受影响；queued/running/stopping 409；任务删空连任务移除，存余轮次时聚合状态回落。Run 子表随轮清理，磁盘产物默认保留，勾选后删对应 run_dir；「删除任务」仍整任务删。
+- **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供「续训」新 Run；重开与续训钉原 split_uid，实效集按当时真相重算。
+- **预训练权重**：官方模型名或本地 .pt 绝对路径双形态不变；官方名与任务类型不匹配时防呆，本地路径不参与推断，显示处收短为文件名。
+- **运行快照** [M6；v1.4-03/04]：冻结 `split{uid, params, memo, grouped}`、`effective{train[], val[], dropped{missing[], excluded[]}}`、`format{…, class_map}`、类别表哈希、标签聚合哈希、增强参数与预训练权重标识。可复现性来自快照而非钉住的派生目录；错误分析与部署回查类别读 class_map。
 - **失败 Retry** [M7]：Failed/Cancelled Run 一键以相同参数重开 Task。
 - **表单工程学** [M7]：超参失焦 clamp 反馈、只存非默认值、「已修改」徽章——超参 diff 天然只剩差异。
 - **预设实验模板** [M8]：尺寸扫描（640/800/960 一键三 Task）/lr 扫描模板 + 少样本快训预设；不做自然语言入口。
 
 ### 2.3 实时监控 [T7]
 
-- WS 六事件：`run.metrics`（逐 epoch）/ `run.progress`（1Hz）/ `run.status` / `task.updated`（含 agent_state）/ `queue.updated` / `deployment.updated`（登记/验证落定/清理删除）；断线 REST 补齐不回放；日志独立通道，stdout 只透传落 `training.log`。UI 的训练页与部署区订阅此通道事件驱动刷新（事件当门铃、REST 取数据 + 低频兜底），不周期轮询。
+- WS 七事件：`run.metrics`（逐 epoch）/ `run.progress`（1Hz）/ `run.status` / `task.updated`（含 agent_state）/ `queue.updated` / `deployment.updated`（登记/验证落定/清理删除）/ `operation.updated`（进行中操作生命周期，§2.8）；断线 REST 补齐不回放；日志独立通道，stdout 只透传落 `training.log`。UI 的训练页与部署区订阅此通道事件驱动刷新（事件当门铃、REST 取数据 + 低频兜底），不周期轮询。
 - 四类视图：任务/队列页、Run 详情页（loss 分项 + P/R/mAP50/mAP50-95/lr 曲线 + 产物区）、Agent 循环页（轮次时间线 + 审批门）、对比页（Task 内跨 Run + 跨 Task）。
 - **监控增强** [M7]：GPU 利用率/显存/温度采样入库（pynvml，5–10s）——Run 详情 System 卡 + 多 Run 显存对比；训练时长预估（历史 Run 中位数，提交确认页）；桌面通知（完成/失败/审批请求 → notify-send）；train/val loss 同图双线（实线训练/虚线验证）。
 
@@ -69,9 +90,9 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 - Run 归档：全量 args、逐 epoch 指标（**入库，单一数据源**）、results.csv、training.log、ultralytics 全套产物图（混淆矩阵/PR/F1/P/R 曲线不自绘）、best/last.pt、Agent 轮 LLM 决策记录（输入摘要/输出/clamp）。
 - 复盘报告：一键生成 markdown（复用 Agent 多模态管线）存 Run 目录；PDF 不做。
-- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标/重建派生不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；早于该功能的 Run 回退派生目录。
+- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标与格式池懒刷新不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；v1.4 迁移保持既有冻结副本不动，新代码不增加旧派生目录回退分支。
 - **复盘升级** [M8]：结构化错误统计（Top 混淆类对/缺数据类/FP-FN 失衡/小目标占比）作 LLM 输入 schema；报告固定加「**下一步实验推荐**」章节（超参改动+理由+预期收益，与审批门共享输出结构）。
-- **对比页六件套** [M8]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键。
+- **对比页六件套** [M8；v1.4-03]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键；Run 按 split_uid 分组并标注各轮实效 val 张数，不同切分不暗示直接可比。
 
 ### 2.5 Agent 自动调参（核心卖点）[T6；v1.3 重设计定稿 2026-10-31，实施 M10]
 
@@ -82,7 +103,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **审批门 human-on-the-loop** [ADR 0007]：**自主档位** autonomous（默认：护栏内直通 + 桌面通知 + 全量审计 + 随时可停）/ supervised（每轮放行，原 manual 语义）；**审批四态**（放行 / 改后放行 / 拒绝本轮 / 终止循环）；**批量预审**（睡前排队整夜计划一次放行）；调参/审批/预算策略抽用户可编辑**策略文件**，循环代码冻结。
 - **预算熔断三层**：轮数上限（已有）+ 单轮运行时长上限（防「合法但极慢」参数）+ 累计 token/成本上限；触顶优雅停 + 通知。
 - **记忆**：**经验库**——跨任务「数据集画像 → 超参动作 → 结果」案例检索注入（agent_decisions 资产上加 retrieve/review）；compaction（上下文逼近窗口时摘要压缩，原始条目永不删）。
-- **跨域闭环**：错误分析（混淆对/错误榜）作只读工具按需注入证据；数据侧动作建议（排除文件 / 回 X-AnyLabeling 重标 / 重切分 / 质检探针）与部署推荐落决策卡，人工确认后才成为平台动作（部署回注人工终验不变）。
+- **跨域闭环** [v1.4-03/05]：错误分析（混淆对/错误榜）作只读工具按需注入证据；数据侧动作建议（排除文件 / 回 X-AnyLabeling 重标 / 新建切分·继承归属 / 质检探针）与部署推荐落决策卡，人工确认后才成为平台动作。Agent 复训恒钉原 split_uid；画像工具以 source_fingerprint 替代 manifest_uid，可选回显 split_uid。
 - **审计**：agent_decisions 从轮级决策扩展为工具调用轨迹级归档。
 - **安全铁线四条**：单卡单飞 · 白名单 clamp（epochs/batch/imgsz/模型结构锁死）· 终止只认数字 · 写操作与审批状态平台侧校验（防外部 agent 绕行直跑训练，MCP 侧只开只读+提交类）。
 - M4/M7 语义保留：**白名单 18 项**（lr0/lrf/momentum/weight_decay/warmup_epochs/warmup_momentum/box/cls/dfl/hsv_h·s·v/degrees/translate/scale/fliplr/mosaic/mixup/close_mosaic/patience，min/max/step clamp 并记录）；**主指标**映射（detect/segment/obb→mAP50-95，pose→pose mAP50-95，classify→top1）；默认 max 5 轮，终止 = 达上限 / 连续 2 轮无提升 / 主动 stop / 轮失败；**多模态输入**指标 JSON + 三图（loss/主指标/混淆矩阵，不支持图退化纯 JSON）；**兜底** API 指数退避 3 次、穷尽 paused 不烧卡；烂轮早停（1/2 epoch 检查点，pruned 证据入决策）；参数重要性注入；Agent 页三卡结构（循环总览/决策卡三段式/审批门）。
@@ -107,29 +128,110 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 ### 2.8 界面交互口径 [UI]
 
-- **进行中操作（2026-10-31）**：点击后结果非即时返回的界面操作（导入、重新校验、一键修复、体检、导出标注、切片、排除/恢复/切回、错误分析、试跑、部署导出、复盘报告、批量删除、LLM 测试等）一律三层反馈，杜绝「点了没反应」：
+- **进行中操作（2026-10-31；v1.4 措辞同步）**：点击后结果非即时返回的界面操作（新建数据集、加图、重新校验、一键修复、体检、导出标注、切片、排除/恢复、新建切分、错误分析、试跑、部署导出、复盘报告、批量删除、LLM 测试等）一律三层反馈，杜绝「点了没反应」：
   1. **按钮忙碌态**：Quasar `loading`（转圈 + 禁点）——重复点击不产生第二个操作（服务侧同 key 幂等登记兜底）；
   2. **区域进度行**：操作锚点（详情卡顶部 / 对话框内）逐条显示 阶段 + 数字进度 + 已耗时，进程内 0.3s 读登记表刷新（签名守卫零变化不重渲染）；
   3. **页头全局指示**：「⟳ N 项进行中」chip 跨页签可见，点开逐条清单并保留最近一条失败原因；页面切换、关对话框、导航都不丢状态。
 - **真源**：进程内进度登记表（`progress.py`，线程安全单例）是唯一事实源；生命周期（登记/换阶段/终态）经 `operation.updated` 事件广播（细粒度 tick 不进事件防刷爆），UI 呈现以读表为准、不依赖 WS 订阅生命周期。
-- **长任务口径**：服务层耗时操作带进度回调（导入/校验/重转派生/自动修复三段式 `(phase, cur, total)`；错误分析/体检逐张 `(cur, total)`）；无天然进度的操作（对比、部署导出登记、LLM 测试）显示不定时长转圈 + 已耗时。
+- **长任务口径**：服务层耗时操作带进度回调（新建/加图/校验 `(phase, cur, total)`；自动修复仅修复写回 + 扫描校验两阶段；错误分析/体检逐张 `(cur, total)`）；无天然进度的操作显示不定时长转圈 + 已耗时。
 - **审查页签异步构建**：审查队列解析（全量标注逐个读状态）放工作线程，页签先渲染骨架行——切换页签不再冻结整页。
 - **结果页对比**：跨任务对比改异步（曾同步阻塞事件循环，全站卡死数秒）。
 
 ## 3. 数据规格
 
-- **六表** [T10]：tasks（uid/source/聚合 status/train_args/agent_config/manifest 路径）、runs（uid/round_no/状态/pid/run_dir/权重路径/primary_metric）、epoch_metrics（(run_id,epoch) 主键 + JSON 整存）、agent_decisions、deployments、schema_version。删除 Task 级联删行，磁盘默认保留。
-- **产物布局**：Run 目录即 ultralytics save_dir（`project=<runs_dir>/<task_uid>`、`name=<run_uid>`、exist_ok=True）；training.log/report.md/export/ 同目录；约定优于登记。
-- **迁移**：create_all + schema_version 幂等迁移函数，不上 Alembic（二期可引）。
-- **接口**：全部端点与消息 schema 见 [docs/api.md](./api.md)；Pydantic 硬契约 `src/visiontrainer/api/schemas.py`。
-- **审查寄生键** [R5]：标注 JSON 顶层 `checked`（XAL 官方字段，⇔通过）+ `vt_review`（平台自有：`{state, reason, note, decided_at, shapes_hash, mtime_ns, size}`）；无新 DB 表、schema 维持 v4；平台写 JSON 限定白名单两键 + tempfile/fsync/os.replace 原子写（对齐 XAL 行为），并发 last-writer-wins。平台 venv 新增依赖 shapely（唯一）。
-- **词汇表**：根目录 [CONTEXT.md](../CONTEXT.md)（Task/Run/单飞/切分清单/审批门……），实现与文档统一用语。
+### 3.1 托管数据集目录 [v1.4-02/05]
+
+```text
+<root>/<name>/
+├── dataset.json
+├── classes.txt
+├── validation_report.json
+├── excluded.json
+├── source/                 # 图片 + 同名 XAL JSON 平铺
+├── splits/<uid>/split.json
+├── derived/<format_id>/    # 格式池，缓存
+├── exports/                # 纯外部用途导出
+├── _delete_/               # 图片级回收区
+└── autofix/<ts>/
+<root>/.trash/<name>-<ts>/   # 数据集级回收区
+```
+
+`dataset.json` 最终字段为 `name / task_type / form / created_at / origin{mode,path,at,transfer} / validation_summary{ok,total_images,negatives,checked_at,source_fingerprint,drops{count,signature,acked}}`，可选 `tiling{source,rows,cols,overlap,keep_empty,groups}` 与 pose `flip_idx`。`classes`、`last_validation`、`drops_*` 顶层字段、`excluded`、`manifests`、`active_manifest` 全部删除；`drops_pending_ack` 按 `count > 0 ∧ signature ≠ acked` 现算。
+
+`excluded.json` 为文件名键字典：`{version:1, files:{<文件名>:{at,reason}}}`。它随数据集回收，不由 DB 持有；读者包括新建切分、出队实效集、画像/体检读时视图与排除恢复 UI，详情页对账清理已不在真源目录的条目。
+
+### 3.2 切分实体 [v1.4-03，ADR 0010]
+
+```json
+{
+  "uid": "a31d0e35",
+  "dataset": "transfer-anomaly",
+  "created_at": "2026-11-02T15:00:00",
+  "memo": "",
+  "params": {"seed": 42, "ratio": 0.8, "stratify": true, "approved_only": false},
+  "grouped": "source_image",
+  "train": ["a.bmp"],
+  "val": ["b.bmp"],
+  "lineage": {"parent_uid": "ef6604c5", "mode": "inherit",
+              "added": [], "removed": {"missing": [], "excluded": [], "unapproved": []}},
+  "counts": {"train": 440, "val": 116, "approved_dropped": 0}
+}
+```
+
+`train/val` 只存相对 `source/` 的排序文件名，不存标签路径或 primary_label。`uid = sha256(json(train)+json(val))[:8]`；参数、分组与 memo 不进哈希。train/val/params/lineage 不可变，仅 memo 可编辑；无删除入口。合格成员 = 在盘 ∧ 未排除 ∧（approved_only 时）审查通过，负样本恒合格且只进 train；分层组内必须按 seed 洗牌。Task 以 `(dataset, split_uid, format_id)` 引用训练输入，取代 `dataset_manifest_path`。
+
+### 3.3 投影、格式池与逐 Run 入口 [v1.4-01/04，ADR 0011/0012]
+
+**投影记录**：
+
+```text
+ProjectedImage {
+  image, width, height, negative,
+  objects: [{label, geom: bbox|polygon|quad|pose, points_px,
+             source_shape, projected}],
+  drops: [{index, label, shape_type, reason}],
+  broken
+}
+```
+
+跨任务等价：detect 收 rectangle/circle/polygon/rotation 并投影 bbox；segment 收 polygon/circle（32 边）/rectangle/rotation；obb 收 rotation/rectangle，polygon 不收；pose 保持框 + group_id 关键点；classify 读 flags。投影层拥有唯一 drops 守恒账目，适配器对声明支持的任务不得再产生 drops。
+
+**FormatAdapter 协议**：`format_id / converter_version / supports / entry_kind / class_encoding(classes)→class_map / negatives / dataset_meta_needs / encode_image / write_entry / export`。适配器必须输出实际生效 class_map；负样本显式落盘并声明后端开关，pose 元数据按类别与关键点定义推导。`backend_id → format_id` 当前仅 `ultralytics → yolo`。
+
+**格式池** `<ds>/derived/<format_id>/`：`images/` 平铺符号链接、`labels/` 平铺标签、`derived.json{format_id,converter_version,projection_version,classes_sha,task_type,class_map,counts,updated_at}`。一集每格式一池，与切分无关；可删重建，池清理在出队时。平铺布局要求 stem 唯一。
+
+**逐 Run 入口** `runs/<run_dir>/data/`：`data.yaml + train.txt + val.txt` 指向池内图片与本次实效集，和运行快照、`labels_frozen/` 同地归档。classify 例外为 `data/{train,val}/<NN_类名>/` 链接树 + 根 `.ndjson.yaml`，以两位数字前缀让字母序等于类别行序，并以 class_map 为唯一回查依据。Run 目录仍是 Ultralytics save_dir，training.log/report.md/export/ 同目录。
+
+**外部导出适配器**：YOLO/COCO/VOC 进 M11；COCO/VOC 由平台以 stdlib 实现，XAL 仅作参考。导出与格式池完全解耦，DOTA/mask/mot 等长尾格式不做。
+
+### 3.4 SQLite 与运行归档 [v1.4-05/08]
+
+- `schema_version` **5→6**；`tasks` 增加 `dataset / split_uid / format_id` 并删除 `dataset_manifest_path`，`runs` 的 run_dir 不变。
+- `dataset_stats` 改为 `dataset UNIQUE + source_fingerprint + task_type + computed_at + payload`；`dataset_audits` 改为 `dataset UNIQUE + source_fingerprint + created_at + payload`。两表在迁移时重建弃档，旧画像与体检不转换；画像预热，体检按需重跑。
+- Run 快照含 `split / effective / format` 三段及既有训练输入；删除 Task 级联删行、磁盘默认保留的口径不变。
+- 审查寄生键仍为 `checked + vt_review`，不新增审查 DB 表；三条平台写路径分别受 ADR 0003/0005/0009 约束，均须原子写，审查与改名/自动修复按各自规则继承判定。
+
+### 3.5 v1.4 一次性迁移 [v1.4-08]
+
+**硬切换**：允许直接删除全部旧代码路径，不留兼容读层、过渡开关、双写或旧→新 uid 映射表；旧 Run 可续训/错误分析与旧划分可在历史列表选用的**结果**保留，机制由迁移时改写数据达成。schema 6 新代码与迁移脚本必须同批落地，不得先于迁移上线。
+
+- **CLI**：`python -m visiontrainer.migrate_v14 {--dry-run|--apply}`，平台 venv 手动执行，不随启动自动跑；`--apply` 前自动备份 DB，`<ds>/.migrated-v14` 支持中断续跑。dry-run 输出手工回退步骤（恢复 DB 备份 + 反向 rename）。
+- **真源入位**：8 个有真源的数据集以同分区 `mv images → source/` 入位，不留反向链接；`classes.txt` 逐字节保留，dataset.json 重写为 §3.1。孤儿集 circle-mix-800 直接删除且仅此一集豁免回收区；其他杂项目录不动。
+- **切分与旧 Run**：每个旧 split_manifest 转为划分内容寻址的 split.json，同划分去重，memo 记旧 uid 溯源；原 active 对应实体成为最近切分。4 个 Task 重钉三列，5 个 run_manifest.json 就地补写新 split/effective/format；旧 derived/<uid>/ 树转制后直删，格式池按需重建。tile2x2 回填 tiling.groups，任一瓦片无法映射即中止。
+- **停机窗**：8600 停止 → 迁移 + 8 集校验/画像预热 → schema 6 新代码重启。测试写生产库的隔离根因必须先于迁移在独立实现票修复，不混入迁移脚本。
+- **验收八条**：①8 集 source 图/JSON 数与旧账对账、classes.txt 不变；②每实体 train+val 与旧 manifest 逐名一致；③4 Task 三列可解析；④transfer-material-seg 真训 1 epoch 走完出队六步，其余 3 Task 重开 dry 到出队前；⑤2e85f2bf 错误分析实开对账；⑥8 集详情页画像立即可见；⑦XAL 改标保存后详情页自动对账；⑧tile2x2 groups 556/556 命中。
+
+### 3.6 接口与词汇
+
+全部端点与消息 schema 见 [docs/api.md](./api.md)，Pydantic 硬契约位于 `src/visiontrainer/api/schemas.py`；未来常规迁移仍走 create_all + schema_version 幂等函数，不上 Alembic。根目录 [CONTEXT.md](../CONTEXT.md) 是 Task/Run/切分/格式池/审批门等领域词汇的唯一事实源。
 
 ## 4. 非目标（Out of scope）
 
-标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理。v1.1 竞品对标再裁决的不做项（2026-09-20）：跨数据集合并训练 · 平台内模型测试模块（Test 页+改标清单已覆盖）· 离线增强管道 · 嵌入级分析（FiftyOne 内嵌或引导）· Optuna 模式 · 终端提交入口 · PWA 移动端 · 拖 .pt 导入历史权重。v1.2 标注质量审查再裁决的不做项（2026-09-22）：平台内标注编辑（修改一律回 X-AnyLabeling，[ADR 0003](adr/0003-review-state-in-annotation-json.md) 维持出界）· 多标注者协议度（IAA/Cohen's kappa，单机自用）· OOF k 折与 cleanlab 质量分（二期候选，最小形态体感后再议）· training dynamics / zero-shot 大模型查漏标 · 任何硬性审查合格线（一律提示+人工确认）。v1.3 agent 域重设计再裁决的不做项（2026-10-31，详见 §2.5 与 [ADR 0006](adr/0006-agent-base-and-decision-providers.md)）：通用业务工具 Agent（原「工具调用业务 Agent」收窄——agent 域白名单工具面与 MCP 接入做）· 多智能体编排 · 代码生成式建议 · LLM 当代理模型 · 全自动无人闭环 · Web 检索增强；树搜索/进化种群条件挂起（短训代理评估落地再评）。
+标注功能（桌面端承担）· 多用户/认证 · 终端 PTY · RAG 问答 · Ascend NPU · 多机调度 · 显存感知并行与 CPU 兜底训练 · DDP 专门支持（仅透传）· 自动磁盘清理。v1.1 竞品对标再裁决的不做项（2026-09-20）：跨数据集合并训练 · 平台内模型测试模块（Test 页+改标清单已覆盖）· 离线增强管道 · 嵌入级分析（FiftyOne 内嵌或引导）· Optuna 模式 · 终端提交入口 · PWA 移动端 · 拖 .pt 导入历史权重。v1.2 标注质量审查再裁决的不做项（2026-09-22）：平台内标注编辑（修改一律回 X-AnyLabeling，[ADR 0003](adr/0003-review-state-in-annotation-json.md) 维持出界）· 多标注者协议度（IAA/Cohen's kappa，单机自用）· OOF k 折与 cleanlab 质量分（二期候选，最小形态体感后再议）· training dynamics / zero-shot 大模型查漏标 · 任何硬性审查合格线（一律提示+人工确认）。v1.3 agent 域重设计再裁决的不做项（2026-10-31，详见 §2.5 与 [ADR 0006](adr/0006-agent-base-and-decision-providers.md)）：通用业务工具 Agent（原「工具调用业务 Agent」收窄——agent 域白名单工具面与 MCP 接入做）· 多智能体编排 · 代码生成式建议 · LLM 当代理模型 · 全自动无人闭环 · Web 检索增强；树搜索/进化种群条件挂起（短训代理评估落地再评）。v1.4 再裁决的不做项（2026-11-03）：第二训练后端实装 · 外部数据集形态改造 · 平台内通用标注编辑或破坏性形状转换 · DOTA/mask/mot 等长尾导出 · Agent/部署回注/错误分析功能重设计（仅切分、格式与账目字段随迁）· 旧机制兼容层与过渡窗。
 
-## 5. 路线图（M1–M5）
+## 5. 路线图（M1–M11）
+
+> M1–M10 为**已交付历史**，行内名词按当期契约保留；其中 manifest 切分、切分清单排除、单图重转换等机制已由 M11（v1.4）按 §2.1/§2.2/§3 的新契约取代，不再作为现状口径。
 
 | 里程碑 | 范围 | 验收标准（可手测） |
 | :--- | :--- | :--- |
@@ -143,5 +245,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 | **M8 病根与价值可见** [v1.1] | 错误分析 / 复盘升级 / 阈值探索器 / Test 页 / 对比六件套 / 部署管理 / 实验模板 | ① Run 后最差样本榜+叠加大图+矩阵点格下钻可用；② FN/FP 清单可导出回 X-AnyLabeling；③ 复盘含「下一步实验推荐」且引用错误统计；④ 部署时建议置信度写入模型配置；⑤ 试跑页 ONNX 叠框正确；⑥ 对比页 diff 三件套+「与当前部署版对比」；⑦ 模板一键生成多 Task |
 | **M9 标注质量审查** [v1.2] | 校验规则扩充 / 审计与健康报告扩充 / 标注审查页签+键盘流 / 只训已审开关 / 单图重转换联动 / 驳回清单导出 | ① 导入含非法 shape 的目录 → 丢弃清单+确认门，零静默（plate-circle 试金石）；退化框/越界/孤儿/同图重复均有报告；② 审查页签键盘判定写回 JSON，X-AnyLabeling 文件列表图标同步绿标；XAL 内改标注后平台自动回「已修改」待审；③ 单图改标后派生 txt 即时刷新、审计缓存正确失效；④ 「只训已审」开启重切后清单只含通过图、旧清单保留可切回；⑤ 驳回清单可导出 markdown；⑥ 训练提交显示审查完成度提示 |
 | **M10 Agent 域底座化** [v1.3] | 工具面三级契约 / 多步工具循环 + 决策提供方 / 审批门 human-on-the-loop（四态+档位+策略文件+预算熔断+批量预审）/ 错误分析证据接入 / 经验库 + compaction / MCP 接入（fastmcp） / Agent 页升级 | ① 只读工具查询进决策且工具调用轨迹归档可回溯；② autonomous 档整夜自跑：熔断/通知/审计齐全，supervised 每轮审批；③ 审批四态含「改后放行」；④ 决策引用错误分析证据；⑤ 经验库跨任务注入新任务首轮；⑥ 外部 agent 经 `/mcp` 开任务/查曲线/提交超参，走同一审批门；⑦ 重设计前后同组固定任务对比 |
+| **M11 数据集↔训练域换位** [v1.4] | 平台内新建/加图/类别表 master / XAL open-rescan / 切分训练侧实体与实效集 / 投影+格式适配器 / 格式池+逐 Run 入口 / 账目一行制与读时视图 / 三维导出 / 07 四块 UI / schema 6 一次性迁移 | ① 两栏新建三态来源、四类别动作、加图 rescan 与改标自动对账全闭环；② 三态切分选择器可创建/复用，同 uid val 一致，缺图/排除/空实效集行为符合契约；③ 改标后直接开训完成六步出队，快照 effective/format 完整，COCO/VOC 导出可消费；④ 画像与体检按切分即时组成，排除恢复零重算；⑤ 数据集页单列状态流与页头 XAL 工具条落地；⑥ §3.5 迁移验收八条全过，8600 无兼容层运行 |
 
 依赖（v1.0）：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。依赖（v1.1 滚动三波）：M6 → M7 → M8 串行推进（每波落地一波验收一波）；M8 内复盘升级与阈值探索器依赖错误分析先落地。依赖（v1.2）：M9 独立成波、无跨波硬依赖（基于既有数据集管线与错误分析回路扩展），随时可开工；波内建议序：规则扩充与联动底座 → 审查页签 → 只训已审。依赖（v1.3）：M10 基于 M4/M7（循环内核与 Agent 页）/M8（错误分析）既有资产；波内序：工具面 → 循环引擎 → 审批门主干，错误分析接入与经验库并行，MCP 接入最后，Agent 页随行。
+依赖（v1.4）：M11 基于既有 M1/M6/M9 数据集与审查资产及 M2 训练链路。实现票顺序先修**测试库隔离**（独立无前置），再依次落地真源/类别表与投影底座 → 切分实体与账目换源 → 格式池/逐 Run 训练链 → UI、XAL 协同与外部导出；迁移脚本和 schema 6 新代码同批交付，最后执行 8600 停机迁移与八条验收。每波可直接删除对应退役路径，不增加兼容开关。
