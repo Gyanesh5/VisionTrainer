@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import threading
 import time
@@ -44,20 +45,36 @@ def _now() -> str:
 
 # ---------------------------------------------------------------- 状态存取
 
-def _set_state(s, task, state: str) -> None:
-    from ..ws import publish_threadsafe
+# agent_config 是整块 JSON：读-改-写的窗口里若另一线程也读同一块再写回，后提交者
+# 会无声覆掉前者的键（循环线程 vs API 线程实测丢 approval / pending_verdict）。
+# SQLite 的 deferred 事务不做写-写串行，故在本进程内把「一次读-改-写」串成互斥段。
+# 用 RLock：同一线程在锁内调用另一个写入口（如 approve 里先落状态再沉淀经验）不该自锁。
+_CFG_LOCK = threading.RLock()
 
-    cfg = dict(task.agent_config or {})
-    cfg["state"] = state
-    task.agent_config = cfg
-    s.commit()
-    publish_threadsafe({"type": "task.updated", "task_id": task.id, "status": task.status,
-                        "agent_state": state})
-    if state == "waiting_approval":  # M7：审批请求桌面通知
-        from ..core.notify import desktop_notify
 
-        nxt = len(cfg.get("history") or []) + 2
-        desktop_notify("等待审批", f"「{task.name}」第 {nxt} 轮超参方案已就绪，去平台放行")
+def _mutate_agent_config(Session, task_id: int, mutate) -> dict:
+    """agent_config 的唯一读-改-写入口：串行、重读最新值、整块落库。
+
+    `mutate(cfg, task)` 就地改 cfg，可返回 False 表示「本次不落库」。
+    返回落库后的 cfg（不落库时返回刚读到的 cfg）。任务不存在抛 KeyError。
+    """
+    from visiontrainer.db.models import Task
+
+    with _CFG_LOCK:
+        with Session() as s:
+            t = s.get(Task, task_id)
+            if t is None:
+                raise KeyError(task_id)
+            # 深拷贝：JSON 列读出的嵌套结构与其「已落库快照」是同一批对象，
+            # 就地 append 会同时改掉快照——内容比较判定无变化，UPDATE 不发，
+            # 追加静默消失（history/preapproval_log/pruned_rounds 同形）。
+            cfg = copy.deepcopy(t.agent_config or {})
+            if mutate(cfg, t) is not False:
+                t.agent_config = cfg
+                s.commit()
+            else:
+                s.rollback()
+            return cfg
 
 
 def _get_state(Session, task_id: int) -> str:
@@ -115,49 +132,51 @@ def approve(manager, task_id: int, action: str, hyperparameters: dict | None = N
     norm = {"continue": "approve"}.get(action, action)
     if norm not in ("approve", "approve_with_changes", "reject", "stop"):
         raise ValueError(f"未知 action：{action}")
+    patch: dict = {}
+    queued_uids: list[str] = []
+    to_archive = False
     with manager.Session() as s:
         from visiontrainer.db.models import Run, Task
 
         t = s.get(Task, task_id)
         if t is None:
             raise KeyError(task_id)
-        cfg = dict(t.agent_config or {})
         if t.source != "agent":
             raise ValueError("非 Agent 任务没有审批门")
-        state = cfg.get("state")
-        queued_uids: list[str] = []
+        state = (t.agent_config or {}).get("state")
         if norm == "stop":
             if state not in ("waiting_approval", "paused"):
                 raise ValueError(f"当前状态 {state} 不在审批/暂停点")
-            from .experience import archive_experience
-
-            try:
-                archive_experience(manager.Session, task_id)
-            except Exception:
-                pass
-            cfg["state"] = "terminated"
+            patch["state"] = "terminated"
+            to_archive = True
             queued_uids = [r.uid for r in
                            s.query(Run).filter(Run.task_id == task_id, Run.status == "queued").all()]
         elif state == "paused":
             if norm != "approve":
                 raise ValueError("暂停恢复仅支持放行")
-            cfg["state"] = "running"  # 人工处理后重试本轮决策
+            patch["state"] = "running"  # 人工处理后重试本轮决策
         elif state == "waiting_approval":
             if norm == "approve":
-                cfg["pending_verdict"] = {"action": "approve", "at": _now()}
+                patch["pending_verdict"] = {"action": "approve", "at": _now()}
             elif norm == "approve_with_changes":
                 applied, _clamps = clamp_changes(hyperparameters or {})
                 if not applied:
                     raise ValueError("改后放行须携带至少一项白名单内超参修改")
-                cfg["pending_verdict"] = {"action": "approve_with_changes",
-                                          "overrides": applied, "at": _now()}
+                patch["pending_verdict"] = {"action": "approve_with_changes",
+                                            "overrides": applied, "at": _now()}
             else:
-                cfg["pending_verdict"] = {"action": "reject", "at": _now()}
-            cfg["state"] = "running"
+                patch["pending_verdict"] = {"action": "reject", "at": _now()}
+            patch["state"] = "running"
         else:
             raise ValueError(f"当前状态 {state} 不在审批/暂停点")
-        t.agent_config = cfg
-        s.commit()
+    if to_archive:  # 收官沉淀先于状态落库（经验取的是终止前的 agent_config）
+        from .experience import archive_experience
+
+        try:
+            archive_experience(manager.Session, task_id)
+        except Exception:
+            pass
+    _mutate_agent_config(manager.Session, task_id, lambda cfg, _t: cfg.update(patch))
     if queued_uids:  # 走 manager 统一取消链（排队轮的取消要过队列簿记，不直改 DB 状态）
         for uid in queued_uids:
             try:
@@ -194,50 +213,41 @@ def _budget_cfg_of(task_cfg: dict) -> dict:
 def _mark_history_verdict(Session, task_id: int, verdict: str,
                           changes: dict | None = None) -> None:
     """把审批裁决（及改后放行的最终参数）写回最近一条决策历史。"""
-    with Session() as s:
-        from visiontrainer.db.models import Task
-
-        t = s.get(Task, task_id)
-        cfg = dict(t.agent_config or {})
+    def mutate(cfg, _t):
         hist = list(cfg.get("history") or [])
-        if hist:
-            entry = {**hist[-1], "verdict": verdict}
-            if changes is not None:
-                entry["changes"] = changes
-            hist[-1] = entry
-            cfg["history"] = hist
-            t.agent_config = cfg
-            s.commit()
+        if not hist:
+            return False  # 无历史可写：不落库
+        entry = {**hist[-1], "verdict": verdict}
+        if changes is not None:
+            entry["changes"] = changes
+        hist[-1] = entry
+        cfg["history"] = hist
+
+    _mutate_agent_config(Session, task_id, mutate)
 
 
 def _consume_verdict(Session, task_id: int) -> dict:
     """读走并清除待消费的审批裁决（平台侧持有，客户端不可伪造）。"""
-    with Session() as s:
-        from visiontrainer.db.models import Task
+    taken: dict = {}
 
-        t = s.get(Task, task_id)
-        cfg = dict(t.agent_config or {})
-        verdict = cfg.pop("pending_verdict", None) or {"action": "approve"}
-        t.agent_config = cfg
-        s.commit()
-        return verdict
+    def mutate(cfg, _t):
+        taken.update(cfg.pop("pending_verdict", None) or {"action": "approve"})
+
+    _mutate_agent_config(Session, task_id, mutate)
+    return taken
 
 
 def _consume_preapproval(Session, task_id: int) -> None:
     """批量预审消耗一轮授权（余量与流水都留档，可审计）。"""
-    with Session() as s:
-        from visiontrainer.db.models import Task
-
-        t = s.get(Task, task_id)
-        cfg = dict(t.agent_config or {})
+    def mutate(cfg, _t):
         pre = dict(cfg.get("preapproval") or {})
         remaining = max(int(pre.get("remaining") or 0) - 1, 0)
         pre["remaining"] = remaining
         cfg["preapproval"] = pre
         cfg.setdefault("preapproval_log", []).append({"at": _now(), "action": "consume",
                                                       "remaining": remaining})
-        t.agent_config = cfg
-        s.commit()
+
+    _mutate_agent_config(Session, task_id, mutate)
 
 
 def set_approval(manager, task_id: int, approval: str) -> dict:
@@ -245,18 +255,13 @@ def set_approval(manager, task_id: int, approval: str) -> dict:
     mode = _normalize_approval(approval)
     if mode not in ("autonomous", "supervised"):
         raise ValueError(f"未知档位：{approval}")
-    with manager.Session() as s:
-        from visiontrainer.db.models import Task
 
-        t = s.get(Task, task_id)
-        if t is None:
-            raise KeyError(task_id)
+    def mutate(cfg, t):
         if t.source != "agent":
             raise ValueError("非 Agent 任务没有自主档位")
-        cfg = dict(t.agent_config or {})
         cfg["approval"] = mode
-        t.agent_config = cfg
-        s.commit()
+
+    _mutate_agent_config(manager.Session, task_id, mutate)
     return {"task_id": task_id, "approval": mode}
 
 
@@ -265,37 +270,26 @@ def grant_preapproval(manager, task_id: int, rounds: int) -> dict:
     rounds = max(int(rounds), 0)
     if rounds < 1:
         raise ValueError("授权轮数须 ≥ 1")
-    with manager.Session() as s:
-        from visiontrainer.db.models import Task
 
-        t = s.get(Task, task_id)
-        if t is None:
-            raise KeyError(task_id)
-        cfg = dict(t.agent_config or {})
+    def mutate(cfg, t):
         if t.source != "agent":
             raise ValueError("非 Agent 任务没有审批门")
         cfg["preapproval"] = {"remaining": rounds, "granted_rounds": rounds, "granted_at": _now()}
         cfg.setdefault("preapproval_log", []).append({"at": _now(), "action": "grant",
                                                       "rounds": rounds})
-        t.agent_config = cfg
-        s.commit()
+
+    _mutate_agent_config(manager.Session, task_id, mutate)
     return {"task_id": task_id, "remaining": rounds}
 
 
 def revoke_preapproval(manager, task_id: int) -> dict:
     """撤销批量预审（下一轮立即回到逐轮审批）。"""
-    with manager.Session() as s:
-        from visiontrainer.db.models import Task
-
-        t = s.get(Task, task_id)
-        if t is None:
-            raise KeyError(task_id)
-        cfg = dict(t.agent_config or {})
+    def mutate(cfg, _t):
         pre = dict(cfg.get("preapproval") or {})
         cfg["preapproval"] = {**pre, "remaining": 0, "revoked_at": _now()}
         cfg.setdefault("preapproval_log", []).append({"at": _now(), "action": "revoke"})
-        t.agent_config = cfg
-        s.commit()
+
+    _mutate_agent_config(manager.Session, task_id, mutate)
     return {"task_id": task_id, "remaining": 0}
 
 
@@ -329,16 +323,25 @@ def _loop(manager, task_id: int, stop: threading.Event) -> None:
         return cfg, done_rounds
 
     def set_state(state: str, extra: dict | None = None) -> None:
-        with Session() as s:
-            t = s.get(Task, task_id)
-            _set_state(s, t, state)
+        """状态与附加键在同一次读-改-写里落库（拆成两次会话会互相覆掉）。"""
+        from ..ws import publish_threadsafe
+
+        stamped: dict = {}
+
+        def mutate(cfg, t):
+            cfg["state"] = state
             if extra:
-                with Session() as s2:
-                    t2 = s2.get(Task, task_id)
-                    cfg = dict(t2.agent_config or {})
-                    cfg.update(extra)
-                    t2.agent_config = cfg
-                    s2.commit()
+                cfg.update(extra)
+            stamped.update({"task_id": t.id, "status": t.status, "name": t.name})
+
+        cfg = _mutate_agent_config(Session, task_id, mutate)
+        publish_threadsafe({"type": "task.updated", "task_id": stamped["task_id"],
+                            "status": stamped["status"], "agent_state": state})
+        if state == "waiting_approval":  # M7：审批请求桌面通知
+            from ..core.notify import desktop_notify
+
+            nxt = len(cfg.get("history") or []) + 2
+            desktop_notify("等待审批", f"「{stamped['name']}」第 {nxt} 轮超参方案已就绪，去平台放行")
 
     def finish(state: str, reason: str | None = None) -> None:
         """终态出口：状态落定 + 经验沉淀（M10 05，失败不阻断收官）。"""
@@ -628,18 +631,17 @@ def _prune_check(manager, run_uid: str, task_id: int, delta: float) -> str:
 
         # 触发：标记 pruned + 优雅停止 + 证据入 agent_config（下一轮 LLM 可见）
         run.pruned = True
-        s.commit()
         evidence = {"round": run.round_no, "at_epoch": rec.epoch, "value": round(cur, 4),
                     "baseline_median": round(med, 4), "delta": delta, "at": _now()}
-        cfg2 = dict(task.agent_config or {})
-        cfg2.setdefault("pruned_rounds", []).append(evidence)
-        task.agent_config = cfg2
+        task_name = task.name
         s.commit()
+    _mutate_agent_config(manager.Session, task_id,
+                         lambda cfg, _t: cfg.setdefault("pruned_rounds", []).append(evidence))
     manager.request_stop(run_uid)
     from ..core.notify import desktop_notify
 
     desktop_notify("烂轮已剪枝",
-                   f"「{task.name}」轮 {evidence['round']} 在 epoch {evidence['at_epoch']} 显著低于历史水位，已提前终止")
+                   f"「{task_name}」轮 {evidence['round']} 在 epoch {evidence['at_epoch']} 显著低于历史水位，已提前终止")
     return "pruned"
 
 
@@ -698,29 +700,27 @@ def _fire_round_budget(manager, run_uid: str) -> None:
         if r is None:
             return
         t = s.get(Task, r.task_id)
-        cfg = dict((t.agent_config or {}) if t else {})
-        cfg["budget_round_fired"] = {"run_uid": run_uid, "round_no": r.round_no, "at": _now()}
-        if t:
-            t.agent_config = cfg
-            s.commit()
         name = t.name if t else run_uid
         round_no = r.round_no
+        owner_id = r.task_id if t is not None else None
+    if owner_id is not None:
+        _mutate_agent_config(manager.Session, owner_id, lambda cfg, _t: cfg.update(
+            {"budget_round_fired": {"run_uid": run_uid, "round_no": round_no, "at": _now()}}))
     desktop_notify("预算熔断", f"「{name}」轮 {round_no} 运行超时长上限，已优雅停止")
 
 
 def _append_history(Session, task_id: int, decision: dict, changes: dict, clamps: list) -> list[dict]:
-    with Session() as s:
-        from visiontrainer.db.models import Task
+    appended: list[dict] = []
 
-        t = s.get(Task, task_id)
-        cfg = dict(t.agent_config or {})
+    def mutate(cfg, _t):
         hist = list(cfg.get("history") or [])
         hist.append({"at": _now(), "analysis": decision.get("analysis", ""),
                      "changes": changes, "clamps": clamps})
         cfg["history"] = hist
-        t.agent_config = cfg
-        s.commit()
-        return hist
+        appended[:] = hist
+
+    _mutate_agent_config(Session, task_id, mutate)
+    return appended
 
 
 # ---------------------------------------------------------------- LLM 决策
@@ -731,17 +731,11 @@ def _decide(Session, task_id: int, objective: str, history: list[dict], best: fl
     返回 (decision, error, importance, traces, evidence)——evidence 为本轮注入的
     错误分析证据摘要（M10 04），随决策归档可回溯。
     """
-    from visiontrainer.db.models import Task
-
     decision, error, importance, traces, usage, evidence = _decide_core(
         Session, task_id, objective, history, best)
     if usage:
-        with Session() as s:
-            t = s.get(Task, task_id)
-            cfg = dict(t.agent_config or {})
-            cfg["token_usage"] = int(cfg.get("token_usage") or 0) + int(usage)
-            t.agent_config = cfg
-            s.commit()
+        _mutate_agent_config(Session, task_id, lambda cfg, _t: cfg.update(
+            {"token_usage": int(cfg.get("token_usage") or 0) + int(usage)}))
     return decision, error, importance, traces, evidence
 
 

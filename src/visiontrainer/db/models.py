@@ -193,6 +193,8 @@ def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
         from pathlib import Path
 
         Path(db_url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
+    # 并发写串行化在调用侧（agent_config 走 tuner._mutate_agent_config 的进程内互斥）：
+    # 引擎级 BEGIN IMMEDIATE 会让每个只读事务也占住 SQLite 写锁，同线程嵌套会话即自锁。
     engine = create_engine(db_url, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with engine.begin() as conn:
