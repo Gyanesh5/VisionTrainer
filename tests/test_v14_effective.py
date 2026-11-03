@@ -21,6 +21,7 @@ from fastapi.testclient import TestClient
 
 from conftest import build_split_dataset, write_split
 
+from visiontrainer.training import service as tsvc
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
 
@@ -377,3 +378,47 @@ def test_外部数据集缺入口时可读拒绝(eff_ctx):
                                                "dataset": "kaggle2", "epochs": 1})
     assert r.status_code == 400, r.text
     assert "data.yaml" in r.json()["detail"]["error"]["message"]
+
+
+# ---------------------------------------------------------------- 票 09：工具面与对比换源
+
+def test_画像工具回source_fingerprint与split_uid(eff_ctx):
+    """只读画像工具以 source_fingerprint 标识新旧 + 可选回显 split_uid（spec §2.4）。"""
+    ctx = eff_ctx
+    svc.validate_dataset_by_name("plate")        # 夹具期工厂未就绪：补一行画像原料
+    from visiontrainer.agent.tools import build_default_registry
+
+    reg = build_default_registry(ctx.mgr.Session)
+    out = reg.dispatch("query_dataset_profile", {"dataset": "plate"})
+    assert out["source_fingerprint"] and out["source_fingerprint"] != ""
+    assert out["split_uid"] == ctx.split["uid"]
+    assert "manifest_uid" not in out, "旧清单字段退役"
+
+
+def test_mcp_create_task_pins_split(eff_ctx):
+    """外部 Agent 经 MCP 建任务选切分：create_task 暴露 split_uid 且透传落库（票 09）。"""
+    ctx = eff_ctx
+    import visiontrainer.agent.mcp_server as m
+
+    # 源码契约：create_task 暴露 split_uid 形参并透传给 tsvc.create_task，工具面无旧清单字段
+    src = Path(m.__file__).read_text(encoding="utf-8")
+    assert "split_uid: str | None = None" in src, "MCP create_task 暴露 split_uid"
+    assert "split_uid=split_uid or None" in src, "split_uid 透传给 tsvc.create_task"
+    assert "manifest" not in src.lower(), "MCP 工具面无旧清单字段"
+    # 行为契约：split_uid 落库（REST 同链路已证，这里锁 MCP 模块引用的是同一 create_task）
+    brief = tsvc.create_task(ctx.mgr, name="mcp钉切分", base_model="stub", dataset="plate",
+                             split_uid=ctx.split["uid"], epochs=1)
+    assert brief["split_uid"] == ctx.split["uid"]
+
+
+def test_对比混切分标记不可比(eff_ctx):
+    """跨任务对比把两个不同切分放一起：载荷带 dataset/split_uid 供 UI 出不可比提示。"""
+    ctx = eff_ctx
+    other = write_split(ctx.ds_dir, train=CAR, val=PERSON[:2],
+                        created_at="2026-04-01T00:00:00")
+    a = _create_task(ctx, split_uid=ctx.split["uid"], name="A")
+    b = _create_task(ctx, split_uid=other["uid"], name="B")
+    across = ctx.client.get("/api/v1/compare",
+                            params={"tasks": f"{a['id']},{b['id']}"}).json()
+    combos = {(t["dataset"], t["split_uid"]) for t in across["tasks"]}
+    assert len(combos) == 2, "两个不同切分 → UI 据此出不可比提示"

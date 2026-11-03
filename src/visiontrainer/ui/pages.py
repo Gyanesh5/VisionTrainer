@@ -6765,6 +6765,15 @@ document.addEventListener('scroll', function(e){
                 items = data["tasks"]
                 cross_out.clear()
                 with cross_out, ui.card().classes("w-full gap-2"):
+                    # 可比性不变式对外可见（票 05/09）：同 dataset + 同 split_uid 才同 val 名单
+                    combos = {(t.get("dataset"), t.get("split_uid")) for t in items}
+                    if len(combos) > 1:
+                        detail = "；".join(
+                            f"{d or '?'} / {u or '无切分'}" for d, u in sorted(
+                                (str(d), str(u)) for d, u in combos))
+                        ui.label(f"所选任务分属 {len(combos)} 组数据集/切分（{detail}）——"
+                                 "val 名单不同，指标不可直接比较，叠图仅作趋势参考"
+                                 ).classes("text-xs text-amber-600")
                     with ui.label("各任务最优 Run 主指标曲线").classes("text-sm font-semibold"):
                         ui.tooltip("曲线颜色与下文各任务表格固定一致")
                     curves = [(t["name"], t["curve"]) for t in items if t["curve"]]
@@ -7004,9 +7013,14 @@ document.addEventListener('scroll', function(e){
                             chg = "；".join(f"{k}→{v}" for k, v in list(changes.items())[:3])
                             if len(changes) > 3:
                                 chg += f" 等{len(changes)}项"
+                        eff = r.get("effective") or {}
+                        eff_txt = (f"{eff.get('train', '—')}/{eff.get('val', '—')}"
+                                   if eff else "—")
                         rows.append({"round": f"轮 {r['round_no']}" + ("（已剪枝）" if r.get("pruned") else ""),
                                      "uid": r["uid"],
                                      "status_label": label, "status_color": color,
+                                     "split": r.get("split_uid") or "—",
+                                     "eff": eff_txt,
                                      "best": (f"{r['best_val']:.3f} @ epoch {r['best_epoch']}"
                                               if r["best_val"] else "—"),
                                      "delta": delta_str, "delta_up": up, "delta_down": down,
@@ -7015,6 +7029,8 @@ document.addEventListener('scroll', function(e){
                         {"name": "round", "label": "轮次", "field": "round"},
                         {"name": "uid", "label": "Run", "field": "uid", "align": "left"},
                         {"name": "status", "label": "状态", "field": "status_label"},
+                        {"name": "split", "label": "切分", "field": "split", "align": "left"},
+                        {"name": "eff", "label": "实效 t/v", "field": "eff", "align": "left"},
                         {"name": "best", "label": "主指标最佳", "field": "best", "align": "left"},
                         {"name": "delta", "label": "较上轮", "field": "delta"},
                         {"name": "changes", "label": "较首轮改动（运行快照）", "field": "changes", "align": "left"},

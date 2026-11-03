@@ -29,12 +29,15 @@ def build_mcp_server(manager):
             mcp.tool(spec.handler, name=spec.name, description=spec.description)
 
     @mcp.tool(name="create_task",
-              description="开训练任务：mode=manual 常规任务 / mode=agent 调参循环（走审批门与预算策略）")
+              description="开训练任务：mode=manual 常规任务 / mode=agent 调参循环（走审批门与预算策略）。"
+                          "split_uid 选切分（省略=沿用最近切分；可比性要求固定名单时须显式指名）")
     def create_task(name: str, dataset: str, epochs: int = 50, base_model: str = "yolo11n",
-                    mode: str = "manual", max_rounds: int = 5, objective: str = "") -> dict:
+                    mode: str = "manual", max_rounds: int = 5, objective: str = "",
+                    split_uid: str | None = None) -> dict:
         agent = {"max_rounds": max(1, int(max_rounds)), "objective": objective} \
             if mode == "agent" else None
         brief = tsvc.create_task(manager, name=name, base_model=base_model, dataset=dataset,
+                                 split_uid=split_uid or None,
                                  epochs=max(1, int(epochs)), agent=agent)
         if agent:
             tuner.launch_or_resume(manager, brief["id"])

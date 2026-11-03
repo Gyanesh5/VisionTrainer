@@ -173,6 +173,15 @@ def _query_experience(Session):
     return handler
 
 
+def _latest_split_of(dataset: str) -> dict | None:
+    from ..datasets import service as ds
+
+    try:
+        return ds.latest_split(dataset)
+    except Exception:  # noqa: BLE001 — 回显属增强
+        return None
+
+
 def _query_dataset_profile(Session):
     def handler(dataset: str) -> dict:
         from ..db.models import DatasetStat
@@ -184,8 +193,16 @@ def _query_dataset_profile(Session):
                 raise ToolError(f"数据集无画像：{dataset}")
             payload = {k: v for k, v in (row.payload or {}).items()
                        if k not in _PROFILE_TRIM_KEYS}
-            # 票 06 一行制 + spec §2.4：画像以 source_fingerprint 标识新旧（manifest_uid 退役）
+            # 票 06/09 一行制 + spec §2.4：画像以 source_fingerprint 标识新旧
+            # （manifest_uid 退役）；split_uid 可选回显——有切分时取最近（读时视图口径）
+            split = None
+            try:
+                latest = _latest_split_of(row.dataset)
+                split = latest.get("uid") if latest else None
+            except Exception:  # noqa: BLE001 — 回显属增强，读失败不挡画像
+                split = None
             return {"dataset": row.dataset, "source_fingerprint": row.source_fingerprint,
+                    "split_uid": split,
                     "task_type": row.task_type, "computed_at": str(row.computed_at),
                     "profile": payload}
     return handler
