@@ -13,14 +13,16 @@ from visiontrainer.datasets.projection import (
     CIRCLE_POLY_POINTS,
     conserved,
     project_json,
+    shape_matches_task,
 )
 
 
-def _shape(label, shape_type, points, **kw):
+def _shape(label: str, shape_type: str, points: list[list[float]], **kw: object) -> dict:
     return {"label": label, "shape_type": shape_type, "points": points, **kw}
 
 
-def _json(shapes, *, flags=None, width=100.0, height=80.0):
+def _json(shapes: list[dict], *, flags: dict | None = None,
+          width: float = 100.0, height: float = 80.0) -> dict:
     return {"imageWidth": width, "imageHeight": height, "shapes": shapes, "flags": flags or {}}
 
 
@@ -30,7 +32,8 @@ ROT = [[20.0, 5.0], [40.0, 15.0], [35.0, 35.0], [15.0, 25.0]]
 CIRCLE = [[50.0, 40.0], [60.0, 40.0]]  # 圆心 (50,40) 半径 10
 
 
-def _one(shape_type, points, task_type, classes=("car",)):
+def _one(shape_type: str, points: list[list[float]], task_type: str,
+         classes: tuple[str, ...] = ("car",)) -> dict:
     out = project_json(_json([_shape("car", shape_type, points)]), task_type, list(classes))
     assert out["drops"] == []
     return out["objects"][0]
@@ -88,18 +91,25 @@ def test_pose_keeps_box_and_groups_keypoints():
 
 
 def test_classify_reads_flags_only():
-    """classify 靠 flags：有真值 flag 是正样本，无 flag 是负样本，形状一律不看。"""
+    """classify 靠 flags：有真值 flag 是正样本，无 flag 是负样本，形状不看但必须入账。"""
     pos = project_json(_json([_shape("a", "rectangle", RECT)], flags={"cat": True}),
                        "classify", ["cat"])
     assert pos["objects"] == [] and pos["negative"] is False
+    assert [d["reason"] for d in pos["drops"]] == ["task_mismatch"]  # 守恒：形状不无声消失
     neg = project_json(_json([]), "classify", ["cat"])
     assert neg["negative"] is True
+
+
+def test_classify_needs_no_canvas_size():
+    """classify 不读尺寸：缺 imageWidth/imageHeight 不算无法投影（与校验红灯口径一致）。"""
+    out = project_json({"shapes": [], "flags": {"cat": True}}, "classify", ["cat"])
+    assert out["negative"] is False and out["broken"] is False
 
 
 # ---------------------------------------------------------------- 守恒账目
 
 
-@pytest.mark.parametrize("task_type", ["detect", "segment", "obb", "pose"])
+@pytest.mark.parametrize("task_type", ["detect", "segment", "obb", "pose", "classify"])
 def test_every_shape_is_either_kept_or_accounted(task_type):
     """守恒式：shape 数 = 保留对象贡献的 shape 数 + 丢弃数，逐条带序号与原因。"""
     shapes = [_shape("car", "rectangle", RECT), _shape("car", "polygon", POLY),
@@ -162,3 +172,43 @@ def test_yolo_adapter_produces_no_drops_for_supported_tasks():
         lines = adapter.encode_image(projected, adapter.class_encoding(classes))
         assert len(lines) == len(projected["objects"]), task_type
         assert conserved(shapes, projected)
+
+
+# ---------------------------------------------------------------- 评审回填（Spec 轴）
+
+
+def test_obb_two_point_rotation_is_not_fabricated():
+    """两点 rotation 不代造四角：与旧转换器同口径记 too_few_points（代造属未授权重定义）。"""
+    shapes = [_shape("car", "rotation", [[10.0, 10.0], [30.0, 20.0]]),
+              _shape("car", "rotation", ROT)]
+    out = project_json(_json(shapes), "obb", ["car"])
+    assert [d["reason"] for d in out["drops"]] == ["too_few_points"]
+    assert [o["source_indices"] for o in out["objects"]] == [[1]]
+    assert conserved(shapes, out)
+
+
+def test_segment_collinear_polygon_kept_as_line():
+    """原生 polygon 共线（零面积）照旧写出行：改它属未授权重定义，退化判定只针对跨任务投来的形状。"""
+    line = [[10.0, 10.0], [20.0, 20.0], [30.0, 30.0]]
+    obj = _one("polygon", line, "segment")
+    assert obj["points_px"] == line
+
+
+def test_pose_point_named_as_box_class_is_accounted():
+    """关键点列 = classes[1:]：点名撞上 0 号框类别时在投影处入账，不留给适配器静默丢。"""
+    shapes = [_shape("person", "rectangle", RECT, group_id=1),
+              _shape("person", "point", [[15.0, 14.0]], group_id=1),
+              _shape("eye", "point", [[18.0, 14.0]], group_id=1)]
+    out = project_json(_json(shapes), "pose", ["person", "eye"])
+    assert [d["reason"] for d in out["drops"]] == ["pose_kpt_not_in_columns"]
+    assert out["objects"][0]["keypoints"] == [{"label": "eye", "x": 18.0, "y": 14.0, "visible": 2}]
+    assert conserved(shapes, out)
+
+
+def test_shape_matches_task_follows_equivalence_table():
+    """可投影判据与等价表同源：detect 收 polygon（投外接框），obb 不收，classify 恒真。"""
+    assert shape_matches_task("detect", {"polygon"})
+    assert not shape_matches_task("obb", {"polygon"})
+    assert shape_matches_task("obb", {"rotation"})
+    assert shape_matches_task("classify", {"rectangle"})
+    assert not shape_matches_task("detect", {"point"})

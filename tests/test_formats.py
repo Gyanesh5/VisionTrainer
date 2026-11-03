@@ -8,7 +8,7 @@ from visiontrainer.datasets.formats import YoloAdapter, write_label, yolo_lines
 from visiontrainer.datasets.projection import CIRCLE_POLY_POINTS
 
 
-def _data(width, height, shapes, flags=None):
+def _data(width: float, height: float, shapes: list[dict], flags: dict | None = None) -> dict:
     return {"imageWidth": width, "imageHeight": height, "shapes": shapes, "flags": flags or {}}
 
 

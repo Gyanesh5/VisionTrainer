@@ -4,7 +4,8 @@
 - 状态彩色 badge + 行内进度 + 全中文化（Quasar language=zh-CN + no-data 槽）
 - 防呆：预训练权重随数据集任务类型自动带出、官方名不匹配硬拦截（禁用创建+红字原因）；支持本地 .pt 路径
 - 交互：行点击选中、详情自动滚动、自动选中运行中任务、数据集→训练直达（query 预填）
-- 反馈：导入进度条、排队位次、Agent 待审批横幅、决策历史 chip 化、部署完成全局通知、深色模式
+- 反馈：长任务三层反馈（按钮忙碌态 / 区域进度行 / 页头全局清单）、排队位次、Agent 待审批横幅、
+  决策历史 chip 化、部署完成全局通知、深色模式
 """
 
 import asyncio
@@ -73,12 +74,159 @@ PROBLEM_ZH = {
 # 恒可自动修复的问题码；obb_invalid 须靠 fixable 标记区分乱序（可修）与退化（人工）
 AUTO_FIX_CODES = ("out_of_bounds", "polygon_invalid", "keypoints_invalid", "orphan_json")
 
+# 新建数据集的图片来源三态与入图方式（spec §2.1；「导入」折为第三态，不再是独立入口）
+SOURCE_MODE_ZH = {"empty": "空数据集", "images": "图片目录", "labeled": "已标 X-AnyLabeling 目录"}
+SOURCE_MODE_HINT = {
+    "empty": "先立骨架（类别表 + 真源目录 source/），图片与标注之后用「加图」补入",
+    "images": "只取该目录的图片入真源，出生即全负样本，标注后补",
+    "labeled": "连图片带同目录的 X-AnyLabeling JSON 一起入真源（原「导入」，已无独立入口）",
+}
+TRANSFER_ZH = {"copy": "拷贝", "move": "移动"}
+# 导出标注对话框的三维（spec §2.1：格式 × 范围 × 图片；按 supports × task_type 置灰）
+EXPORT_FORMATS: dict[str, tuple[str, set[str] | None]] = {
+    "yolo": ("YOLO", None),                 # None = 全任务类型可选
+    "coco": ("COCO JSON", {"detect", "segment", "obb", "pose"}),
+    "voc": ("Pascal VOC XML", {"detect"}),
+}
+EXPORT_SCOPES = {"all": "全集", "split": "按切分（train/val 分目录）"}
+EXPORT_IMAGES = {"link": "符号链接（省盘）", "copy": "复制（可移机）"}
+
 
 def _split_fixable(problems: list[dict]) -> tuple[list[dict], list[dict]]:
     """(可自动修复, 需人工)——旧报告无 fixable 标记时四类恒可修按码认，obb 只认标记。"""
     fix = [p for p in problems if p.get("fixable") or p["code"] in AUTO_FIX_CODES]
     manual = [p for p in problems if not (p.get("fixable") or p["code"] in AUTO_FIX_CODES)]
     return fix, manual
+
+
+def _validation_of(entry: dict) -> dict:
+    """校验摘要：v1.4 读 dataset.json 的 validation_summary，未迁移账本回退 last_validation。"""
+    return entry.get("validation_summary") or entry.get("last_validation") or {}
+
+
+def _drop_count(vs: dict) -> int:
+    """投影/转换丢弃条数：v1.4 摘要里 drops 是 {count, signature, acked}，旧账本是列表或整数。"""
+    drops = vs.get("drops")
+    if isinstance(drops, dict):
+        return int(drops.get("count", 0) or 0)
+    if isinstance(drops, (list, tuple)):
+        return len(drops)
+    return drops if isinstance(drops, int) and not isinstance(drops, bool) else 0
+
+
+def _drops_pending_ack(meta: dict) -> bool:
+    """丢弃确认门是否待确认（spec §3.1：count>0 ∧ signature≠acked 现算，不再持久化字段）。"""
+    vs = _validation_of(meta)
+    drops = vs.get("drops")
+    if isinstance(drops, dict):
+        return _drop_count(vs) > 0 and drops.get("signature") != drops.get("acked")
+    if drops is not None:
+        return _drop_count(vs) > 0
+    return bool(meta.get("drops_pending_ack"))
+
+
+def _excluded_entries(meta: dict) -> list[dict]:
+    """排除在册条目归一：v1.4 的 excluded.json 是文件名键字典，旧账本是条目列表。"""
+    raw = meta.get("excluded")
+    if isinstance(raw, dict):
+        files = raw.get("files") if isinstance(raw.get("files"), dict) else raw
+        return [{"file": f, "at": (v or {}).get("at"), "reason": (v or {}).get("reason", "")}
+                for f, v in sorted(files.items())]
+    return list(raw or [])
+
+
+def _source_dir_of(meta: dict) -> Path | None:
+    """托管数据集真源目录（spec §3.1 布局 `<数据集根>/<名>/source`）；外部数据集无真源。"""
+    if meta.get("form") != "managed":
+        return None
+    return Path(ds.get_datasets_root()) / meta["name"] / "source"
+
+
+def _maybe_changed(meta: dict) -> bool:
+    """「可能有变更」粗判（spec §2.1：只用目录 mtime、不承重；指纹自动对账在票 04）。
+
+    目录 mtime 晚于上次校验时间即提示：它只反映真源目录的增删，就地改标不动目录 mtime，
+    权威新旧判据是 source_fingerprint。解析失败/不可 stat 一律不给提示（不承重的账不猜）。
+    """
+    src = _source_dir_of(meta)
+    checked_at = _validation_of(meta).get("checked_at")
+    if src is None or not checked_at:
+        return False
+    try:
+        checked = datetime.fromisoformat(str(checked_at))
+        mtime = src.stat().st_mtime
+    except (ValueError, OSError):
+        return False
+    return datetime.fromtimestamp(mtime) > checked
+
+
+def _error_payload(exc: ds.DatasetError) -> object:
+    """取 DatasetError 的结构化载荷（表外类别清单 / Run 引用数）；服务层未带载荷时为 None。"""
+    return getattr(exc, "payload", None) or getattr(exc, "detail", None)
+
+
+def _payload_labels(payload: object) -> list[str]:
+    """载荷里的类别清单（表外类别）：列表直取，字典按候选键取，其余归空。"""
+    if isinstance(payload, dict):
+        for key in ("source_labels", "unknown", "labels", "classes", "offenders"):
+            if isinstance(payload.get(key), list):
+                return [str(v) for v in payload[key]]
+        return []
+    if isinstance(payload, (list, tuple, set)):
+        return [str(v) for v in payload]
+    return []
+
+
+def _payload_count(payload: object) -> int | None:
+    """载荷里的引用计数（Run 引用数）：整数直取，字典按候选键取，取不到返回 None。"""
+    if isinstance(payload, bool):
+        return None
+    if isinstance(payload, int):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("run_count", "runs", "count", "n_runs", "references"):
+            v = payload.get(key)
+            if isinstance(v, int) and not isinstance(v, bool):
+                return v
+    return None
+
+
+def _probe_source_classes(src_dir: str, task_type: str,
+                          progress=None) -> dict:
+    """探测已标 X-AnyLabeling 目录的类别与图片数（新建对话框预填用，只读来源目录）。
+
+    与出生校验共用 scan_entries 的探测轮（classes 为空即不判表外类别），再逐标注收
+    shape label。结果不承重——用户确认后才是类别表，真正的表外类别由 create_dataset 阻断。
+
+    Args:
+        src_dir: 用户选中的已标目录。
+        task_type: 数据集任务类型。
+        progress: 可选进度回调 (cur, total)。
+
+    Returns:
+        {"labels": 去重排序后的类别名, "counts": {类别名: 出现次数}, "images": 图片数}
+    """
+    from ..datasets.validate import scan_entries  # 按需引域内工具，与本页 GUIDANCE 同风格
+
+    scan = scan_entries(Path(src_dir).expanduser(), task_type, [], progress=progress)
+    counts: dict[str, int] = {}
+    for e in scan["entries"]:
+        for s in _label_shapes(e.get("label")):
+            if s.get("label"):
+                counts[str(s["label"])] = counts.get(str(s["label"]), 0) + 1
+    return {"labels": sorted(counts), "counts": counts, "images": len(scan["entries"])}
+
+
+def _label_shapes(label_path: str | None) -> list[dict]:
+    """宽松读标注 JSON 的 shapes（预填探测专用）：不可读/损坏归空，报错是校验的活。"""
+    if not label_path:
+        return []
+    try:
+        data = json.loads(Path(label_path).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return []
+    shapes = data.get("shapes") if isinstance(data, dict) else None
+    return [s for s in (shapes or []) if isinstance(s, dict)]
 
 CHART_PALETTE = ["#2563eb", "#16a34a", "#f59e0b", "#9333ea", "#dc2626", "#0891b2"]
 CHART_TEXT = "#94a3b8"  # 深浅两色模式下均可读的中性文字色
@@ -1142,6 +1290,29 @@ def _op_row(o: dict) -> None:
         ui.label(_fmt_elapsed(o["started"])).classes("text-[10px] opacity-40 shrink-0")
 
 
+def _op_progress_row(op_ref: dict[str, str | None]) -> None:
+    """对话框内的进度行：跟随登记表（op_ref["key"] 由提交处写入），完成即隐。
+
+    进度真源在登记表而非协程局部——关页签/重渲染不丢，重复提交闸也看同一张表。
+    """
+    lbl = ui.label("").classes("text-xs opacity-70").set_visibility(False)
+    bar = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
+
+    def _tick() -> None:
+        o = ops.get(op_ref["key"]) if op_ref["key"] else None
+        if o and o["status"] == "running":
+            lbl.set_visibility(True)
+            bar.set_visibility(True)
+            total = max(o.get("total") or 1, 1)
+            lbl.set_text(f"{o.get('phase', '')} {o.get('cur', 0)}/{o.get('total', 0)}")
+            bar.set_value(min(o.get("cur", 0) / total, 1.0))
+        else:
+            lbl.set_visibility(False)
+            bar.set_visibility(False)
+
+    ui.timer(0.3, _tick)
+
+
 def _op_region_timer(state: dict) -> None:
     """区域进度行 tick：0.3s 重放 state["op_scope"] 的进行中操作进 state["op_box"]。
 
@@ -1315,7 +1486,7 @@ def _on_row_click(table, select, after=None) -> None:
 
     after（滚动跟随）在行点击路径无条件执行：select() 的防重入守卫在详情
     已渲染时直接返回，若跟随挂在 select 里，用户点同一行想回看详情永远不滚。
-    程序化 select（加载自动聚焦/导入后跳转）不走这里，不受影响。
+    程序化 select（加载自动聚焦/新建后跳转）不走这里，不受影响。
     """
     def handler(e) -> None:
         args = e.args
@@ -2900,9 +3071,9 @@ document.addEventListener('scroll', function(e){
                     # ── 分区 1：数据与模型
                     _form_section("dataset", "数据与模型")
                     managed = {d["name"]: d["name"] for d in ds.list_datasets()
-                               if d["form"] == "managed" and d.get("active_manifest")}
+                               if d["form"] == "managed"}
                     c_ds = _labeled("数据集", ui.select, label_w="w-16",
-                                    options=managed or {"": "（暂无托管数据集，请先到数据集页导入）"},
+                                    options=managed or {"": "（暂无托管数据集，请先到数据集页新建）"},
                                     with_input=True)
                     c_model = _labeled("预训练权重", ui.input, label_w="w-16", value="yolo11n")
                     with c_model:
@@ -3289,7 +3460,7 @@ document.addEventListener('scroll', function(e){
             bulk_btn_holder["btn"] = ui.button(
                 "删除所选", icon="delete_sweep", color="negative",
                 on_click=lambda: state["open_bulk_del"]()).props("outline dense").set_enabled(False)
-            ui.button("导入标注目录", icon="upload", on_click=lambda: state["open_import"]()).props("unelevated")
+            ui.button("新建数据集", icon="add", on_click=lambda: state["open_create"]()).props("unelevated")
             ui.button("注册外部目录", icon="link", on_click=lambda: state["open_external"]()).props("outline")
 
         def rows_data() -> list[dict]:
@@ -3299,10 +3470,15 @@ document.addEventListener('scroll', function(e){
                 row["classes_str"] = "、".join(d.get("classes") or []) or "—"
                 row["task_zh"] = TASK_TYPE_ZH.get(d.get("task_type"), d.get("task_type"))
                 row["form_zh"] = FORM_ZH.get(d.get("form"), d.get("form"))
+                # 列表读 list_datasets 的摘要字段（校验与「可能有变更」在服务层算一次，此处不再自算）
                 ok = d.get("validation_ok")
                 row["validation_label"] = {True: "通过", False: "有问题"}.get(ok, "未校验")
                 row["validation_color"] = {True: "green", False: "red"}.get(ok, "grey")
-                row["images_str"] = str(d["images"]) if d.get("images") is not None else "—"
+                changed = bool(d.get("may_have_changes"))
+                row["changed_label"] = "可能有变更" if changed else "—"
+                row["changed_color"] = "amber" if changed else "grey"
+                n_img = d.get("images")
+                row["images_str"] = str(n_img) if n_img is not None else "—"
                 row["created_str"] = _fmt_ts(d.get("created_at"))
                 rows.append(row)
             return rows
@@ -3316,14 +3492,16 @@ document.addEventListener('scroll', function(e){
                  "style": "white-space:normal; max-width:220px"},
                 {"name": "images_str", "label": "图片数", "field": "images_str"},
                 {"name": "validation", "label": "校验", "field": "validation_label"},
+                {"name": "changed", "label": "变动", "field": "changed_label"},
                 {"name": "created_str", "label": "创建时间", "field": "created_str", "align": "left"},
             ]
             table = ui.table(columns=columns, rows=rows_data(), row_key="name", selection="multiple",
                              on_select=lambda e: sync_bulk_btn())
             _style_table(table)
             table.add_slot("body-cell-validation", _badge_cell("validation"))
+            table.add_slot("body-cell-changed", _badge_cell("changed"))
             table.add_slot("no-data", _no_data_cell(
-                "dataset", "还没有数据集——导入 X-AnyLabeling 标注目录，或注册现成的标准 YOLO 目录"))
+                "dataset", "还没有数据集——新建托管数据集，或注册现成的标准 YOLO 目录"))
 
             detail = ui.column().classes("w-full")
 
@@ -3338,8 +3516,9 @@ document.addEventListener('scroll', function(e){
                 meta = ds.get_dataset(name)
                 state["drill"] = {"class": None, "bucket": None, "rect": None}
                 state["audit_sel"] = set()
+                state["ws"] = {}  # 折叠工作区注册表：key → {exp, box, built, meta}
                 task_zh = TASK_TYPE_ZH.get(meta["task_type"], meta["task_type"])
-                ok = (meta.get("last_validation") or {}).get("ok")
+                ok = _validation_of(meta).get("ok")
                 with detail, ui.card().classes("w-full gap-2"):
                     state["op_box"] = ui.column().classes("w-full gap-1")
                     state["op_scope"] = name
@@ -3351,156 +3530,30 @@ document.addEventListener('scroll', function(e){
                             if ok is not None:
                                 ui.badge("通过" if ok else "有问题").props(
                                     f"color={'green' if ok else 'red'} outline").style("font-size:10px")
+                            if _maybe_changed(meta):
+                                ui.badge("可能有变更").props("color=amber outline").style("font-size:10px")
+                        # ── 页头工具条：加图 / 导出标注 / 在 X-AnyLabeling 中打开（spec §2.1）
                         with ui.row().classes("items-center gap-2 flex-wrap justify-end"):
                             if meta["form"] == "managed":
                                 ui.button("用此数据集训练", icon="model_training",
                                           on_click=lambda: ui.navigate.to(f"/?dataset={name}")).props("unelevated dense")
-                                val_btn = ui.button("重新校验", icon="fact_check",
-                                                    on_click=lambda: do_validate(name, val_btn))
-                                val_btn.props("outline dense")
-
-                                exp_btn = ui.button("导出标注", icon="file_download",
-                                                    on_click=lambda: open_export(meta))
-                                exp_btn.props("outline dense").tooltip(
-                                    "把真源标注导出为选定格式（当前仅 YOLO；转换器规则变更后的恢复通道"
-                                    "——日常标注修改自动增量刷新，无需手动导出）")
-                                res_btn = ui.button("重切分", icon="call_split", on_click=lambda: open_resplit(meta))
-                                res_btn.props("outline dense")
-                                tile_btn = ui.button("切片", icon="grid_view",
-                                                     on_click=lambda: open_tiling(meta))
-                                tile_btn.props("outline dense")
-                                if meta["task_type"] in ("detect", "segment", "obb"):
-                                    tile_btn.tooltip(
-                                        "按网格切小图生成新数据集（源集不动；标注完整落入才归属，跨界靠重叠补救）")
-                                else:
-                                    tile_btn.props("disable").tooltip("切片支持检测/分割/旋转框任务")
+                                ui.button("加图", icon="add_photo_alternate",
+                                          on_click=lambda: open_add_images(meta)).props(
+                                    "outline dense").tooltip("向真源目录增补图片与标注（拷贝或移动）")
+                                ui.button("导出标注", icon="file_download",
+                                          on_click=lambda: open_export(meta)).props(
+                                    "outline dense").tooltip(
+                                    "把真源标注导出为自包含目录（格式 × 范围 × 图片），与训练用的格式池无关")
+                                ui.button("在 X-AnyLabeling 中打开", icon="edit_note",
+                                          on_click=lambda: open_source_in_xal(meta)).props("outline dense")
                             del_btn = ui.button("删除", icon="delete", color="negative",
                                                 on_click=lambda: open_delete(meta))
                             del_btn.props("outline dense")
                     if meta["form"] == "managed":
-                        with ui.row().classes("w-full gap-2 items-start"):
-                            ui.label("来源目录").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
-                            ui.label(meta.get("source_dir", "—")).classes(
-                                "text-xs opacity-70 break-all flex-1 min-w-0")
-                            if meta.get("source_dir"):
-                                _dir_open_btn(meta["source_dir"])
-                        with ui.row().classes("w-full gap-2 items-start"):
-                            ui.label("类别").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
-                            ui.label(f"共 {len(meta['classes'])} 类（行序即 id）："
-                                     + "，".join(meta["classes"])).classes(
-                                "text-xs opacity-70 break-all flex-1 min-w-0")
-                        brief = next((m for m in meta.get("manifests", [])
-                                      if m["uid"] == meta.get("active_manifest")), None)
-                        if brief:
-                            with ui.row().classes("w-full gap-2 items-start"):
-                                ui.label("活跃切分").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
-                                ui.label(f"{brief['uid']} · train 比例 {brief['ratio']} · "
-                                         f"seed {brief['seed']} · {'分层' if brief['stratify'] else '不分层'} · "
-                                         f"{_fmt_ts(brief.get('created_at'))}").classes(
-                                    "text-xs opacity-70 break-all flex-1 min-w-0")
-                        # ── M6：详情页签化——概览与校验 / 健康报告 / 质量审计；M9：标注审查
-                        with ui.tabs().classes("w-full text-xs") as dtabs:
-                            ui.tab("overview", label="概览与校验", icon="fact_check")
-                            ui.tab("health", label="健康报告", icon="monitor_heart")
-                            ui.tab("audit", label="质量审计", icon="health_and_safety")
-                            ui.tab("review", label="标注审查", icon="new_label")
-                        with ui.tab_panels(dtabs, value=state.get("ds_tab") or "overview"
-                                           ).classes("w-full") as dpanels:
-                            with ui.tab_panel("overview"):
-                                _render_overview(meta)
-                            with ui.tab_panel("health"):
-                                _render_health(name, meta)
-                            with ui.tab_panel("audit"):
-                                # 质量审计内容延迟到页签首次激活才构建：服务端急切构建 +
-                                # 客户端页签激活时一次性挂载几百卡（含动画 spinner）会卡住
-                                # 浏览器主线程 >2s，pong 迟到被服务端掐线（NiceGUI 引擎
-                                # ping_timeout=2s，2026-09-21 审计页断连根因）
-                                audit_box = ui.column().classes("w-full gap-2")
-                                state["audit_built"] = False  # render_detail 重建时重开懒构建
-                            with ui.tab_panel("review"):
-                                # 同懒构建：队列要解析全部标注 JSON，急切构建会拖慢详情页
-                                review_box = ui.column().classes("w-full gap-2")
-                                state["review_built"] = False
-
-                            def _ensure_audit_panel(tab: str) -> None:
-                                if tab == "audit" and not state.get("audit_built"):
-                                    state["audit_built"] = True
-                                    with audit_box:
-                                        _render_audit(name, meta)
-                                if tab == "review" and not state.get("review_built"):
-                                    state["review_built"] = True
-                                    # 队列解析全量读 JSON 状态与可疑度，大清单秒级——骨架先行，
-                                    # 解析放 _io 线程（同步 _render_review 曾冻结整个页面）
-                                    with review_box:
-                                        with ui.row().classes("w-full items-center gap-2 q-pa-sm"):
-                                            ui.spinner(size="sm")
-                                            ui.label("解析审查队列中…（全量标注逐个读状态与可疑度）"
-                                                     ).classes("text-xs opacity-60")
-
-                                    async def _build_review() -> None:
-                                        try:
-                                            q = await _io(ds.review_queue, meta["name"])
-                                        except Exception as exc:  # noqa: BLE001
-                                            if getattr(review_box, "is_deleted", False):
-                                                return
-                                            review_box.clear()
-                                            with review_box:
-                                                ui.label(f"审查队列加载失败：{exc}").classes(
-                                                    "text-rose-400 text-xs")
-                                            return
-                                        if getattr(review_box, "is_deleted", False):
-                                            return  # 解析期间详情已切换到别的数据集
-                                        review_box.clear()
-                                        with review_box:
-                                            _render_review(meta, q)
-
-                                    asyncio.get_running_loop().create_task(_build_review())
-
-                            def _on_ds_tab(e) -> None:
-                                state["ds_tab"] = e.value
-                                _ensure_audit_panel(e.value)
-                                # 滚动跟随切换：从长页签深处（如审计网格）切走时，主滚动停在
-                                # 换面板后钳制的任意深度——归位到页签行，新面板从顶可见。
-                                # 懒构建面板短内容阶段会钳制 scrollTop、后续渐进物化还会长
-                                # 高（轮询窗口实测两头都追不上），改事件驱动：ResizeObserver
-                                # 盯内容高度，每次变化即对齐一次，高度安静 1.2s 收工；用户
-                                # 滚轮/指针/按键立即让路；30s 总上限兜底
-                                ui.run_javascript(f"""
-                                  (function(){{
-                                    const t=document.getElementById('c{dtabs.id}');if(!t)return;
-                                    const m=t.closest('.ai-main');if(!m)return;
-                                    const content=m.firstElementChild||m;
-                                    let stop=false, settle=null, cap=null, ro=null;
-                                    const done=function(){{
-                                      stop=true;
-                                      if(ro)ro.disconnect();
-                                      if(settle)clearTimeout(settle);
-                                      if(cap)clearTimeout(cap);
-                                    }};
-                                    ['wheel','pointerdown','keydown'].forEach(ev=>
-                                      document.addEventListener(ev, done,
-                                        {{capture:true, once:true, passive:true}}));
-                                    const align=function(){{
-                                      if(stop)return;
-                                      const d=t.getBoundingClientRect().top-m.getBoundingClientRect().top-4;
-                                      if(Math.abs(d)>2)m.scrollTop+=d;
-                                    }};
-                                    align();
-                                    if(window.ResizeObserver){{
-                                      ro=new ResizeObserver(function(){{
-                                        if(stop)return;
-                                        align();
-                                        if(settle)clearTimeout(settle);
-                                        settle=setTimeout(done,1200);
-                                      }});
-                                      ro.observe(content);
-                                    }}
-                                    settle=setTimeout(done,1200);
-                                    cap=setTimeout(done,30000);
-                                  }})()""")
-
-                            dpanels.on_value_change(_on_ds_tab)
-                            _ensure_audit_panel(state.get("ds_tab") or "overview")
+                        cards_slot = ui.row().classes("w-full gap-2 flex-wrap")
+                        _build_workspaces(meta)  # 先建工作区，状态卡点开才有落点
+                        with cards_slot:
+                            _status_cards(meta)
                     else:
                         with ui.row().classes("w-full gap-2 items-start"):
                             ui.label("外部路径").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
@@ -3512,7 +3565,275 @@ document.addEventListener('scroll', function(e){
                         else:
                             ui.label("data.yaml 存在：类别以其为准").classes("text-xs opacity-60")
 
-            # ── 概览页签：校验（含修复指引，05 号票）+ 切分历史 + 排除清单
+            # ── 单列状态流：四张状态卡打头，点开下方折叠工作区（spec §2.1 数据集页信息架构）
+            def _ensure_ws(key: str) -> None:
+                """工作区懒构建：首次展开才建内容。
+
+                急切构建会把审计网格（几百卡）和审查队列（全量读标注 JSON）压进
+                详情页首屏——服务端构建 + 客户端一次性挂载卡住主线程 >2s，pong 迟到
+                被 NiceGUI 引擎掐线（ping_timeout=2s，2026-09-21 审计页断连根因）。
+                """
+                ws = (state.get("ws") or {}).get(key)
+                if ws is None or ws["built"]:
+                    return
+                ws["built"] = True
+                meta = ws["meta"]
+                with ws["box"]:
+                    if key == "source":
+                        _render_ws_source(meta)
+                    elif key == "classes":
+                        _render_ws_classes(meta)
+                    elif key == "validation":
+                        _render_ws_validation(meta)
+                    elif key == "audit":
+                        _render_audit(meta["name"], meta)
+                    elif key == "review":
+                        _render_ws_review(meta, ws["box"])
+                    elif key == "exclude":
+                        _render_ws_exclude(meta)
+                    elif key == "tiling":
+                        _render_ws_tiling(meta)
+
+            def _open_ws(key: str) -> None:
+                """状态卡点开工作区：展开 → 懒构建 → 滚动跟随。"""
+                ws = (state.get("ws") or {}).get(key)
+                if ws is None:
+                    return
+                state["ws_open"] = key
+                ws["exp"].open()
+                _ensure_ws(key)
+                _scroll_to(ws["exp"])
+
+            def _workspace(key: str, icon: str, title: str, meta: dict) -> None:
+                """登记一个折叠工作区（默认收起；state["ws_open"] 记录的那只保持展开）。"""
+                with ui.expansion(title, icon=icon,
+                                  value=(state.get("ws_open") == key)).classes("w-full text-xs") as exp:
+                    box = ui.column().classes("w-full gap-2")
+                state["ws"][key] = {"exp": exp, "box": box, "built": False, "meta": meta}
+
+                def _on_toggle(e) -> None:
+                    if e.value:
+                        state["ws_open"] = key
+                        _ensure_ws(key)
+
+                exp.on_value_change(_on_toggle)
+
+            def _build_workspaces(meta: dict) -> None:
+                with ui.column().classes("w-full gap-1"):
+                    _workspace("source", "folder_open", "来源", meta)
+                    _workspace("classes", "list_alt", "类别表", meta)
+                    _workspace("validation", "fact_check", "校验与画像", meta)
+                    _workspace("audit", "health_and_safety", "体检", meta)
+                    _workspace("review", "new_label", "标注审查", meta)
+                    _workspace("exclude", "visibility_off",
+                               f"排除与恢复（{len(_excluded_entries(meta))}）", meta)
+                    _workspace("tiling", "grid_view", "切片", meta)
+                if state.get("ws_open"):
+                    _ensure_ws(state["ws_open"])
+
+            def _audit_brief(meta: dict) -> dict | None:
+                """体检卡用的缓存结果；读失败只回 None，完整错误留给体检工作区说。"""
+                try:
+                    return ds.cached_audit(meta["name"])
+                except Exception as exc:  # noqa: BLE001
+                    ui.notify(f"读取体检缓存失败：{exc}", type="negative")
+                    return None
+
+            def _status_card(key: str, icon: str, title: str, status: str,
+                             color: str, line: str) -> None:
+                """一张状态卡：状态 + 一句结论，点开进同名工作区。"""
+                with ui.card().classes("flex-1 min-w-[13rem] gap-1 q-pa-sm").props("clickable") as card:
+                    card.on("click", lambda k=key: _open_ws(k))
+                    with ui.row().classes("w-full items-center gap-1"):
+                        ui.icon(icon, size="16px").classes("opacity-50")
+                        ui.label(title).classes("text-xs font-semibold flex-1")
+                        ui.badge(status).props(f"color={color}").style("font-size:10px")
+                    ui.label(line).classes("text-[11px] opacity-60 break-all")
+
+            def _status_cards(meta: dict) -> None:
+                """来源 / 类别表 / 校验·画像 / 体检四张状态卡。"""
+                vs = _validation_of(meta)
+                origin = meta.get("origin") or {}
+                n_img = vs.get("total_images")
+                mode_zh = SOURCE_MODE_ZH.get(origin.get("mode"), origin.get("mode") or "未记录")
+                src_line = (f"{mode_zh}"
+                            + (f" · {TRANSFER_ZH.get(origin.get('transfer'), origin.get('transfer', ''))}"
+                               if origin.get("mode") != "empty" else ""))
+                _status_card("source", "folder_open", "来源",
+                             "空" if not n_img else f"{n_img} 图",
+                             "grey" if not n_img else "blue",
+                             src_line + (f" · {_fmt_ts(origin.get('at'))}" if origin.get("at") else ""))
+                classes = meta.get("classes") or []
+                _status_card("classes", "list_alt", "类别表", f"{len(classes)} 类",
+                             "grey" if not classes else "blue",
+                             "行序即类别 id：" + ("、".join(classes[:6]) + ("…" if len(classes) > 6 else "")
+                                              if classes else "尚未登记类别"))
+                n_prob = len(vs.get("problems")) if isinstance(vs.get("problems"), list) else None
+                val_line = (f"{n_img if n_img is not None else '—'} 图"
+                            + (f" · 负样本 {vs.get('negatives', vs.get('background'))}"
+                               if vs.get("negatives", vs.get("background")) is not None else "")
+                            + (f" · {n_prob} 项问题" if n_prob else "")
+                            + (f" · 丢弃 {(vs.get('drops') or {}).get('count', 0)} 待确认"
+                               if _drops_pending_ack(meta) else ""))
+                if vs.get("checked_at"):
+                    val_line += f" · {_fmt_ts(vs['checked_at'])}"
+                _status_card("validation", "fact_check", "校验·画像",
+                             {True: "通过", False: "有问题"}.get(vs.get("ok"), "未校验"),
+                             {True: "green", False: "red"}.get(vs.get("ok"), "grey"), val_line)
+                audit = _audit_brief(meta)
+                if audit is None:
+                    _status_card("audit", "health_and_safety", "体检", "未体检", "grey",
+                                 "手动触发；结果缓存，真源变更后标记过期")
+                else:
+                    sm = audit.get("summary", {})
+                    stale = bool(vs.get("checked_at")) and str(audit.get("checked_at") or "") < str(
+                        vs["checked_at"])
+                    _status_card("audit", "health_and_safety", "体检",
+                                 "已过期" if stale else "有结果",
+                                 "amber" if stale else "green",
+                                 f"精确 {sm.get('exact', 0)} · 近似 {sm.get('near', 0)} · "
+                                 f"泄漏 {sm.get('leaks', 0)}"
+                                 + ("" if sm.get("imbalance_ok", True) else " · 类别失衡")
+                                 + f" · {_fmt_ts(audit.get('checked_at'))}"
+                                 + ("（校验后有变更）" if stale else ""))
+
+            def _meta_row(label: str, value: str, open_path: str | None = None) -> None:
+                """详情页一行「标签 + 值（+ 打开目录）」——状态卡工作区共用排版。"""
+                with ui.row().classes("w-full gap-2 items-start"):
+                    ui.label(label).classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
+                    ui.label(value).classes("text-xs opacity-70 break-all flex-1 min-w-0")
+                    if open_path:
+                        _dir_open_btn(open_path)
+
+            def _render_ws_source(meta: dict) -> None:
+                """来源工作区：出生来源与平台拥有的真源目录落点（spec §3.1）。"""
+                origin = meta.get("origin") or {}
+                src = _source_dir_of(meta)
+                _meta_row("来源", SOURCE_MODE_ZH.get(origin.get("mode"),
+                                                     origin.get("mode") or "未记录"))
+                if origin.get("mode") != "empty":
+                    _meta_row("入图方式", TRANSFER_ZH.get(origin.get("transfer"),
+                                                          origin.get("transfer") or "—"))
+                    _meta_row("来源路径", origin.get("path") or "—",
+                              origin.get("path") if Path(str(origin.get("path") or "")).is_dir() else None)
+                if origin.get("at"):
+                    _meta_row("出生时间", _fmt_ts(origin["at"]))
+                if src is not None:
+                    _meta_row("真源目录", str(src), str(src) if src.is_dir() else None)
+                    _meta_row("变动", "目录 mtime 晚于上次校验——可能有未入账图片/标注"
+                              if _maybe_changed(meta) else "与上次校验时的目录一致")
+
+            def _render_ws_classes(meta: dict) -> None:
+                """类别表工作区：classes.txt 的行序视图（行序即类别 id，平台为 master）。"""
+                classes = meta.get("classes") or []
+                if not classes:
+                    ui.label("类别表为空").classes("text-xs opacity-40")
+                    return
+                tbl = ui.table(columns=[{"name": "id", "label": "id", "field": "id", "align": "left"},
+                                        {"name": "name", "label": "类别", "field": "name", "align": "left"}],
+                               rows=[{"id": i, "name": c} for i, c in enumerate(classes)], row_key="id")
+                _style_table(tbl)
+                ui.label(f"共 {len(classes)} 类 · 真源 classes.txt").classes(
+                    "text-[11px] opacity-50")
+
+            def _render_ws_validation(meta: dict) -> None:
+                """校验·画像工作区：校验账目（含修复与丢弃确认门）+ 健康报告画像。"""
+                with ui.row().classes("w-full items-center gap-2"):
+                    val_btn = ui.button("重新校验", icon="fact_check",
+                                        on_click=lambda: do_validate(meta["name"], val_btn))
+                    val_btn.props("outline dense")
+                    ui.label("校验与画像共用一次遍历").classes("text-[11px] opacity-40")
+                _render_validation(meta)
+                ui.separator()
+                _render_health(meta["name"], meta)
+
+            def _render_ws_review(meta: dict, box) -> None:
+                """审查工作区：骨架先行，队列解析放 _io 线程（同步解析曾冻结整页）。"""
+                with box:
+                    with ui.row().classes("w-full items-center gap-2 q-pa-sm"):
+                        ui.spinner(size="sm")
+                        ui.label("解析审查队列中…（全量标注逐个读状态与可疑度）").classes(
+                            "text-xs opacity-60")
+
+                async def _build_review() -> None:
+                    try:
+                        q = await _io(ds.review_queue, meta["name"])
+                    except Exception as exc:  # noqa: BLE001
+                        if getattr(box, "is_deleted", False):
+                            return
+                        box.clear()
+                        with box:
+                            ui.label(f"审查队列加载失败：{exc}").classes("text-rose-400 text-xs")
+                        return
+                    if getattr(box, "is_deleted", False):
+                        return  # 解析期间详情已切换到别的数据集
+                    box.clear()
+                    with box:
+                        _render_review(meta, q)
+
+                asyncio.get_running_loop().create_task(_build_review())
+
+            def _render_ws_exclude(meta: dict) -> None:
+                """排除与恢复工作区：排除在册条目直连恢复（排除日志是数据集级文件状态）。"""
+                excluded = _excluded_entries(meta)
+                if not excluded:
+                    ui.label("没有被排除的文件").classes("text-xs opacity-40")
+                    return
+                excl_sel: set[str] = set()
+
+                def _toggle_excl(file: str, ev) -> None:
+                    if ev.value:
+                        excl_sel.add(file)
+                    else:
+                        excl_sel.discard(file)
+                    btn = excl_sel_holder.get("btn")
+                    if btn is not None:
+                        btn.set_text(f"恢复选中（{len(excl_sel)}）")
+                        btn.set_enabled(bool(excl_sel))
+
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label(f"已排除 {len(excluded)} 个文件").classes(
+                        "text-xs opacity-60").tooltip("真源未动；排除者不入新建切分、出队时剔除")
+                    excl_sel_holder: dict = {"btn": None}
+                    rb_sel = ui.button("恢复选中（0）", icon="restore", color="primary",
+                                       on_click=lambda: do_restore(sorted(excl_sel))).props(
+                        "outline dense size=sm").set_enabled(False)
+                    excl_sel_holder["btn"] = rb_sel
+                    rb_all = ui.button("恢复全部", icon="restore",
+                                       on_click=lambda: do_restore(
+                                           [e["file"] for e in excluded])).props(
+                        "outline dense size=sm color=primary")
+                for e in excluded:
+                    with ui.row().classes("w-full items-center gap-1"):
+                        ui.checkbox("", value=False,
+                                    on_change=lambda ev, f=e["file"]: _toggle_excl(f, ev)
+                                    ).props("dense")
+                        _img_name_link(e["file"], Path(e["file"]).name,
+                                       "text-[11px] opacity-60 break-all flex-1 min-w-0")
+                        ui.label(f"{_fmt_ts(e['at'])} · {e.get('reason', '')}"
+                                 ).classes("text-[10px] opacity-40 shrink-0")
+                        rb = ui.button(icon="restore",
+                                       on_click=lambda f=e["file"]: do_restore([f])).props(
+                            "flat dense round size=xs color=primary")
+                        with rb:
+                            ui.tooltip("恢复此文件（移出排除日志）")
+
+            def _render_ws_tiling(meta: dict) -> None:
+                """切片工作区：切小图生新托管数据集（源集不动）。"""
+                with ui.row().classes("w-full items-center gap-2"):
+                    tile_btn = ui.button("打开切片", icon="grid_view",
+                                         on_click=lambda: open_tiling(meta)).props("unelevated dense")
+                    if meta["task_type"] in ("detect", "segment", "obb"):
+                        tile_btn.tooltip(
+                            "按网格切小图生成新数据集（源集不动；标注完整落入才归属，跨界靠重叠补救）")
+                    else:
+                        tile_btn.props("disable").tooltip("切片支持检测/分割/旋转框任务")
+                tl = meta.get("tiling") or {}
+                if tl:
+                    _meta_row("本集来源", f"切片生成：{tl.get('rows', '—')}×{tl.get('cols', '—')}"
+                              f" · 重叠 {tl.get('overlap', '—')} · 源集 {tl.get('source', '—')}")
+
+            # ── 校验与画像工作区的账目部分（含修复指引，05 号票）
             def _copy_path(p: str) -> None:
                 ui.clipboard.write(p)
                 ui.notify("路径已复制", type="info")
@@ -3562,26 +3883,36 @@ document.addEventListener('scroll', function(e){
                             if len(items) > 20:
                                 ui.label(f"… 其余 {len(items) - 20} 张省略").classes("text-[11px] opacity-40")
 
-            def _render_overview(meta: dict) -> None:
-                lv = meta.get("last_validation") or {}
+            def _render_validation(meta: dict) -> None:
+                """校验账目：摘要 → 需人工问题（含修复指引）→ 一键修复 → 丢弃确认门。"""
+                lv = _validation_of(meta)
                 if lv:
-                    fixable, manual = _split_fixable(lv.get("problems") or [])
-                    seg = (f" · 需人工 {len(manual)} 项" if manual else "") + (
-                        f" · 可自动修复 {len(fixable)} 项" if fixable else "")
+                    problems = lv.get("problems")
+                    fixable, manual = _split_fixable(problems or [])
+                    neg = lv.get("negatives", lv.get("background"))
+                    seg = [f"{_fmt_ts(lv.get('checked_at'))}", f"共 {lv.get('total_images', '—')} 图"]
+                    if lv.get("labeled") is not None:
+                        seg.append(f"已标 {lv['labeled']}")
+                    if neg is not None:
+                        seg.append(f"负样本 {neg}")
+                    if problems is None:
+                        # v1.4 摘要只留计数，逐条明细在 validation_report.json（票 05 换读取口）
+                        seg.append(f"丢弃 {(lv.get('drops') or {}).get('count', 0)} 条")
+                    else:
+                        seg.append((f"需人工 {len(manual)} 项" if manual else "") + (
+                            f" · 可自动修复 {len(fixable)} 项" if fixable else "") or "无问题")
                     with ui.row().classes("w-full gap-2 items-start"):
                         ui.label("上次校验").classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
                         with ui.column().classes("flex-1 min-w-0 gap-1"):
-                            ui.label(f"{_fmt_ts(lv['checked_at'])} · 共 {lv['total_images']} 图"
-                                     f"（已标 {lv['labeled']} / 负样本 {lv['background']}）"
-                                     f"{seg or ' · 无问题'}").classes("text-xs opacity-70")
+                            ui.label(" · ".join(seg)).classes("text-xs opacity-70")
                             if manual:
                                 _render_problems(manual, meta.get("classes"))
-                            elif lv.get("background"):
+                            elif neg:
                                 ui.label("负样本（无标注图）是设计内行为：只进 train 充当背景，不算错误。"
                                          ).classes("text-[11px] opacity-45")
                             if fixable:
                                 # 一键修复（ADR 0005）：平台可确定性处理项——按钮常驻琥珀条，
-                                # 执行前确认门复述计数，执行后自动重转派生并重校验
+                                # 执行前确认门复述计数，流程内即时重校验与画像
                                 by_code: dict[str, int] = {}
                                 for p in fixable:
                                     by_code[p["code"]] = by_code.get(p["code"], 0) + 1
@@ -3610,9 +3941,9 @@ document.addEventListener('scroll', function(e){
                                 with ui.dialog() as autofix_dlg, ui.card().classes(
                                         "w-full max-w-lg gap-2"):
                                     ui.label("一键修复").classes("text-sm font-semibold")
-                                    ui.label(f"将修复 {len(fixable)} 项（{parts}）写回源标注文件——"
+                                    ui.label(f"将修复 {len(fixable)} 项（{parts}）写回真源标注文件——"
                                              "原文件备份到数据集 autofix/ 目录、已有审查判定保留、"
-                                             "完成后自动重转派生并重新校验。").classes(
+                                             "流程内即时重校验与画像（格式池在出队时按新鲜度门刷新）。").classes(
                                         "text-xs opacity-70")
                                     with ui.row().classes("w-full justify-end gap-2"):
                                         ui.button("取消", on_click=autofix_dlg.close).props("flat")
@@ -3630,71 +3961,10 @@ document.addEventListener('scroll', function(e){
                                     ui.button("一键修复", icon="auto_fix_high",
                                               on_click=autofix_dlg.open).props(
                                         "dense unelevated color=warning")
-                # 清单漂移（spec「图片集漂移检测警告」落点）：源目录新增未纳入 / 已消失——
-                # 琥珀条诚实入账，「同步新增」过确认门增量纳入（排除日志中的文件不复活）
-                drift = lv.get("drift") or {}
-                if drift.get("added") or drift.get("missing"):
-                    n_add, n_miss = drift.get("added") or 0, drift.get("missing") or 0
-
-                    async def _do_sync_added(ds_name: str, dlg) -> None:
-                        dlg.close()
-                        op = ops.begin(f"ds:{ds_name}:sync", f"同步新增 · {ds_name}", scope=ds_name)
-                        try:
-                            r = await _io(ds.sync_added_files, ds_name, None, op.progress)
-                            op.finish()
-                            v = r.get("validation") or {}
-                            ui.notify(f"已同步新增 {r.get('added', 0)} 张"
-                                      f"（train {r.get('train', 0)} / val {r.get('val', 0)}）"
-                                      f"——重校验{'通过' if v.get('ok') else '仍有需人工项'}",
-                                      type="positive" if v.get("ok") else "warning")
-                        except Exception as exc:  # noqa: BLE001
-                            op.fail(str(exc))
-                            ui.notify(f"同步失败：{exc}", type="negative")
-                        refresh()
-                        render_detail()
-
-                    with ui.dialog() as sync_dlg, ui.card().classes("w-full max-w-lg gap-2"):
-                        ui.label("同步新增图片").classes("text-sm font-semibold")
-                        blocked = bool(drift.get("new_classes"))
-                        if blocked:
-                            ui.label(f"新增图片携带未注册类别：{'、'.join(drift['new_classes'])}"
-                                     "——先在 X-AnyLabeling 中改为既有类别，或另建数据集；"
-                                     "类序变更会破坏既有模型的可比性，平台不自动追加类别。"
-                                     ).classes("text-xs text-amber-500")
-                        ui.label(f"将把源目录中 {n_add} 张新增图片纳入切分——既有图片的 "
-                                 "train/val 归属不变，新增图片按当前比例与种子入切；"
-                                 "生成新切分版本（旧版保留可切回），按当前标注重建派生"
-                                 "并自动重新校验。").classes("text-xs opacity-70")
-                        with ui.row().classes("w-full justify-end gap-2"):
-                            ui.button("取消", on_click=sync_dlg.close).props("flat")
-                            go_btn = ui.button("执行同步", icon="playlist_add",
-                                               on_click=lambda: _do_sync_added(meta["name"], sync_dlg))
-                            go_btn.props("unelevated color=warning")
-                            if blocked:
-                                go_btn.props("disable")
-
-                    with ui.row().classes(
-                            "w-full items-center gap-2 q-pa-sm rounded").style(
-                            "background:rgba(245,158,11,.12)"):
-                        ui.icon("sync_problem").classes("text-amber-400")
-                        drift_txt = (f"源目录新增 {n_add} 张图片未纳入切分——不参与训练与统计"
-                                     if n_add else "")
-                        if n_miss:
-                            drift_txt += ("；" if drift_txt else "") + \
-                                f"清单内 {n_miss} 张已从源目录消失（可用「重切分/排除」处置）"
-                        if n_add and drift.get("added_sample"):
-                            drift_txt += f"（如 {drift['added_sample'][0]}）"
-                        ui.label(drift_txt).classes("text-xs flex-1 min-w-0").tooltip(
-                            "切分清单是版本快照（全 Run 共用同一份 val，指标可比）；"
-                            "排除过的文件不会被同步复活")
-                        if n_add:
-                            ui.button("同步新增", icon="playlist_add",
-                                      on_click=sync_dlg.open).props(
-                                "dense unelevated color=warning")
                 # M9 确认门：转换丢弃未确认 → 横幅 + 确认按钮（确认前提交训练被拒）
-                if meta.get("drops_pending_ack"):
-                    n_drop = (lv.get("drops") or
-                              sum(1 for p in lv.get("problems") or [] if p.get("code") == "drop"))
+                if _drops_pending_ack(meta):
+                    n_drop = _drop_count(lv) or sum(
+                        1 for p in lv.get("problems") or [] if p.get("code") == "drop")
 
                     async def _ack_drops(ds_name: str) -> None:
                         try:
@@ -3708,89 +3978,18 @@ document.addEventListener('scroll', function(e){
                     with ui.row().classes("w-full items-center gap-2 q-pa-sm rounded").style(
                             "background:rgba(245,158,11,.12)"):
                         ui.icon("warning").classes("text-amber-400")
-                        ui.label(f"丢弃 {n_drop} 条标注待确认——明细见上方问题清单，确认后方可训练"
+                        ui.label(f"丢弃 {n_drop} 条标注待确认——确认后方可训练"
                                  ).classes("text-xs flex-1 min-w-0")
                         ui.button("确认接受丢弃", icon="done_all",
                                   on_click=lambda: _ack_drops(meta["name"])).props(
                             "dense unelevated color=warning")
-                # 切分历史（排除/重切都会新增版本，旧版本保留可查）
-                if len(meta.get("manifests") or []) > 1:
-                    with ui.row().classes("w-full gap-2 items-start"):
-                        ui.label("切分历史").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
-                        with ui.row().classes("flex-wrap gap-1 flex-1 min-w-0"):
-                            for m in meta["manifests"]:
-                                is_active = m["uid"] == meta.get("active_manifest")
-                                chip = ui.chip(f"{m['uid']} · {m['ratio']} · seed {m['seed']}"
-                                               + (" · 只训已审" if m.get("approved_only") else ""))
-                                chip.props("dense outline square clickable" if not is_active
-                                           else "dense outline square"
-                                           + (" color=blue" if is_active else ""))
-                                chip.classes("text-[10px]")
-                                with chip:
-                                    ui.tooltip(("当前活跃清单 · " if is_active else
-                                                "点击切回该版本（派生按当前标注重建）· ")
-                                               + _fmt_ts(m.get("created_at"))
-                                               + (" · 只训已审清单" if m.get("approved_only") else ""))
-                                if not is_active:
-                                    chip.on("click", lambda u=m["uid"]: open_switch(u))
-                excluded = meta.get("excluded") or []
-                if excluded:
-                    excl_sel: set[str] = set()
 
-                    def _toggle_excl(file: str, ev) -> None:
-                        if ev.value:
-                            excl_sel.add(file)
-                        else:
-                            excl_sel.discard(file)
-                        btn = excl_sel_holder.get("btn")
-                        if btn is not None:
-                            btn.set_text(f"恢复选中（{len(excl_sel)}）")
-                            btn.set_enabled(bool(excl_sel))
-
-                    with ui.row().classes("w-full gap-2 items-start"):
-                        ui.label("排除清单").classes("text-xs opacity-50 w-20 shrink-0 pt-1")
-                        with ui.column().classes("flex-1 min-w-0 gap-0"):
-                            ui.label(f"已排除 {len(excluded)} 个文件").classes(
-                                "text-[11px] opacity-60").tooltip(
-                                "仅移出切分清单、标注真源未动；重切以排除后文件集为基线")
-                            with ui.expansion("查看明细", icon="visibility_off").classes("text-xs"):
-                                excl_sel_holder: dict = {"btn": None}
-                                with ui.row().classes("items-center gap-2"):
-                                    rb_sel = ui.button(
-                                        "恢复选中（0）", icon="restore", color="primary",
-                                        on_click=lambda: do_restore(sorted(excl_sel))).props(
-                                        "outline dense size=sm").set_enabled(False)
-                                    excl_sel_holder["btn"] = rb_sel
-                                    with rb_sel:
-                                        ui.tooltip("勾选的文件按最近一次 train/val 归属批量重新纳入，"
-                                                   "生成新清单并重建派生")
-                                    rb_all = ui.button("恢复全部", icon="restore",
-                                                       on_click=lambda: do_restore(
-                                                           [e["file"] for e in excluded])).props(
-                                        "outline dense size=sm color=primary")
-                                    with rb_all:
-                                        ui.tooltip("全部按最近一次归属重新纳入，生成新清单并重建派生")
-                                for e in excluded:
-                                    with ui.row().classes("w-full items-center gap-1"):
-                                        ui.checkbox("", value=False,
-                                                    on_change=lambda ev, f=e["file"]: _toggle_excl(f, ev)
-                                                    ).props("dense")
-                                        _img_name_link(e["file"], Path(e["file"]).name,
-                                                       "text-[11px] opacity-60 break-all flex-1 min-w-0")
-                                        ui.label(f"{_fmt_ts(e['at'])} · {e.get('reason', '')}"
-                                                 ).classes("text-[10px] opacity-40 shrink-0")
-                                        rb = ui.button(icon="restore",
-                                                       on_click=lambda f=e["file"]: do_restore([f])).props(
-                                            "flat dense round size=xs color=primary")
-                                        with rb:
-                                            ui.tooltip("恢复此图（回最近一次 train/val 归属）")
-
-            # ── 标注审查页签（M9 02 号票）：键盘流判定 + 可疑度排序胶片条（ADR 0003 状态寄生 JSON）
+            # ── 标注审查工作区（M9 02 号票）：键盘流判定 + 可疑度排序胶片条（ADR 0003 状态寄生 JSON）
             def _render_review(meta: dict, queue: dict | None = None) -> None:
                 from ..datasets.review import REVIEW_REASONS
 
                 try:
-                    if queue is None:  # 兼容同步路径；正常入口由 _ensure_audit_panel 预取后传入
+                    if queue is None:  # 兼容同步路径；正常入口由 _render_ws_review 预取后传入
                         queue = ds.review_queue(meta["name"])
                 except Exception as exc:  # noqa: BLE001
                     ui.label(f"审查队列加载失败：{exc}").classes("text-rose-400 text-xs")
@@ -3897,7 +4096,8 @@ document.addEventListener('scroll', function(e){
                     cur = fl[rst["i"]]
                     try:
                         await _io(ds.exclude_files, meta["name"], [cur["image"]], "标注审查驳回处置")
-                        ui.notify(f"已从切分清单排除 {Path(cur['image']).name}（新清单已切活跃）", type="positive")
+                        ui.notify(f"已排除 {Path(cur['image']).name}（记入排除日志；恢复在「排除与恢复」）",
+                                  type="positive")
                     except Exception as exc:  # noqa: BLE001
                         ui.notify(f"排除失败：{exc}", type="negative")
                         return
@@ -4044,7 +4244,7 @@ document.addEventListener('scroll', function(e){
                                     "flat dense").tooltip("在 X-AnyLabeling 中打开修改")
                                 ui.button("去排除", icon="visibility_off",
                                           on_click=_exclude_cur).props(
-                                    "flat dense color=negative").tooltip("从切分清单排除（复用质量审计处置）")
+                                    "flat dense color=negative").tooltip("排除出训练（记入排除日志，真源不动）")
                                 ui.button(icon="help_outline", on_click=help_dlg.open).props(
                                     "flat dense").tooltip("快捷键说明")
                             if rst["reject_open"]:
@@ -4074,7 +4274,7 @@ document.addEventListener('scroll', function(e){
                 _view()
 
                 async def _on_key(e) -> None:
-                    if (state.get("ds_tab") or "overview") != "review":
+                    if state.get("ws_open") != "review":
                         return
                     if not e.action.keydown or e.action.repeat:
                         return
@@ -4453,12 +4653,12 @@ document.addEventListener('scroll', function(e){
                         "text-[11px] opacity-45 flex-1 min-w-40")
                     with _lbl:
                         ui.tooltip("sha256 精确重复 / 感知哈希近似重复 / 跨切分泄漏 / 类别失衡——"
-                                   "处置仅限「从切分清单排除」，标注真源永不改动")
+                                   "处置仅限「排除」，标注真源永不改动")
                     bb = ui.button("排除所选（0）", icon="remove_circle_outline", color="negative",
                                    on_click=lambda: open_batch_exclude()).props("outline dense")
                     bb.set_enabled(False)
                     with bb:
-                        ui.tooltip("勾选缩略图后批量从切分清单排除（不删文件，剩余归属不变）")
+                        ui.tooltip("勾选缩略图后批量排除（不删文件，记入排除日志）")
                     state["audit_batch_btn"] = bb
                 aprog = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
                 alabel = ui.label("").classes("text-xs opacity-70").set_visibility(False)
@@ -4535,11 +4735,11 @@ document.addEventListener('scroll', function(e){
                                     "text-[11px] " + ("text-red-500 font-semibold" if bad else "opacity-60"))
                     excluded = meta.get("excluded") or []
                     if excluded:
-                        ui.label(f"已排除 {len(excluded)} 个文件（明细见概览页签）"
+                        ui.label(f"已排除 {len(excluded)} 个文件（明细见「排除与恢复」）"
                                  ).classes("text-[11px] opacity-50")
 
             async def do_audit(name: str) -> None:
-                state["ds_tab"] = "audit"
+                state["ws_open"] = "audit"
                 op = ops.begin(f"ds:{name}:audit", f"体检 · {name}", scope=name)
                 try:
                     audit = await _io(ds.run_quality_audit, name, op.tick)
@@ -4554,53 +4754,22 @@ document.addEventListener('scroll', function(e){
                 render_detail()
 
             async def do_restore(files: list[str]) -> None:
-                """排除恢复（单图/多图）：回最近一次归属，重建派生与画像后刷新页面。"""
+                """排除恢复（单文件/多文件）：移出排除日志后刷新页面。"""
                 op = ops.begin(f"ds:{state['selected']}:restore",
                                f"恢复 {len(files)} 个文件 · {state['selected']}", scope=state["selected"])
                 try:
-                    m = await _io(ds.restore_files, state["selected"], files)
+                    await _io(ds.restore_files, state["selected"], files)
                     op.finish()
-                    ui.notify(f"已恢复 {len(files)} 个文件 → 清单 {m['uid']}", type="positive")
+                    ui.notify(f"已恢复 {len(files)} 个文件（移出排除日志）", type="positive")
                 except Exception as exc:  # noqa: BLE001
                     op.fail(str(exc))
                     ui.notify(f"恢复失败：{exc}", type="negative")
                 refresh()
                 render_detail()
 
-            # 切回历史清单（确认门：带后果文案，确认后按当前标注重建派生）
-            with ui.dialog() as switch_dlg, ui.card().classes("w-96 gap-2"):
-                sw_title = ui.label("切回历史清单").classes("font-bold")
-                ui.label("文件集回到该版本；按当前标注重建派生并重算健康报告。"
-                         ).classes("text-xs opacity-60")
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("取消", on_click=switch_dlg.close).props("flat")
-
-                    async def _do_switch() -> None:
-                        switch_dlg.close()
-                        op = ops.begin(f"ds:{state['selected']}:switch",
-                                       f"切回清单 {state['switch_uid']} · {state['selected']}",
-                                       scope=state["selected"])
-                        try:
-                            m = await _io(ds.switch_manifest, state["selected"], state["switch_uid"])
-                            op.finish()
-                            ui.notify(f"已切回清单 {m['uid']}（train {len(m['train'])} / val {len(m['val'])}）",
-                                      type="positive")
-                        except Exception as exc:  # noqa: BLE001
-                            op.fail(str(exc))
-                            ui.notify(f"切回失败：{exc}", type="negative")
-                        refresh()
-                        render_detail()
-
-                    ui.button("切回", icon="history", on_click=_do_switch).props("unelevated")
-
-            def open_switch(uid: str) -> None:
-                state["switch_uid"] = uid
-                sw_title.set_text(f"切回清单 {uid}")
-                switch_dlg.open()
-
             def open_excluding(name: str, file: str) -> None:
                 state["ex_target"] = (name, file)
-                ex_title.set_text(f"从切分清单排除 {Path(file).name}？")
+                ex_title.set_text(f"排除 {Path(file).name}？")
                 exclude_dialog.open()
 
             def open_batch_exclude() -> None:
@@ -4608,7 +4777,7 @@ document.addEventListener('scroll', function(e){
                 if not files:
                     ui.notify("先在缩略图网格勾选要排除的图片", type="warning")
                     return
-                bx_title.set_text(f"从切分清单排除 {len(files)} 个文件？")
+                bx_title.set_text(f"排除 {len(files)} 个文件？")
                 bx_names.set_text("；".join(Path(f).name for f in files))
                 state["bx_target"] = (state["selected"], files)
                 batch_dialog.open()
@@ -4619,14 +4788,13 @@ document.addEventListener('scroll', function(e){
                 if not target:
                     return
                 name, files = target
-                state["ds_tab"] = "audit"
+                state["ws_open"] = "exclude"
                 state["audit_sel"] = set()
                 op = ops.begin(f"ds:{name}:exclude", f"批量排除 {len(files)} 个文件 · {name}", scope=name)
                 try:
-                    m = await _io(ds.exclude_files, name, files, "质量审计处置")
+                    await _io(ds.exclude_files, name, files, "质量审计处置")
                     op.finish()
-                    ui.notify(f"已排除 {len(files)} 个文件：新清单 {m['uid']}"
-                              f"（train {len(m['train'])} / val {len(m['val'])}）；重新体检可见新结果",
+                    ui.notify(f"已排除 {len(files)} 个文件（记入排除日志）；重新体检可见新结果",
                               type="positive")
                 except Exception as exc:  # noqa: BLE001
                     op.fail(str(exc))
@@ -4640,13 +4808,13 @@ document.addEventListener('scroll', function(e){
                 if not target:
                     return
                 name, file = target
-                state["ds_tab"] = "audit"
+                state["ws_open"] = "exclude"
                 op = ops.begin(f"ds:{name}:exclude", f"排除 {Path(file).name} · {name}", scope=name)
                 try:
-                    m = await _io(ds.exclude_files, name, [file], "质量审计处置")
+                    await _io(ds.exclude_files, name, [file], "质量审计处置")
                     op.finish()
-                    ui.notify(f"已排除：新清单 {m['uid']}（train {len(m['train'])} / val {len(m['val'])}）；"
-                              "重新体检可见新结果", type="positive")
+                    ui.notify(f"已排除 {Path(file).name}（记入排除日志）；重新体检可见新结果",
+                              type="positive")
                 except Exception as exc:  # noqa: BLE001
                     op.fail(str(exc))
                     ui.notify(f"排除失败：{exc}", type="negative")
@@ -4654,16 +4822,16 @@ document.addEventListener('scroll', function(e){
                 render_detail()
 
             with ui.dialog() as exclude_dialog, ui.card().classes("w-[26rem] gap-2"):
-                ex_title = ui.label("从切分清单排除").classes("font-bold")
-                ui.label("仅移出切分清单；图片与标注不动，旧清单保留可切回。").classes("text-xs opacity-60")
+                ex_title = ui.label("排除").classes("font-bold")
+                ui.label("记入排除日志：不入新建切分、出队时剔除；图片与标注不动。").classes("text-xs opacity-60")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=exclude_dialog.close).props("flat")
                     ui.button("排除", color="negative", icon="remove_circle_outline",
                               on_click=do_exclude).props("unelevated")
 
             with ui.dialog() as batch_dialog, ui.card().classes("w-[28rem] gap-2"):
-                bx_title = ui.label("批量从切分清单排除").classes("font-bold")
-                ui.label("仅移出切分清单；图片与标注不动。train / val 各须至少保留 1 张。"
+                bx_title = ui.label("批量排除").classes("font-bold")
+                ui.label("记入排除日志：图片与标注不动，恢复即移出日志。train / val 各须至少保留 1 张。"
                          ).classes("text-xs opacity-60")
                 bx_names = ui.label("").classes("text-[11px] font-mono break-all q-pa-sm rounded").style(
                     "background:rgba(148,163,184,.12); max-height:8rem; overflow-y:auto")
@@ -4693,7 +4861,7 @@ document.addEventListener('scroll', function(e){
                                        sync_selected=False)
             _on_row_click(table, select, lambda: _scroll_to(detail))
 
-            # ── 批量删除（勾选归批量，行点击归详情；托管/外部混合也可，标注源目录永不触碰）
+            # ── 批量删除（勾选归批量，行点击归详情；托管/外部混合也可，一律移入回收区）
             def sync_bulk_btn() -> None:
                 n = len(table.selected or [])
                 btn = bulk_btn_holder.get("btn")
@@ -4704,6 +4872,8 @@ document.addEventListener('scroll', function(e){
             with ui.dialog() as bulk_del_dialog, ui.card().classes("w-96 gap-2"):
                 bulk_title = ui.label("").classes("font-bold")
                 bulk_names = ui.label("").classes("text-xs opacity-60 break-all")
+                ui.label("托管数据集整目录移入回收区（不物理删除）；外部数据集仅移除注册。"
+                         ).classes("text-xs opacity-60")
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=bulk_del_dialog.close).props("flat")
 
@@ -4719,12 +4889,17 @@ document.addEventListener('scroll', function(e){
                                     state["selected"] = None
                                     state["rendered_id"] = None
                                 ok += 1
+                            except ds.DatasetError as exc:
+                                fails.append(f"{name}：{exc.message}" + (
+                                    "（可在详情里二次确认强制删除）"
+                                    if exc.code == "runs_referenced"
+                                    or _payload_count(_error_payload(exc)) else ""))
                             except Exception as exc:  # noqa: BLE001
                                 fails.append(f"{name}：{exc}")
                             op.tick(ok + len(fails))
                         op.finish()
                         if ok:
-                            ui.notify(f"已删除 {ok} 个数据集（标注源目录永不触碰）", type="positive")
+                            ui.notify(f"已删除 {ok} 个数据集（整目录移入回收区，不物理删除）", type="positive")
                         for f in fails:
                             ui.notify(f"删除失败 {f}", type="negative")
                         table.selected = []
@@ -4759,30 +4934,39 @@ document.addEventListener('scroll', function(e){
                 render_detail()
 
             async def do_delete(meta: dict) -> None:
+                """删集：整目录移入回收区；被 Run 引用时列数量再二次确认强制（force=True）。"""
+                name = meta["name"]
+                force = bool(state.get("del_force"))
                 del_dialog.close()
-                op = ops.begin(f"ds:{meta['name']}:delete", f"删除数据集 · {meta['name']}")
+                op = ops.begin(f"ds:{name}:delete",
+                               f"{'强制删除' if force else '删除'}数据集 · {name}", scope=name)
                 try:
-                    await _io(ds.delete_dataset, meta["name"])
+                    r = await _io(ds.delete_dataset, name, None, force)
                     op.finish()
-                    if state["selected"] == meta["name"]:
+                    if state["selected"] == name:
                         state["selected"] = None
                         state["rendered_id"] = None
-                    ui.notify(f"已删除 {meta['name']}（标注源目录永不触碰）", type="positive")
-                except Exception as exc:  # noqa: BLE001
-                    op.fail(str(exc))
-                    ui.notify(f"删除失败：{exc}", type="negative")
+                    ui.notify(f"已把 {name} 移入回收区 {r.get('trashed') or '（见数据集根 .trash/）'}"
+                              "· 不物理删除，回收区不自动清理", type="positive")
+                except ds.DatasetError as exc:
+                    op.fail(exc.message)
+                    n_runs = _payload_count(_error_payload(exc))
+                    if not force and (exc.code == "runs_referenced" or n_runs):
+                        _ask_force_delete(meta, n_runs)
+                    else:
+                        ui.notify(f"删除失败：{exc.message}", type="negative")
                 refresh()
                 render_detail()
 
-            def open_resplit(meta: dict) -> None:
-                brief = next((m for m in meta.get("manifests", [])
-                              if m["uid"] == meta.get("active_manifest")), None)
-                r_title.set_text(f"重新切分 {meta['name']}")
-                if brief:
-                    r_ratio.set_value(brief["ratio"])
-                    r_seed.set_value(brief["seed"])
-                    r_strat.set_value(bool(brief["stratify"]))
-                resplit_dialog.open()
+            def _ask_force_delete(meta: dict, n_runs: int | None) -> None:
+                """Run 引用确认门：复述引用数量后才接受强制删除（第二次确认 → force=True）。"""
+                state["del_meta"] = meta
+                state["del_force"] = True
+                del_runs.set_text(f"该数据集仍被 {n_runs if n_runs is not None else '若干'} 个 Run 引用"
+                                  "——移入回收区后这些运行将无法回溯真源。仍然删除？")
+                del_runs.set_visibility(True)
+                del_ok.set_text("仍然删除")
+                del_dialog.open()
 
             def open_tiling(meta: dict) -> None:
                 tl_title.set_text(f"切片 {meta['name']}")
@@ -4798,71 +4982,240 @@ document.addEventListener('scroll', function(e){
                 tiling_dialog.open()
 
             def open_export(meta: dict) -> None:
-                exp_title.set_text(f"导出标注 {meta['name']}")
+                """导出标注对话框：按本集任务类型置灰格式，三维参数每次打开复位。"""
+                state["exp_task"] = meta["task_type"]
+                exp_title.set_text(f"导出标注 · {meta['name']}")
                 fmt_state["v"] = "yolo"
+                e_scope.set_value("all")
+                e_img.set_value("link")
+                e_zip.set_value(False)
+                e_split_note.set_visibility(False)
+                exp_note.set_visibility(False)
                 _refresh_fmt_btns()
                 export_dialog.open()
 
             def open_delete(meta: dict) -> None:
-                del_title.set_text(f"删除数据集 {meta['name']}")
-                del_note.set_text("托管数据集：删除平台侧数据（含派生结构），标注源目录永不触碰。"
-                                  if meta["form"] == "managed" else "仅移除平台注册信息，外部目录不做任何改动。")
                 state["del_meta"] = meta
+                state["del_force"] = False
+                del_title.set_text(f"删除数据集 {meta['name']}")
+                if meta["form"] == "managed":
+                    del_note.set_text(
+                        f"整个目录移入回收区 {Path(ds.get_datasets_root())}/.trash/"
+                        f"{meta['name']}-<时间戳>/，不物理删除；回收区不自动清理。")
+                else:
+                    del_note.set_text("仅移除平台注册信息，外部目录不做任何改动。")
+                del_runs.set_visibility(False)
+                del_ok.set_text("删除")
                 del_dialog.open()
 
             with detail:
                 ui.label("点击表格行查看详情").classes("text-xs opacity-40")
 
-            # ── 删除确认（危险操作二次确认 + 范围说明）
+            # ── 删除确认（危险操作二次确认 + 回收区落点复述 + Run 引用确认门）
             with ui.dialog() as del_dialog, ui.card().classes("w-96 gap-2"):
                 del_title = ui.label("").classes("font-bold")
                 del_note = ui.label("").classes("text-xs opacity-60")
+                del_runs = ui.label("").classes("text-xs text-amber-500").set_visibility(False)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=del_dialog.close).props("flat")
-                    ui.button("删除", color="negative", icon="delete",
-                              on_click=lambda: do_delete(state["del_meta"])).props("unelevated")
+                    del_ok = ui.button("删除", color="negative", icon="delete",
+                                       on_click=lambda: do_delete(state["del_meta"])).props("unelevated")
 
-            # ── 导入（带实时进度）
-            with ui.dialog() as import_dialog, ui.card().classes("w-[28rem] gap-2"):
-                ui.label("导入 X-AnyLabeling 标注目录").classes("font-bold")
-                i_name = _labeled("数据集名", ui.input, label_w="w-20")
-                i_task = _labeled("任务类型", ui.select, label_w="w-20",
-                                  options={k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
-                                  value="detect")
-                i_src = _path_picker_field("标注目录", placeholder="/home/you/annotations")
-                with ui.row().classes("w-full"):
-                    i_ratio = _labeled("train 比例", ui.number, w="flex-1", label_w="w-20",
-                                       value=0.8, min=0.05, max=0.95, step=0.05)
-                    i_seed = _labeled("随机种子", ui.number, w="flex-1", label_w="w-20",
-                                      value=42, precision=0)
-                i_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
-                i_op: dict = {"key": None}  # 进行中操作键：进度真源在登记表（页面级，关页签不丢）
-                prog_label = ui.label("").classes("text-xs opacity-70").set_visibility(False)
-                prog_bar = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
+            # ── 新建数据集（两栏单屏：左来源、右类别表；出生只「校验 + 画像」，无切分）
+            with ui.dialog() as create_dialog, ui.card().classes("w-[58rem] max-w-[95vw] gap-2"):
+                with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                    ui.icon("add_card", size="20px").classes("opacity-60")
+                    ui.label("新建托管数据集").classes("font-bold")
+                    ui.space()
+                    ui.label("类别表必填 · 行序即类别号 · 创建即完成校验与画像").classes(
+                        "text-[11px] opacity-50")
+                with ui.row().classes("w-full items-start gap-4 no-wrap"):
+                    # 左栏：名称 / 任务类型 / 图片来源三态 / 入图方式（默认拷贝）
+                    with ui.column().classes("w-[23rem] shrink-0 gap-0"):
+                        c_name = _labeled("数据集名", ui.input, label_w="w-20",
+                                          placeholder="字母、数字、- 、_")
+                        c_task = _labeled("任务类型", ui.select, label_w="w-20",
+                                          options={k: f"{v}（{k}）" for k, v in TASK_TYPE_ZH.items()},
+                                          value="detect")
+                        ui.label("图片来源").classes("text-xs opacity-70 q-mt-sm")
+                        c_mode = ui.radio(SOURCE_MODE_ZH, value="empty").props("dense")
+                        c_hint = ui.label("").classes("text-[11px] opacity-50 pl-1")
+                        with ui.column().classes("w-full gap-0") as c_src_box:
+                            c_src = _path_picker_field("来源目录", placeholder="/home/you/annotations")
+                        with ui.column().classes("w-full gap-0") as c_tf_box:
+                            ui.label("入图方式").classes("text-xs opacity-70 q-mt-sm")
+                            c_transfer = ui.radio(TRANSFER_ZH, value="copy").props("dense")
+                            ui.label("移动＝真搬走来源文件，不留反向链接；来源目录永不被改写回").classes(
+                                "text-[11px] opacity-50")
+                    # 右栏：类别表（已标目录先探测、经用户确认才落表）
+                    with ui.column().classes("flex-1 min-w-0 gap-1"):
+                        with ui.row().classes("w-full items-center gap-2 no-wrap"):
+                            ui.label("类别表").classes("text-xs opacity-70")
+                            ui.space()
+                            ui.label("行序即类别号，增删行即重排").classes("text-[11px] opacity-40")
+                        c_cls_box = ui.column().classes("w-full gap-1 max-h-[38vh] overflow-y-auto")
+                        with ui.row().classes("w-full items-center gap-1"):
+                            ui.button(icon="add", on_click=lambda: _add_cls()).props(
+                                "flat dense round size=sm")
+                            c_probe_btn = ui.button("探测类别", icon="query_stats",
+                                                   on_click=lambda: do_probe()).props("outline dense size=sm")
+                            c_probe_btn.tooltip("读已标目录的标注汇总类别，确认后才会写进类别表（来源目录只读）")
+                        c_probe = ui.column().classes("w-full gap-1")
+                        c_block = ui.column().classes("w-full gap-1").set_visibility(False)
+                c_op: dict = {"key": None}  # 进行中操作键：进度真源在登记表（页面级，关页签不丢）
+                _op_progress_row(c_op)
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=create_dialog.close).props("flat")
+                    c_ok = ui.button("创建", icon="add_card",
+                                     on_click=lambda: do_create()).props("unelevated")
 
-                def _prog_tick() -> None:
-                    o = ops.get(i_op["key"]) if i_op["key"] else None
-                    if o and o["status"] == "running":
-                        prog_label.set_visibility(True)
-                        prog_bar.set_visibility(True)
-                        total = max(o.get("total") or 1, 1)
-                        prog_label.set_text(f"{o.get('phase', '')} {o.get('cur', 0)}/{o.get('total', 0)}")
-                        prog_bar.set_value(min(o.get("cur", 0) / total, 1.0))
-                    else:
-                        prog_label.set_visibility(False)
-                        prog_bar.set_visibility(False)
+                c_cls: list[dict] = []  # 类别表行：{"row", "idx", "inp"}——列表顺序即类别号
+                probe: dict = {}  # 最近一次探测结果（未经确认不落表）
 
-                ui.timer(0.3, _prog_tick)
+                def _reindex_cls() -> None:
+                    for i, r in enumerate(c_cls):
+                        r["idx"].set_text(str(i))
 
-                # 数据集名自动建议：未手改时取标注目录末段名
-                i_name_st = {"touched": False, "silent": False}
+                def _add_cls(value: str = "") -> None:
+                    with c_cls_box:
+                        with ui.row().classes("w-full items-center gap-1 no-wrap") as row:
+                            idx = ui.label(str(len(c_cls))).classes(
+                                "w-6 text-right text-[11px] opacity-50 shrink-0")
+                            inp = ui.input(value=value).props("dense outlined").classes("flex-1 min-w-0")
+                            rm = ui.button(icon="remove_circle_outline",
+                                           on_click=lambda i=inp: _del_cls(i)).props(
+                                "flat dense round size=xs color=negative")
+                            with rm:
+                                ui.tooltip("删掉这一行（其后类别号自动前移）")
+                    c_cls.append({"row": row, "idx": idx, "inp": inp})
+                    _reindex_cls()
+
+                def _del_cls(inp) -> None:
+                    rec = next((r for r in c_cls if r["inp"] is inp), None)
+                    if rec is None:
+                        return
+                    c_cls.remove(rec)
+                    rec["row"].delete()
+                    _reindex_cls()
+
+                def _reset_cls(values: list[str] | None = None) -> None:
+                    for r in c_cls:
+                        r["row"].delete()
+                    c_cls.clear()
+                    for v in (values or [""]):
+                        _add_cls(v)
+
+                def _cls_values() -> list[str]:
+                    """表内已填类别（空白输入框不算类别）：顺序就是将要落成的 classes.txt 行序。"""
+                    return [(r["inp"].value or "").strip() for r in c_cls]
+
+                def _append_cls(labels: list[str]) -> int:
+                    """追加类别（同表已有的跳过、先占掉空行）：探测写入与表外类别补录共用一条路。"""
+                    have = set(_cls_values())
+                    blank = [r for r in c_cls if not (r["inp"].value or "").strip()]
+                    n = 0
+                    for lab in labels:
+                        if not lab or lab in have:
+                            continue
+                        if blank:
+                            blank.pop(0)["inp"].set_value(lab)
+                        else:
+                            _add_cls(lab)
+                        have.add(lab)
+                        n += 1
+                    _reindex_cls()
+                    return n
+
+                def _sync_mode() -> None:
+                    """三态门控：空集不要来源目录与入图方式，只有已标目录可探测类别。"""
+                    mode = c_mode.value or "empty"
+                    c_src_box.set_visibility(mode != "empty")
+                    c_tf_box.set_visibility(mode != "empty")
+                    c_probe_btn.set_enabled(mode == "labeled")
+                    c_hint.set_text(SOURCE_MODE_HINT[mode])
+
+                async def do_probe() -> None:
+                    """探测已标目录的类别：结果先进确认条，用户点头才落类别表。"""
+                    src = (c_src.value or "").strip()
+                    if not src:
+                        ui.notify("先选择已标 X-AnyLabeling 目录", type="warning")
+                        return
+                    c_probe_btn.props("loading")
+                    op = ops.begin(f"ds:probe:{src}", f"探测类别 · {Path(src).name}")
+                    c_op["key"] = op.key
+                    try:
+                        got = await _io(_probe_source_classes, src, c_task.value,
+                                        lambda cur, total: op.progress("探测类别", cur, total))
+                        op.finish()
+                    except Exception as exc:  # noqa: BLE001
+                        op.fail(str(exc))
+                        ui.notify(f"探测失败：{exc}", type="negative")
+                        return
+                    finally:
+                        c_probe_btn.props(remove="loading")
+                        c_op["key"] = None
+                    probe.clear()
+                    probe.update(got)
+                    labs = probe["labels"]
+                    counts = probe["counts"]
+                    c_probe.clear()
+                    with c_probe:
+                        ui.label(f"探测到 {len(labs)} 个类别 · {probe['images']} 张图——"
+                                 "确认后才会写进类别表").classes("text-xs opacity-70")
+                        with ui.row().classes("w-full gap-1 flex-wrap"):
+                            for lab in labs[:60]:
+                                ui.badge(f"{lab} ×{counts.get(lab, 0)}").props(
+                                    "outline").style("font-size:10px")
+                            if len(labs) > 60:
+                                ui.label(f"…共 {len(labs)} 个").classes("text-[11px] opacity-50")
+                        if not labs:
+                            ui.label("该目录里没有带 label 的标注形状——核对任务类型与目录；"
+                                     "纯图片目录请改选「图片目录」态").classes("text-xs text-amber-500")
+                        with ui.row().classes("w-full items-center gap-1"):
+                            pb = ui.button("写入类别表", icon="playlist_add_check",
+                                           on_click=lambda: _apply_probe()).props("unelevated dense size=sm")
+                            pb.tooltip("按上面的顺序追加进类别表（同名的跳过）；确认前不动任何文件")
+                            ui.button("放弃", on_click=c_probe.clear).props("flat dense size=sm")
+
+                def _apply_probe() -> None:
+                    n = _append_cls(list(probe.get("labels") or []))
+                    c_probe.clear()
+                    ui.notify(f"已写入 {n} 个探测类别（行序即类别号，仍可增删改）", type="info")
+
+                def _show_out_of_table(msg: str, offenders: list[str]) -> None:
+                    """表外类别阻断回执：后端挡下的类别原样列出——绝不静默丢弃。"""
+                    c_block.clear()
+                    with c_block:
+                        with ui.card().classes("w-full gap-1 q-pa-sm").style(
+                                "background:rgba(245,158,11,.10)"):
+                            ui.label("来源目录里有类别表之外的类别——已阻断创建，一个都没丢").classes(
+                                "text-xs font-semibold text-amber-500")
+                            ui.label(msg).classes("text-[11px] opacity-70 break-all")
+                            with ui.row().classes("w-full gap-1 flex-wrap"):
+                                for lab in offenders:
+                                    ui.badge(lab).props("color=amber outline").style("font-size:11px")
+                            ui.button("把这些类别加进类别表", icon="playlist_add",
+                                      on_click=lambda: _add_offenders(offenders)).props(
+                                "outline dense size=sm")
+                    c_block.set_visibility(True)
+
+                def _add_offenders(offenders: list[str]) -> None:
+                    if _append_cls(list(offenders)):
+                        c_block.clear()
+                        c_block.set_visibility(False)
+
+                c_mode.on_value_change(lambda _e: _sync_mode())
+                c_task.on_value_change(lambda _e: c_probe.clear())  # 任务类型变了，探测结果作废
+
+                # 数据集名自动建议：未手改时取来源目录末段名
+                c_name_st = {"touched": False, "silent": False}
 
                 def _on_name(_e) -> None:
-                    if not i_name_st["silent"]:
-                        i_name_st["touched"] = True
+                    if not c_name_st["silent"]:
+                        c_name_st["touched"] = True
 
                 def _on_src(e) -> None:
-                    if i_name_st["touched"] or i_name_st["silent"]:
+                    if c_name_st["touched"] or c_name_st["silent"]:
                         return
                     parts = [p for p in str(e.value or "").split("/") if p]
                     base = parts[-1] if parts else ""
@@ -4870,50 +5223,133 @@ document.addEventListener('scroll', function(e){
                     if base.lower() in ("images", "labels") and len(parts) >= 2:
                         base = parts[-2]
                     if base and base not in ("", ".", "~"):
-                        i_name_st["silent"] = True
-                        i_name.set_value(base)
-                        i_name_st["silent"] = False
+                        c_name_st["silent"] = True
+                        c_name.set_value(base)
+                        c_name_st["silent"] = False
 
-                i_name.on_value_change(_on_name)
-                i_src.on_value_change(_on_src)
+                c_name.on_value_change(_on_name)
+                c_src.on_value_change(_on_src)
 
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("取消", on_click=import_dialog.close).props("flat")
-                    i_ok = ui.button("导入", icon="upload", on_click=lambda: do_import()).props("unelevated")
-
-                async def do_import() -> None:
-                    if not (i_name.value or "").strip():
+                async def do_create() -> None:
+                    name = (c_name.value or "").strip()
+                    mode = c_mode.value or "empty"
+                    src = (c_src.value or "").strip()
+                    vals = _cls_values()
+                    if not name:
                         ui.notify("请填写数据集名", type="warning")
                         return
-                    if not (i_src.value or "").strip():
-                        ui.notify("请填写标注目录路径", type="warning")
+                    if mode != "empty" and not src:
+                        ui.notify("请填写来源目录", type="warning")
                         return
-                    i_ok.props("loading")
-                    name = i_name.value.strip()
-                    op = ops.begin(f"ds:{name}:import", f"导入 · {name}", scope=name)
-                    i_op["key"] = op.key
+                    if not vals:
+                        ui.notify("类别表必填：至少写一个类别", type="warning")
+                        return
+                    if len(set(vals)) != len(vals):
+                        ui.notify("类别表有重名——行序即类别号，重名会撞同一个号", type="warning")
+                        return
+                    c_block.set_visibility(False)
+                    c_ok.props("loading")
+                    op = ops.begin(f"ds:{name}:create", f"新建数据集 · {name}", scope=name)
+                    c_op["key"] = op.key
                     try:
-                        meta = await _io(ds.import_dataset, name, i_task.value, i_src.value,
-                                         i_ratio.value or 0.8, int(i_seed.value or 42), i_strat.value,
-                                         progress_cb=op.progress)
+                        meta = await _io(ds.create_dataset, name, c_task.value, vals, mode,
+                                         src or None, c_transfer.value or "copy", None, op.progress)
                         op.finish()
-                        import_dialog.close()
-                        lv = meta.get("last_validation") or {}
-                        ui.notify(f"导入成功：{lv.get('total_images', '?')} 图 "
-                                  f"{len(meta['classes'])} 类，问题 {len(lv.get('problems', []))} 个",
-                                  type="positive")
+                        create_dialog.close()
+                        vs = _validation_of(meta)
+                        n_prob = len(vs["problems"]) if isinstance(vs.get("problems"), list) else 0
+                        n_drop = _drop_count(vs)
+                        ui.notify(f"已创建 {name}：{vs.get('total_images', '?')} 图 {len(vals)} 类"
+                                  + (f" · 问题 {n_prob} 项" if n_prob else "")
+                                  + (f" · 丢弃 {n_drop} 条待确认" if n_drop else "")
+                                  + " · 账目见校验·画像", type="positive")
                         state["selected"] = meta["name"]
+                        state["ws_open"] = "validation"  # 出生账目直接摊开在校验·画像工作区
+                    except ds.DatasetError as exc:
+                        op.fail(exc.message)
+                        offenders = _payload_labels(_error_payload(exc))
+                        if offenders:
+                            _show_out_of_table(exc.message, offenders)
+                            return
+                        ui.notify(f"创建失败：{exc.message}", type="negative")
                     except Exception as exc:  # noqa: BLE001
                         op.fail(str(exc))
-                        ui.notify(f"导入失败：{exc}", type="negative")
+                        ui.notify(f"创建失败：{exc}", type="negative")
                     finally:
-                        i_ok.props(remove="loading")
+                        c_ok.props(remove="loading")
+                        c_op["key"] = None
                     refresh()
                     row = next((r for r in table.rows if r["name"] == state["selected"]), None)
                     if row is not None:
                         select(row)  # 选中并滚动到新数据集详情
                     else:
                         render_detail()
+
+            def open_create() -> None:
+                """新建对话框：每次打开都复位表单（一次创建一集，不留上次的残值）。"""
+                c_name.set_value("")
+                c_src.set_value("")
+                c_mode.set_value("empty")
+                c_transfer.set_value("copy")
+                c_task.set_value("detect")
+                probe.clear()
+                c_probe.clear()
+                c_block.clear()
+                c_block.set_visibility(False)
+                c_name_st["touched"] = False
+                _reset_cls()
+                _sync_mode()
+                create_dialog.open()
+
+            state["open_create"] = open_create
+
+            # ── 加图（页头工具条入口；真源增补的后端在票 04，本票只立骨架）
+            with ui.dialog() as add_dialog, ui.card().classes("w-[26rem] gap-2"):
+                add_title = ui.label("加图").classes("font-bold")
+                ui.label("向真源目录 source/ 增补图片与标注：来源目录 × 入图方式；"
+                         "同名冲突阻断不自动改名，携带表外类别时阻断并可一键追加。").classes("text-xs opacity-60")
+                a_src = _path_picker_field("来源目录", placeholder="/home/you/new_images")
+                ui.label("入图方式").classes("text-xs opacity-70 q-mt-sm")
+                a_transfer = ui.radio(TRANSFER_ZH, value="copy").props("dense")
+                a_note = ui.label("").classes("text-xs text-amber-500").set_visibility(False)
+                with ui.row().classes("w-full justify-end"):
+                    ui.button("取消", on_click=add_dialog.close).props("flat")
+                    ui.button("提交", icon="upload", on_click=lambda: do_add_images()).props("unelevated")
+
+                def do_add_images() -> None:
+                    """未接线：加图的服务端在票 04——此刻不做任何真源改动，也不报成功。"""
+                    a_note.set_text("「加图」尚未接线（后端在票 04）：本次没有改动真源目录。"
+                                    f"已登记的参数＝{(a_src.value or '').strip() or '（未填目录）'} · "
+                                    f"{TRANSFER_ZH.get(a_transfer.value, '拷贝')}。"
+                                    "眼下请把图片放进真源目录 source/，详情页打开即自动纳入账目。")
+                    a_note.set_visibility(True)
+                    ui.notify("「加图」还没接后端（票 04）：未对真源目录做任何改动", type="warning")
+
+            def open_add_images(meta: dict) -> None:
+                state["add_meta"] = meta
+                add_title.set_text(f"加图 · {meta['name']}")
+                a_src.set_value("")
+                a_transfer.set_value("copy")
+                a_note.set_visibility(False)
+                add_dialog.open()
+
+            def open_source_in_xal(meta: dict) -> None:
+                """在 X-AnyLabeling 中打开整个真源目录：首图触发 XAL 的目录级导入（单实例协议）。"""
+                src = _source_dir_of(meta)
+                if src is None:
+                    ui.notify("外部数据集没有真源目录（平台只读）", type="warning")
+                    return
+                if not src.is_dir():
+                    ui.notify(f"真源目录不存在：{src}", type="warning")
+                    return
+                from ..datasets.validate import list_images  # 按需引域内工具，与本页同风格
+
+                imgs = list_images(src)
+                if not imgs:
+                    ui.notify(f"{src} 里还没有图片——先用「新建数据集」带图入集，或用「加图」补入",
+                              type="info")
+                    return
+                _open_in_xal(str(imgs[0]))
 
             with ui.dialog() as external_dialog, ui.card().classes("w-96 gap-2"):
                 ui.label("注册外部标准 YOLO 目录（只读）").classes("font-bold")
@@ -4939,92 +5375,71 @@ document.addEventListener('scroll', function(e){
                             ui.notify(f"注册失败：{exc}", type="negative")
                     refresh()
 
-            # ── 重切分（打开时快照标题与现值，修复旧标题残留 bug）
-            with ui.dialog() as resplit_dialog, ui.card().classes("w-96 gap-2"):
-                r_title = ui.label("重新切分").classes("font-bold")
-                ui.label("生成新清单版本并切换活跃；各轮 val 恒定可比。").classes("text-xs opacity-60")
-                r_ratio = _labeled("train 比例", ui.number, label_w="w-20",
-                                   value=0.8, min=0.05, max=0.95, step=0.05)
-                r_seed = _labeled("随机种子", ui.number, label_w="w-20", value=42, precision=0)
-                r_strat = ui.checkbox("按类别分层").tooltip("类别不均时减少随机差；改动触发重切")
-                # M9 03「只训已审」：数据集级开关的落点（默认关；重切生成只含通过图的新清单）
-                r_appr = ui.checkbox("只训已审").tooltip(
-                    "仅「通过」图入清单（负样本保留；待审/驳回/跳过不入）；旧清单保留可切回")
-                with ui.row().classes("w-full justify-end"):
-                    ui.button("取消", on_click=resplit_dialog.close).props("flat")
-                    r_ok = ui.button("重切", icon="call_split", on_click=lambda: do_resplit2()).props("unelevated")
+            # ── 「重新切分」对话框随票 03 退役：切分是训练环节的参数（票 05 的切分选择器），
+            #    数据集页不再有清单版本与活跃指针（spec §2.1：版本列表 / 重切 / 切回 / 只训已审
+            #    数据集级开关全部移除；「只训已审」降为新建切分参数）。
 
-                async def do_resplit2() -> None:
-                    name = state["selected"]
-                    if not name:
-                        return
-                    op = ops.begin(f"ds:{name}:resplit", f"重切分 · {name}", scope=name)
-                    with _busy(r_ok, "重切分中…"):
-                        try:
-                            m = await _io(ds.resplit_dataset, name, r_ratio.value or 0.8,
-                                          int(r_seed.value or 42), r_strat.value, r_appr.value)
-                            op.finish()
-                            resplit_dialog.close()
-                            extra = f" · 只训已审（滤除未通过 {m.get('approved_dropped', 0)} 图）" \
-                                if m.get("approved_only") else ""
-                            ui.notify(f"新清单 {m['uid']}：train {len(m['train'])} / val {len(m['val'])}{extra}",
-                                      type="positive")
-                        except Exception as exc:  # noqa: BLE001
-                            op.fail(str(exc))
-                            ui.notify(f"重切失败：{exc}", type="negative")
-                    refresh()
-                    render_detail()
-
-            # ── 导出标注（格式选择器；当前仅 YOLO 有实现 = 全量重转换派生结构，训练即用）
-            with ui.dialog() as export_dialog, ui.card().classes("w-96 gap-2"):
+            # ── 导出标注（格式 × 范围 × 图片三维；写出在票 08，本票只立骨架，提交即告知未接线）
+            with ui.dialog() as export_dialog, ui.card().classes("w-[30rem] gap-2"):
                 exp_title = ui.label("导出标注").classes("font-bold")
-                ui.label("把真源标注导出为所选格式；YOLO 即派生结构，训练直接使用。").classes("text-xs opacity-60")
-                export_formats = {"yolo": "YOLO", "coco": "COCO JSON", "voc": "Pascal VOC XML"}
-                fmt_state = {"v": "yolo"}
+                ui.label("把真源标注投影成自包含目录（交付/移机用），落 <数据集根>/<名>/exports/"
+                         "<时间戳>-<格式>[-<切分>]/；与训练用的格式池无关，不读也不写它。").classes("text-xs opacity-60")
+                fmt_state: dict = {"v": "yolo"}
                 fmt_btns: dict[str, ui.button] = {}
 
                 def _refresh_fmt_btns() -> None:
+                    """格式 × 任务类型置灰 + 选中态（VOC 仅 detect）。"""
+                    task = state.get("exp_task") or "detect"
                     for k, b in fmt_btns.items():
+                        support = EXPORT_FORMATS[k][1]
+                        b.set_enabled(support is None or task in support)
                         b.props("unelevated" if k == fmt_state["v"] else "outline")
+
+                def _set_fmt(k: str) -> None:
+                    fmt_state["v"] = k
+                    exp_note.set_visibility(False)
+                    _refresh_fmt_btns()
 
                 with ui.row().classes("w-full items-center gap-2 no-wrap"):
                     ui.label("数据格式").classes("w-20 text-xs text-right opacity-70 shrink-0")
                     with ui.row().classes("flex-1 min-w-0 gap-1"):
-                        for k, label in export_formats.items():
-                            fmt_btns[k] = ui.button(
-                                label, on_click=lambda k=k: _set_fmt(k)).props("dense")
-                # COCO/VOC 尚未实现：置灰不可选；服务层 format 守卫兜底
-                for k, b in fmt_btns.items():
-                    if k != "yolo":
-                        b.props("disable").tooltip("尚未支持，后续接入")
-                _refresh_fmt_btns()
+                        for k, (label, support) in EXPORT_FORMATS.items():
+                            b = ui.button(label, on_click=lambda k=k: _set_fmt(k)).props("dense size=sm")
+                            if support is not None:
+                                b.tooltip("仅 " + "、".join(
+                                    TASK_TYPE_ZH.get(t, t) for t in sorted(support)) + " 任务可用")
+                            fmt_btns[k] = b
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label("导出范围").classes("w-20 text-xs text-right opacity-70 shrink-0")
+                    e_scope = ui.radio(EXPORT_SCOPES, value="all").props("dense")
+                e_split_note = ui.label("按切分导出要挑切分 uid——切分版本在票 05 落地后列出，"
+                                        "此刻只有全集可填").classes("text-xs text-amber-500").set_visibility(False)
+                with ui.row().classes("w-full items-center gap-2"):
+                    ui.label("图片").classes("w-20 text-xs text-right opacity-70 shrink-0")
+                    e_img = ui.radio(EXPORT_IMAGES, value="link").props("dense")
+                e_zip = ui.checkbox("顺带打包 zip").tooltip("自包含目录之外再落一份 zip，便于拷走")
 
-                def _set_fmt(k: str) -> None:
-                    fmt_state["v"] = k
-                    _refresh_fmt_btns()
+                def _sync_scope() -> None:
+                    e_split_note.set_visibility(e_scope.value == "split")
+                    exp_note.set_visibility(False)
 
+                e_scope.on_value_change(lambda _e: _sync_scope())
+                exp_note = ui.label("").classes("text-xs text-amber-500").set_visibility(False)
                 with ui.row().classes("w-full justify-end"):
                     ui.button("取消", on_click=export_dialog.close).props("flat")
-                    x_ok = ui.button("导出", icon="file_download",
-                                     on_click=lambda: do_export()).props("unelevated")
+                    ui.button("导出", icon="file_download",
+                              on_click=lambda: do_export()).props("unelevated")
 
-                async def do_export() -> None:
-                    name = state["selected"]
-                    if not name:
-                        return
-                    op = ops.begin(f"ds:{name}:export", f"导出标注 · {name}", scope=name)
-                    with _busy(x_ok, "导出中…"):
-                        try:
-                            r = await _io(ds.relabel_refresh, name, True, None, op.progress)
-                            op.finish()
-                            export_dialog.close()
-                            n_drop = len(r.get("drops") or [])
-                            ui.notify(f"已导出 {r['refreshed']} 张图的标注（YOLO）"
-                                      + (f"（丢弃 {n_drop} 条，明细见重新校验）" if n_drop else ""),
-                                      type="positive")
-                        except Exception as exc:  # noqa: BLE001
-                            op.fail(str(exc))
-                            ui.notify(f"导出失败：{exc}", type="negative")
+                def do_export() -> None:
+                    """未接线：导出的写出在票 08——不伪造成功，也不静默改写派生结构。"""
+                    exp_note.set_text(
+                        "「导出标注」尚未接线（写出在票 08）：本次没有写出任何文件。已登记的参数＝"
+                        f"{EXPORT_FORMATS[fmt_state['v']][0]} · "
+                        f"{EXPORT_SCOPES.get(e_scope.value, '全集')} · "
+                        f"{EXPORT_IMAGES.get(e_img.value, '符号链接')}"
+                        + (" · zip" if e_zip.value else ""))
+                    exp_note.set_visibility(True)
+                    ui.notify("「导出标注」还没接后端（票 08）：未写出导出目录", type="warning")
 
             # ── 切片（Tiling）：dry-run 预览确认门 + 进度；参数变更即失效须重新预览
             with ui.dialog() as tiling_dialog, ui.card().classes("w-[30rem] gap-2"):
@@ -5051,22 +5466,7 @@ document.addEventListener('scroll', function(e){
                     "随机单位是源图：同源小图永不跨侧（防 val 泄漏）；分层按源图主类")
                 tl_prev = ui.column().classes("w-full gap-0.5").set_visibility(False)
                 tl_op: dict = {"key": None}  # 进行中操作键：进度真源在登记表（页面级，关页签不丢）
-                tl_prog_label = ui.label("").classes("text-xs opacity-70").set_visibility(False)
-                tl_prog_bar = ui.linear_progress(0, show_value=False).props("size=8px").set_visibility(False)
-
-                def _tl_prog_tick() -> None:
-                    o = ops.get(tl_op["key"]) if tl_op["key"] else None
-                    if o and o["status"] == "running":
-                        tl_prog_label.set_visibility(True)
-                        tl_prog_bar.set_visibility(True)
-                        total = max(o.get("total") or 1, 1)
-                        tl_prog_label.set_text(f"{o.get('phase', '')} {o.get('cur', 0)}/{o.get('total', 0)}")
-                        tl_prog_bar.set_value(min(o.get("cur", 0) / total, 1.0))
-                    else:
-                        tl_prog_label.set_visibility(False)
-                        tl_prog_bar.set_visibility(False)
-
-                ui.timer(0.3, _tl_prog_tick)
+                _op_progress_row(tl_op)
 
                 tl_name_st = {"touched": False, "silent": False}
 
@@ -5164,14 +5564,13 @@ document.addEventListener('scroll', function(e){
                 _update_rows(table, rows_data())
 
             # 校验按钮引用（do_validate 忙碌态用；render 后指向最新按钮实例不可行，改为全局禁用提示）
-            state["open_import"] = import_dialog.open
             state["open_external"] = external_dialog.open
             ui.timer(0.3, _audit_tick)  # 体检进度条（单实例 timer，render_detail 重建元素也不叠 timer）
             _op_region_timer(state)
             refresh()
 
         _page_frame("数据集", "数据集", actions, body,
-                    subtitle="导入 · 校验 · 审查 · 切分")
+                    subtitle="真源 · 类别表 · 校验画像 · 审查体检")
 
     # ================================================================ 结果页
     @ui.page("/results")
@@ -6310,9 +6709,9 @@ document.addEventListener('scroll', function(e){
                     c_name = _labeled("任务名", ui.input, label_w="w-16",
                                       value=f"调参-{datetime.now():%m%d-%H%M}")
                     managed = {d["name"]: d["name"] for d in ds.list_datasets()
-                               if d["form"] == "managed" and d.get("active_manifest")}
+                               if d["form"] == "managed"}
                     c_ds = _labeled("数据集", ui.select, label_w="w-16",
-                                    options=managed or {"": "（暂无托管数据集，请先到数据集页导入）"},
+                                    options=managed or {"": "（暂无托管数据集，请先到数据集页新建）"},
                                     with_input=True)
                     c_model = _labeled("预训练权重", ui.input, label_w="w-16", value="yolo11n")
                     with c_model:

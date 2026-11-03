@@ -11,6 +11,8 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import build_dataset
+
 from visiontrainer.charts.render import render_run_charts
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
@@ -20,7 +22,7 @@ STUB = str(Path(__file__).parent / "stub_trainer.py")
 
 @pytest.fixture()
 def two_done_tasks(tmp_path: Path, datasets_root, detect_source, monkeypatch):
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}

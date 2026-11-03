@@ -14,7 +14,7 @@ from visiontrainer import progress as ops
 from visiontrainer.api.schemas import OperationUpdatedEvent
 from visiontrainer.datasets import service as svc
 
-from conftest import make_annotation, make_image, rect
+from conftest import build_dataset, make_annotation, make_image, rect
 
 
 @pytest.fixture(autouse=True)
@@ -128,7 +128,7 @@ def managed_dataset(datasets_root: Path, tmp_path: Path) -> str:
         make_annotation(src, f"person{i}", [rect("person", 20, 30, 200, 220)])
     make_image(src, "negative.png")
     make_annotation(src, "negative", [])
-    svc.import_dataset("cb-ds", "detect", str(src))
+    build_dataset("cb-ds", "detect", str(src))
     return "cb-ds"
 
 

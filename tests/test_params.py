@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import build_dataset
+
 from visiontrainer.training.params import (
     FIRST_CLASS,
     NON_TRAIN_ARGS,
@@ -111,7 +113,7 @@ def api_client(tmp_path, datasets_root, detect_source, monkeypatch):
     from visiontrainer.datasets import service as svc
     from visiontrainer.main import create_app
 
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {
         "training": {
             "python": sys.executable,

@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
 from visiontrainer.training.snapshot import build_snapshot, load_snapshot
@@ -20,7 +22,7 @@ STUB = str(Path(__file__).parent / "stub_trainer.py")
 
 @pytest.fixture()
 def snap_client(tmp_path: Path, datasets_root, detect_source):
-    svc.import_dataset("snap", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("snap", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'snap.db'}",
@@ -66,9 +68,12 @@ def test_snapshot_frozen_at_launch_and_survives_dataset_change(snap_client, data
     # 快照文件随产物归档（平台重启仍可查）
     assert (Path(run["run_dir"]) / "run_manifest.json").is_file()
 
-    # 数据集变动：重切 —— 旧 Run 快照必须原样
+    # 数据集变动：排除一张图 → 清单版本前移，旧 Run 快照必须原样（冻结语义）
     old_train_list, old_classes_sha = list(sm["train"]), snap["classes"]["sha256"]
-    svc.resplit_dataset("snap", 0.5, 7, False)
+    meta_now = svc.get_dataset("snap")
+    man = json.loads((datasets_root / "snap" / "derived" / meta_now["active_manifest"]
+                      / "split_manifest.json").read_text(encoding="utf-8"))
+    svc.exclude_files("snap", [Path(man["train"][0]).name])
     run2 = c.get(f"/api/v1/runs/{uid}").json()
     assert run2["snapshot"]["split_manifest"]["train"] == old_train_list
     assert run2["snapshot"]["classes"]["sha256"] == old_classes_sha

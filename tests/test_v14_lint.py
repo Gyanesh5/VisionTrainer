@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import make_annotation
+from conftest import build_dataset, make_annotation
 from PIL import Image
 
 from visiontrainer.datasets import service as svc
@@ -76,12 +76,17 @@ def test_stem_conflict_is_red(tmp_path):
 
 
 def test_stem_conflict_blocks_derivation(tmp_path, tmp_db, datasets_root: Path):
+    """同 split 内撞词干才阻断派生（派生按 labels/<split>/ 各自平铺）。
+
+    校验侧的 stem_conflict 红灯按**全局词干**判——票 07 的格式池是全数据集平铺，
+    那时跨 split 同名也会撞；两套口径各自对自家布局成立。
+    """
     src = tmp_path / "src"
     _image(src / "a.png", "PNG")
     _image(src / "a.jpg", "JPEG")
     make_annotation(src, "a", [CAR])
     with pytest.raises(svc.DatasetError) as excinfo:
-        svc.import_dataset("clash", "detect", str(src))
+        build_dataset("clash", "detect", str(src), ratio=1.0, seed=42)
     assert excinfo.value.code == "state_conflict"
     assert "覆盖" in excinfo.value.message
 

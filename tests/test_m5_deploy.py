@@ -10,6 +10,8 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
 
@@ -21,7 +23,7 @@ STUB_EXPORT = str(Path(__file__).parent / "stub_export.py")
 def deploy_client(tmp_path: Path, datasets_root, detect_source):
     from visiontrainer.datasets import service as svc
 
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "export_entry": STUB_EXPORT,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
@@ -94,7 +96,7 @@ def test_lru_hint_after_six(tmp_path, datasets_root, detect_source):
     from visiontrainer.db.models import Deployment, Run
     from visiontrainer.training import service as tsvc
 
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}

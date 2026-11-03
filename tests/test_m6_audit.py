@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.audit import compute_audit, fingerprint_of
 from visiontrainer.datasets.service import DatasetError
@@ -130,7 +132,7 @@ def test_undecodable_skipped_not_crash(tmp_path):
 # ---------------------------------------------------------------- 服务级：缓存 + 排除处置
 
 def test_audit_cache_roundtrip_and_invalidation(tmp_path, datasets_root, tmp_db, detect_source):
-    meta = svc.import_dataset("cachetest", "detect", str(detect_source), ratio=0.8, seed=42)
+    meta = build_dataset("cachetest", "detect", str(detect_source), ratio=0.8, seed=42)
     # 回归（2026-09-21 线上报错）：UI「跑体检」按 progress= 关键字传回调——锁死公开参数名
     r0 = svc.run_quality_audit("cachetest", progress=lambda cur, total: None)
     assert r0["from_cache"] is False
@@ -153,7 +155,7 @@ def test_audit_cache_roundtrip_and_invalidation(tmp_path, datasets_root, tmp_db,
 
 def test_exclude_files_stable_assignment_and_cascade(tmp_path, datasets_root, tmp_db, detect_source):
     name = "exctest"
-    meta = svc.import_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
+    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
     old_uid = meta["active_manifest"]
     old_manifest = json.loads((datasets_root / name / "derived" / old_uid / "split_manifest.json")
                               .read_text(encoding="utf-8"))
@@ -173,17 +175,14 @@ def test_exclude_files_stable_assignment_and_cascade(tmp_path, datasets_root, tm
     assert new_stats["manifest_uid"] == m["uid"]
     assert new_stats["summary"]["images"] == old_stats["summary"]["images"] - 1
     assert all(r["image"] != victim for r in new_stats["per_image"])
-    # meta 记录排除日志
+    # meta 记录排除日志（excluded.json：文件名键，读时组合视图给 {file, at, reason}）
     meta2 = svc.get_dataset(name)
-    assert [e["file"] for e in meta2["excluded"]] == [victim]
-    # 重切以排除后文件集为基线（victim 不回归）
-    m3 = svc.resplit_dataset(name, 0.8, 42, False)
-    assert victim not in m3["files"]
+    assert [e["file"] for e in meta2["excluded"]] == [Path(victim).name]
 
 
 def test_exclude_refuses_empty_split(tmp_path, datasets_root, tmp_db, detect_source):
     name = "edgeexc"
-    meta = svc.import_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
+    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
     manifest = json.loads((datasets_root / name / "derived" / meta["active_manifest"] / "split_manifest.json")
                           .read_text(encoding="utf-8"))
     with pytest.raises(DatasetError) as ei:
@@ -309,7 +308,7 @@ def test_thumb_sign_and_url():
 def test_exclude_files_batch_multi(tmp_path, datasets_root, tmp_db, detect_source):
     """批量排除（网格多选的服务底座）：一次多文件、归属稳定、逐个入排除日志。"""
     name = "batchexc"
-    meta = svc.import_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
+    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
     ds_dir = datasets_root / name
     m1 = json.loads((ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
                     .read_text(encoding="utf-8"))
@@ -319,7 +318,7 @@ def test_exclude_files_batch_multi(tmp_path, datasets_root, tmp_db, detect_sourc
         assert v not in m2["train"] and v not in m2["val"]
     assert m2["val"] == m1["val"]  # 未涉及文件归属不变
     meta2 = svc.get_dataset(name)
-    assert {e["file"] for e in meta2["excluded"]} == set(victims)
+    assert {e["file"] for e in meta2["excluded"]} == {Path(v).name for v in victims}
 
 
 def test_restore_files_roundtrip(tmp_path, datasets_root, tmp_db, detect_source):
@@ -327,7 +326,7 @@ def test_restore_files_roundtrip(tmp_path, datasets_root, tmp_db, detect_source)
     from visiontrainer.datasets.service import DatasetError as DE
 
     name = "rstexc"
-    meta = svc.import_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
+    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
     old_uid = meta["active_manifest"]
     old_manifest = json.loads((datasets_root / name / "derived" / old_uid / "split_manifest.json")
                               .read_text(encoding="utf-8"))
@@ -339,7 +338,7 @@ def test_restore_files_roundtrip(tmp_path, datasets_root, tmp_db, detect_source)
     m2 = svc.restore_files(name, [victims[1]])
     assert victims[1] in m2["val"] and victims[1] not in m2["train"]
     assert victims[0] not in {f["image"] for f in m2["files"]}
-    assert [e["file"] for e in svc.get_dataset(name)["excluded"]] == [victims[0]]
+    assert [e["file"] for e in svc.get_dataset(name)["excluded"]] == [Path(victims[0]).name]
     # 恢复剩余 → 文件集回到原版，uid 复现原版本号，日志清空，画像回原数
     m3 = svc.restore_files(name, [victims[0]])
     assert {f["image"] for f in m3["files"]} == {f["image"] for f in old_manifest["files"]}
@@ -355,35 +354,3 @@ def test_restore_files_roundtrip(tmp_path, datasets_root, tmp_db, detect_source)
     with pytest.raises(DE) as ei2:
         svc.restore_files(name, ["/never/excluded.png"])
     assert ei2.value.code == "invalid_args"
-
-
-def test_switch_manifest_roundtrip(tmp_path, datasets_root, tmp_db, detect_source):
-    """切回历史清单：active 指回旧 uid、排除文件回归、日志清出、画像全量重算。"""
-    from visiontrainer.datasets.service import DatasetError as DE
-
-    name = "swexc"
-    meta = svc.import_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
-    old_uid = meta["active_manifest"]
-    old_manifest = json.loads((datasets_root / name / "derived" / old_uid / "split_manifest.json")
-                              .read_text(encoding="utf-8"))
-    old_images = svc.dataset_stats(name)["summary"]["images"]
-    victim = old_manifest["train"][0]
-    m1 = svc.exclude_files(name, [victim], "测试排除")
-    assert m1["uid"] != old_uid
-
-    m2 = svc.switch_manifest(name, old_uid)
-    assert m2["uid"] == old_uid
-    assert victim in {f["image"] for f in m2["files"]}
-    assert svc.get_dataset(name)["active_manifest"] == old_uid
-    assert svc.get_dataset(name)["excluded"] == []
-    assert svc.dataset_stats(name)["summary"]["images"] == old_images
-    # 派生重建：victim 回到训练侧 symlink
-    vic_link = (datasets_root / name / "derived" / old_uid / "images" / "train" / Path(victim).name)
-    assert vic_link.is_symlink()
-    # 拒绝分支：切当前活跃 / 不存在的版本
-    with pytest.raises(DE) as ei:
-        svc.switch_manifest(name, old_uid)
-    assert ei.value.code == "state_conflict"
-    with pytest.raises(DE) as ei2:
-        svc.switch_manifest(name, "deadbeef")
-    assert ei2.value.code == "not_found"

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import build_dataset
+
 from visiontrainer.agent.mcp_server import build_mcp_server, mount_mcp
 from visiontrainer.db.models import init_db
 
@@ -98,7 +100,7 @@ def test_mcp_submit_approval_same_gate(tmp_path: Path, datasets_root, detect_sou
     from visiontrainer.main import create_app
 
     monkeypatch.setattr(notify, "desktop_notify", lambda *a, **k: None)
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
@@ -163,7 +165,7 @@ def test_mount_mcp_and_rest_unaffected(tmp_path: Path, datasets_root, detect_sou
     from visiontrainer.datasets import service as svc
     from visiontrainer.main import create_app
 
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",

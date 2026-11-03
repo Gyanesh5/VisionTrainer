@@ -50,13 +50,14 @@ def test_client_writes_stay_out_of_production_db(client: TestClient, datasets_ro
     before, after = snapshot(*prod_coords()), snapshot(*prod_coords())
     assert diff(before, after) == []                            # 写入前的基线本身干净
 
-    r = client.post("/api/v1/datasets/import", json={
-        "name": "iso", "task_type": "detect", "source_dir": str(detect_source), "ratio": 0.8, "seed": 42})
+    r = client.post("/api/v1/datasets", json={
+        "name": "iso", "task_type": "detect", "classes": ["car", "person"],
+        "source_mode": "labeled", "source_path": str(detect_source)})
     assert r.status_code == 200, r.text
 
     factory = get_session_factory()
     with factory() as s:
-        assert s.query(DatasetStat).count() == 1                # 画像写进了临时库
+        assert s.query(DatasetStat).count() == 1                # 出生画像写进了临时库
     assert (datasets_root / "iso" / "dataset.json").is_file()   # 数据集落在临时根
     assert diff(before, snapshot(*prod_coords())) == []         # 生产账本依旧零变动
 

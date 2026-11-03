@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
 from visiontrainer.training import manager as mgr
@@ -22,7 +24,7 @@ def gpu_client(tmp_path: Path, datasets_root, detect_source, monkeypatch):
     monkeypatch.setattr(mgr, "gpu_sample_once",
                         lambda idx: {"util": 55.0 + idx, "mem_used": 4096.0, "mem_total": 24564.0, "temp": 61.0})
     monkeypatch.setattr(mgr, "GPU_SAMPLE_INTERVAL", 0.3)
-    svc.import_dataset("gpu", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("gpu", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'gpu.db'}",
@@ -85,7 +87,7 @@ def test_compare_carries_gpu_curves(gpu_client):
 
 @pytest.fixture()
 def retry_client(tmp_path: Path, datasets_root, detect_source):
-    svc.import_dataset("rtry", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("rtry", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'r.db'}",

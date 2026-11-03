@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
 
@@ -17,7 +19,7 @@ STUB = str(Path(__file__).parent / "stub_trainer.py")
 
 @pytest.fixture()
 def cmp_client(tmp_path: Path, datasets_root, detect_source):
-    svc.import_dataset("cmp", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("cmp", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'cmp.db'}",

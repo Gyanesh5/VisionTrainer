@@ -30,6 +30,8 @@ from fastapi.testclient import TestClient
 
 from visiontrainer import config as config_module
 from visiontrainer.datasets import service as svc
+from visiontrainer.datasets.split import build_manifest, save_manifest
+from visiontrainer.datasets.stats import build_stats, save_stats
 from visiontrainer.main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -189,6 +191,39 @@ def make_annotation(dir_: Path, stem: str, shapes: list[dict], width=640, height
 
 def rect(label: str, x0=10, y0=10, x1=110, y1=90) -> dict:
     return {"label": label, "shape_type": "rectangle", "points": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]}
+
+
+def build_dataset(name: str, task_type: str, source_dir: Path | str, ratio: float = 0.8,
+                  seed: int = 42, stratify: bool = False,
+                  classes: list[str] | None = None, root: Path | None = None) -> dict:
+    """票 03 测试侧转换助手（替代已退役的 `svc.import_dataset`）：托管出生 + 首次切分。
+
+    票 03 唯一出生入口 `create_dataset` 只做校验 + 画像、**不切分**；训练/审计/审查侧
+    既有用例仍需真实切分清单，本助手 = labeled 态 `create_dataset` + `build_manifest` +
+    `_derive` + `save_manifest` + 画像重算，保留旧导入「进来即切分」语义（切分实体归票 05
+    后再由此处统一换轨）。classes 缺省时按 `create_dataset` 的阻断口径探测类别表
+    （全部 shape label + flags 真键），保证转换后的用例不会意外触发外类别 409。
+    """
+    src = Path(source_dir)
+    if classes is None:
+        classes = sorted(svc._probe_source_labels(src))
+    created = svc.create_dataset(name, task_type, classes, "labeled", str(src), root=root)
+    base = root or svc.get_datasets_root()
+    ds_dir = base / name
+    source = ds_dir / svc.SOURCE_SUBDIR
+    final_classes = created["classes"]
+    scan = svc.scan_entries(source, task_type, final_classes)
+    entries = [{"image": e["image"], "label": e["label"], "primary_label": e.get("primary_label")}
+               for e in scan["entries"]]
+    manifest = build_manifest(entries, ratio, seed, stratify)
+    save_manifest(ds_dir, manifest)
+    svc._derive(ds_dir, manifest, task_type, final_classes)
+    raw = svc._read_meta(ds_dir / "dataset.json")
+    raw["manifests"] = [svc._manifest_brief(manifest)]
+    raw["active_manifest"] = manifest["uid"]
+    svc._write_meta(ds_dir, raw)
+    save_stats(name, build_stats(scan["entries"], manifest, task_type, final_classes, name))
+    return svc.get_dataset(name, root)
 
 
 @pytest.fixture()

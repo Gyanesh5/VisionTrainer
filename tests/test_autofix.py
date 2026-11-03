@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import JPG_MAGIC, make_annotation, make_image, rect
+from conftest import JPG_MAGIC, build_dataset, make_annotation, make_image, rect
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.autofix import apply_autofix
@@ -203,7 +203,7 @@ def test_autofix_inherits_review_verdict(tmp_path):
 def test_service_auto_fix_end_to_end(datasets_root, tmp_path):
     src = _mk(tmp_path / "svcsrc")
     make_annotation(src, "a", [rect("car", -40, 10, 100, 100)])
-    svc.import_dataset("autofix-e2e", "detect", str(src))
+    build_dataset("autofix-e2e", "detect", str(src))
     assert svc.get_dataset("autofix-e2e")["last_validation"]["fixables"] == 1
 
     result = svc.auto_fix_dataset("autofix-e2e")
@@ -231,11 +231,10 @@ def test_service_auto_fix_rejects_external(datasets_root, tmp_path):
 def test_api_autofix_route(datasets_root, tmp_path, client):
     src = _mk(tmp_path / "apisrc")
     make_annotation(src, "a", [rect("car", -40, 10, 100, 100)])
-    r = client.post("/api/v1/datasets/import", json={
-        "name": "autofix-api", "task_type": "detect", "source_dir": str(src), "ratio": 0.8, "seed": 1})
-    assert r.status_code == 200
+    # 出生 + 首次切分（autofix 联动派生重转，需活跃清单；切分实体归票 05 前由助手兜住）
+    build_dataset("autofix-api", "detect", str(src), seed=1)
     r2 = client.post("/api/v1/datasets/autofix-api/autofix")
-    assert r2.status_code == 200
+    assert r2.status_code == 200, r2.text
     body = r2.json()
     assert body["fixed_files"] == 1 and body["validation"]["ok"] is True
     # 重复执行：无事可修，幂等

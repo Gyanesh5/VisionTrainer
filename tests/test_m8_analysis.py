@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
 from visiontrainer.training import error_analysis as ea
@@ -48,7 +50,7 @@ def m8_src(tmp_path: Path) -> Path:
 
 @pytest.fixture()
 def m8_client(tmp_path: Path, datasets_root, m8_src):
-    svc.import_dataset("m8", "detect", str(m8_src), ratio=0.5, seed=42)
+    build_dataset("m8", "detect", str(m8_src), ratio=0.5, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "analysis_entry": STUB_ANA, "test_infer_entry": STUB_TI,
                         "runs_dir": str(tmp_path / "runs"),

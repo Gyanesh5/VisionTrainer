@@ -206,11 +206,11 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
     problems: list[dict] = []
     warnings: list[dict] = []  # M9：极小框等警告（不算错误、不影响 ok）
     images = list_images(source_dir)
-    # 平铺目录派生的前置条件：同目录同词干的多个图源（a.jpg + a.png）会撞在同一个
-    # 派生标签名上——词干唯一才谈得上「一图一标签」，撞名是红灯（票 02 stem_conflict）
-    stem_groups: dict[tuple, list[Path]] = {}
+    # 派生标签按 <stem>.txt **全数据集平铺**落盘（spec §3.3「平铺布局要求 stem 唯一」），
+    # 所以撞名判据是全局词干而非同目录词干：a.jpg 与子目录里的 a.png 同样会互相覆盖（票 02 stem_conflict）
+    stem_groups: dict[str, list[Path]] = {}
     for p in images:
-        stem_groups.setdefault((p.parent, p.stem), []).append(p)
+        stem_groups.setdefault(p.stem, []).append(p)
     for i, image in enumerate(images):
         if progress is not None and (i % 20 == 0 or i == len(images) - 1):
             progress(i + 1, len(images))
@@ -227,7 +227,7 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
             "problems": [],
             "meta": None,
         }
-        group = stem_groups[(image.parent, image.stem)]
+        group = stem_groups[image.stem]
         if len(group) > 1:
             entry["problems"].append("stem_conflict")
             problems.append({"image": str(image), "code": "stem_conflict",

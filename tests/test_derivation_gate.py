@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import rect
+from conftest import build_dataset, rect
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.service import DatasetError, ensure_fresh_derivation
@@ -30,7 +30,7 @@ STUB_ANA = str(Path(__file__).parent / "stub_analysis.py")
 
 @pytest.fixture()
 def plate_dataset(datasets_root, detect_source):
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     return datasets_root / "plate"
 
 

@@ -1,6 +1,13 @@
-"""数据集域 REST 端点（05 号票 + docs/api.md）。"""
+"""数据集域 REST 端点（05 号票 + docs/api.md）。
+
+v1.4 票 03 硬切：`POST /datasets/import`、`POST /{name}/resplit`、`POST /{name}/sync-added`、
+`POST /{name}/switch-manifest` 已删除且不留兼容层；托管数据集唯一出生入口为
+`POST /datasets`（三态来源 create_dataset）。
+"""
 
 from __future__ import annotations
+
+from typing import Literal
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
@@ -14,30 +21,28 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 
 def _error_response(exc: DatasetError) -> JSONResponse:
-    status = {"invalid_args": 400, "not_found": 404, "state_conflict": 409}.get(exc.code, 500)
-    return JSONResponse(status_code=status, content={"error": {"code": exc.code, "message": exc.message, "detail": {}}})
+    """统一错误信封：detail 随错误携带（阻断类别清单、Run 引用计数等确认门数据）。"""
+    status = {"invalid_args": 400, "not_found": 404, "state_conflict": 409,
+              "runs_referenced": 409}.get(exc.code, 500)
+    return JSONResponse(status_code=status, content={"error": {
+        "code": exc.code, "message": exc.message, "detail": exc.detail}})
 
 
-class ImportBody(BaseModel):
+class CreateBody(BaseModel):
+    """托管数据集出生（唯一入口）：三态来源 + 拷贝/移动；空/图片目录/已标目录同一条校验管线。"""
+
     name: str
     task_type: str
-    source_dir: str
-    ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
-    seed: int = 42
-    stratify: bool = False
+    classes: list[str]
+    source_mode: Literal["empty", "images", "labeled"]
+    source_path: str | None = None
+    transfer: Literal["copy", "move"] = "copy"
 
 
 class ExternalBody(BaseModel):
     name: str
     task_type: str
     path: str
-
-
-class ResplitBody(BaseModel):
-    ratio: float = Field(gt=0.0, lt=1.0)
-    seed: int = 42
-    stratify: bool = False
-    approved_only: bool = False  # M9 03「只训已审」：只含通过图（负样本恒保留）
 
 
 class ClassesBody(BaseModel):
@@ -51,10 +56,6 @@ class ExcludeBody(BaseModel):
 
 class RestoreBody(BaseModel):
     files: list[str]
-
-
-class SwitchManifestBody(BaseModel):
-    uid: str
 
 
 class TilePreviewBody(BaseModel):
@@ -88,10 +89,14 @@ def list_datasets():
     return svc.list_datasets()
 
 
-@router.post("/import")
-def import_dataset(body: ImportBody):
+@router.post("")
+def create_dataset(body: CreateBody):
+    """托管数据集出生（票 03）：校验 + 画像一次遍历完成、不切分；返回 meta + validation。
+
+    已标目录含未注册类别时 409 阻断并列出全部 offending labels（detail.source_labels）。"""
     try:
-        return svc.import_dataset(body.name, body.task_type, body.source_dir, body.ratio, body.seed, body.stratify)
+        return svc.create_dataset(body.name, body.task_type, body.classes, body.source_mode,
+                                  body.source_path, body.transfer)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -122,25 +127,6 @@ def get_dataset(name: str):
 def validate_dataset(name: str):
     try:
         return svc.validate_dataset_by_name(name)
-    except DatasetError as exc:
-        return _error_response(exc)
-
-
-@router.post("/{name}/resplit")
-def resplit_dataset(name: str, body: ResplitBody):
-    try:
-        return svc.resplit_dataset(name, body.ratio, body.seed, body.stratify, body.approved_only)
-    except DatasetError as exc:
-        return _error_response(exc)
-
-
-@router.post("/{name}/sync-added")
-def sync_added(name: str):
-    """同步新增图片（长操作）：源目录清单外新图增量纳入切分——老图 train/val 归属
-    不动、新图按当前比例与种子只在自身范围内入切；生成新清单版本（旧版可切回）；
-    排除日志中的文件不复活；新增携带未注册类别 409 阻断；完成后自动全量重校验。"""
-    try:
-        return svc.sync_added_files(name)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -199,16 +185,6 @@ def restore_files(name: str, body: RestoreBody):
         left = len(svc.get_dataset(name).get("excluded") or [])
         return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"]),
                 "restored": len(m.get("restored") or []), "excluded_left": left}
-    except DatasetError as exc:
-        return _error_response(exc)
-
-
-@router.post("/{name}/switch-manifest")
-def switch_manifest(name: str, body: SwitchManifestBody):
-    """切回历史清单版本：活跃指回旧 uid，按当前标注重建派生并全量重算画像。"""
-    try:
-        m = svc.switch_manifest(name, body.uid)
-        return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"])}
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -289,12 +265,14 @@ def auto_fix(name: str):
 
 
 @router.delete("/{name}")
-def delete_dataset(name: str):
-    # delete_files 查询参数（api.md）对数据集域含义为：清理平台创建的目录。
-    # source_dir 是用户数据，任何情况下不删（05 号票：JSON 为唯一真源）。
+def delete_dataset(name: str, force: bool = False):
+    """删除托管数据集（票 03）：整目录移入 `<root>/.trash/<name>-<时间戳>/`，绝不物理删除。
+
+    有未终结 Run 引用时 409 `runs_referenced`（detail.run_count 给数量）；
+    force=true 复述确认后才移入回收区，回收区不做任何自动清理。
+    """
     try:
-        svc.delete_dataset(name)
-        return {"deleted": name}
+        return svc.delete_dataset(name, force=force)
     except DatasetError as exc:
         return _error_response(exc)
 

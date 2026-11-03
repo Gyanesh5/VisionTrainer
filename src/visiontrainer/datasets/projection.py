@@ -121,14 +121,20 @@ def project_json(data: dict, task_type: str, classes: list[str]) -> dict:
     """
     if task_type not in EQUIV:
         raise KeyError(f"未知任务类型：{task_type}")
-    width = float(data["imageWidth"])
-    height = float(data["imageHeight"])
     shapes = data.get("shapes") or []
 
     if TASK_MODE[task_type] == "classify":
+        # classify 只读 flags，画布尺寸与它无关；形状一律入账 task_mismatch，守恒式对五类任务同样成立
         flags = [v for v in (data.get("flags") or {}).values() if v]
-        return {"task_type": task_type, "width": width, "height": height,
-                "negative": not flags, "objects": [], "drops": [], "broken": False}
+        return {"task_type": task_type, "width": 0.0, "height": 0.0,
+                "negative": not flags, "objects": [],
+                "drops": [{"index": i, "label": s.get("label"),
+                           "shape_type": s.get("shape_type"), "reason": "task_mismatch"}
+                          for i, s in enumerate(shapes)],
+                "broken": False}
+
+    width = float(data["imageWidth"])
+    height = float(data["imageHeight"])
 
     accept = EQUIV[task_type]
     objects: list[dict] = []
@@ -175,6 +181,11 @@ def project_json(data: dict, task_type: str, classes: list[str]) -> dict:
             if group_id is None:
                 _drop(i, shape, "pose_no_group")
                 continue
+            if st == "point" and classes and label == classes[0]:
+                # 关键点列 = classes[1:]（0 号是框类别）。点名撞上框类别时编码器无从落列，
+                # 在投影处入账而不是让适配器静默丢数据（spec §3.3：适配器不得再产生丢弃）
+                _drop(i, shape, "pose_kpt_not_in_columns")
+                continue
             inst = pose_instances.setdefault(int(group_id), {"_indices": [], "box": None,
                                                              "box_label": None, "kpts": {}})
             inst["_indices"].append(i)
@@ -202,13 +213,17 @@ def project_json(data: dict, task_type: str, classes: list[str]) -> dict:
             if len(poly) < 3:
                 _drop(i, shape, "too_few_points")
                 continue
-            if _polygon_area(poly) <= 0:
-                _drop(i, shape, "degenerate_box")  # 共线或零宽：钳制后无面积
+            if st in ("rectangle", "rotation") and _polygon_area(poly) <= 0:
+                # 只对跨任务投来的形状判退化：原生 polygon 的共线三点旧版照写，改它属未授权重定义
+                _drop(i, shape, "degenerate_box")
                 continue
             objects.append({"label": label, "geom": "polygon", "points_px": poly,
                             "source_shape": source_shape, "projected": st != "polygon",
                             "source_indices": [i]})
         else:  # quad（obb）
+            if st == "rotation" and len(pts) != 4:
+                _drop(i, shape, "too_few_points")  # 旧版同口径：旋转框必须四点，两点模式不代造
+                continue
             quad = _corners(pts)
             if len(quad) != 4:
                 _drop(i, shape, "too_few_points")

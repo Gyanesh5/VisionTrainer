@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.review import read_state, write_review
 from visiontrainer.datasets.service import DatasetError
@@ -111,7 +113,7 @@ def _import_two(tmp_path, root, name="m9rev") -> Path:
     # a 带一个退化框（校验问题 → 可疑度来源）；b 干净
     _label(src / "a.json", [_rect(), _rect(p=(30, 30, 30, 30))])
     _label(src / "b.json", [_rect()])
-    return svc.import_dataset(name, "detect", str(src), root=root)
+    return build_dataset(name, "detect", str(src), root=root)
 
 
 def test_queue_suspicion_order_and_decide(tmp_path, tmp_db):
@@ -146,7 +148,7 @@ def test_decide_rejections_and_negatives(tmp_path, tmp_db):
     _png(src / "neg.png")
     _label(src / "a.json", [_rect()])
     _label(src / "b.json", [_rect()])
-    svc.import_dataset("m9neg", "detect", str(src), root=root)
+    build_dataset("m9neg", "detect", str(src), root=root)
     q = svc.review_queue("m9neg", root=root)
     assert q["unlabeled"] == 1 and q["total"] == 2  # 负样本不入队
     img_a = q["items"][0]["image"]
@@ -181,47 +183,10 @@ def test_rejected_then_shapes_edit_returns_pending(tmp_path, tmp_db):
 
 
 # ---------------------------------------------------------------- 只训已审（03 号票）
-
-def test_approved_only_resplit(tmp_path, tmp_db):
-    root = tmp_path / "root"
-    root.mkdir()
-    _import_two(tmp_path, root, name="m9ao")
-    q = svc.review_queue("m9ao", root=root)
-    b = next(it for it in q["items"] if it["name"] == "b.png")
-    svc.review_decide("m9ao", b["image"], "approved", root=root)
-
-    m0 = svc.resplit_dataset("m9ao", 0.5, 7, False, root=root)  # 默认关：不动文件集
-    assert len(m0["files"]) == 2 and not m0.get("approved_only")
-
-    m = svc.resplit_dataset("m9ao", 0.5, 8, False, approved_only=True, root=root)
-    assert m["approved_only"] and m["approved_dropped"] == 1
-    assert [f["image"] for f in m["files"]] == [b["image"]]
-    meta = svc.get_dataset("m9ao", root=root)
-    assert meta["active_manifest"] == m["uid"]
-    brief = next(x for x in meta["manifests"] if x["uid"] == m["uid"])
-    assert brief["approved_only"] is True
-
-    # 无任何已通过图 → 拒绝（先到审查页判定）
-    svc.review_decide("m9ao", b["image"], "rejected", reason="漏标", root=root)
-    with pytest.raises(DatasetError):
-        svc.resplit_dataset("m9ao", 0.5, 9, False, approved_only=True, root=root)
-
-
-def test_approved_only_keeps_negatives(tmp_path, tmp_db):
-    root = tmp_path / "root"
-    root.mkdir()
-    src = tmp_path / "srcneg2"
-    src.mkdir()
-    _png(src / "a.png")
-    _png(src / "neg.png")
-    _label(src / "a.json", [_rect()])
-    svc.import_dataset("m9aoneg", "detect", str(src), root=root)
-    q = svc.review_queue("m9aoneg", root=root)
-    svc.review_decide("m9aoneg", q["items"][0]["image"], "approved", root=root)
-
-    m = svc.resplit_dataset("m9aoneg", 0.5, 7, False, approved_only=True, root=root)
-    names = sorted(Path(f["image"]).name for f in m["files"])
-    assert names == ["a.png", "neg.png"]  # 负样本恒保留（无标注即无审查风险）
+#
+# 旧「只训已审」重切用例（test_approved_only_resplit / test_approved_only_keeps_negatives）
+# 随 `resplit_dataset` 硬切退役删除——v1.4 的切分入口与「只训已审」筛选由票 05 的
+# 切分实体（splits/<uid>/split.json）承接重测。
 
 
 def test_review_progress_summary(tmp_path, tmp_db):

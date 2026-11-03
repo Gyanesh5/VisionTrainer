@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import build_dataset
+
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.audit import compute_audit
 from visiontrainer.datasets.formats import yolo_lines
@@ -164,7 +166,7 @@ def test_import_drops_pending_ack_and_sticky(tmp_path, tmp_db):
     _png(src / "a.png")
     # 零面积框：类别探测会登记（rectangle 匹配任务），但转换时被 degenerate_box 丢弃
     _label_file(src / "a.json", [_rect("car"), _rect("car", (30, 30, 30, 30))])
-    meta = svc.import_dataset("m9drop", "detect", str(src), root=root)
+    meta = build_dataset("m9drop", "detect", str(src), root=root)
     assert meta["drops_pending_ack"] is True
 
     # 未确认 → 提交训练被拒（training.create_task 的门，经 meta 字段驱动）
@@ -178,9 +180,10 @@ def test_import_drops_pending_ack_and_sticky(tmp_path, tmp_db):
     svc.validate_dataset_by_name("m9drop", root=root)
     assert svc.get_dataset("m9drop", root=root)["drops_pending_ack"] is False
 
-    # 出现新丢弃集合 → 重新要求确认
-    _label_file(src / "a.json", [_rect("car"), _rect("car", (30, 30, 30, 30)),
-                                 _rect("car", (50, 50, 50, 50))])
+    # 出现新丢弃集合 → 重新要求确认（票 03：真源在数据集 source/，改它才影响校验账目）
+    _label_file(root / "m9drop" / "source" / "a.json",
+                [_rect("car"), _rect("car", (30, 30, 30, 30)),
+                 _rect("car", (50, 50, 50, 50))])
     svc.validate_dataset_by_name("m9drop", root=root)
     assert svc.get_dataset("m9drop", root=root)["drops_pending_ack"] is True
 
@@ -197,7 +200,7 @@ def test_relabel_refresh_incremental(tmp_path, tmp_db):
     _png(src / "b.png")
     _label_file(src / "a.json", [_rect("car", (10, 10, 110, 110))])
     _label_file(src / "b.json", [_rect("car", (10, 10, 110, 110))])
-    svc.import_dataset("m9rf", "detect", str(src), root=root)
+    build_dataset("m9rf", "detect", str(src), root=root)
     meta = svc.get_dataset("m9rf", root=root)
     derived = root / "m9rf" / "derived" / meta["active_manifest"] / "labels"
 
@@ -211,9 +214,9 @@ def test_relabel_refresh_incremental(tmp_path, tmp_db):
     assert _txt("a") != ""
     old_a = _txt("a")
 
-    # XAL 改标注：框挪位置（mtime 变）
+    # XAL 改标注：框挪位置（mtime 变）——票 03 后真源是数据集 source/ 里的副本
     time.sleep(0.01)
-    _label_file(src / "a.json", [_rect("car", (200, 200, 400, 400))])
+    _label_file(root / "m9rf" / "source" / "a.json", [_rect("car", (200, 200, 400, 400))])
 
     # 增量：只有 a 的 JSON 比 txt 新 → 只刷 a（单图显式重转入口随票 02 退役，漂移由这里兜住）
     r = svc.relabel_refresh("m9rf", root=root)
@@ -224,7 +227,7 @@ def test_relabel_refresh_incremental(tmp_path, tmp_db):
     assert r2["refreshed"] == 0
 
     time.sleep(0.01)
-    os.utime(src / "b.json")  # 模拟 b 被编辑（mtime 推进）
+    os.utime(root / "m9rf" / "source" / "b.json")  # 模拟 b 被编辑（mtime 推进）
     r3 = svc.relabel_refresh("m9rf", root=root)
     assert r3["refreshed"] == 1
 

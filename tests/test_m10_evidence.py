@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from conftest import build_dataset
+
 from visiontrainer.agent.tools import error_evidence
 from visiontrainer.db.models import Run, RunSampleError, Task, init_db
 
@@ -94,7 +96,7 @@ def test_evidence_injected_and_archived(tmp_path: Path, datasets_root, detect_so
     from visiontrainer.main import create_app
 
     monkeypatch.setattr(notify, "desktop_notify", lambda *a, **k: None)
-    svc.import_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}

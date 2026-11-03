@@ -1,8 +1,16 @@
-"""数据集服务编排（05 号票契约的执行者；API 与 UI 共用同一函数）。
+"""数据集服务编排（v1.4 票 03 契约的执行者；API 与 UI 共用同一函数）。
 
-托管数据集 = `<root>/<name>/` 目录（dataset.json + classes.txt + derived/<manifest_uid>/），
-目录即注册表；外部数据集注册信息存 `<root>/.external/<name>.json`，平台对外部目录零写入
-（含缺 data.yaml 时：类别探测结果只存平台侧，2026-09-07 domain-modeling 裁决）。
+托管数据集 = `<root>/<name>/` 目录（dataset.json + classes.txt + source/ 平铺真源 +
+excluded.json + derived/<manifest_uid>/），目录即注册表；`source/` 与 `classes.txt`
+由平台拥有（ADR 0009），出生唯一入口 `create_dataset`（空 / 图片目录 / 已标目录三态，
+只校验 + 画像、不切分）。外部数据集注册信息存 `<root>/.external/<name>.json`，
+平台对外部目录零写入（含缺 data.yaml 时：类别探测结果只存平台侧，2026-09-07 domain-modeling 裁决）。
+
+dataset.json 落盘字段按 spec §3.1：name / task_type / form / created_at / origin /
+validation_summary（+ 可选 tiling / flip_idx）。类别表、排除日志、最近校验报告不落
+dataset.json——读时经 `read_classes` / `excluded.json` / `validation_report.json` 现组。
+`manifests` / `active_manifest` 暂留：切分实体（splits/<uid>/split.json）由票 05 落地，
+本票删除会打断训练链路。
 """
 
 from __future__ import annotations
@@ -11,7 +19,6 @@ import hashlib
 import json
 import os
 import shutil
-import sys
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -20,21 +27,35 @@ from PIL import Image
 
 from .audit import compute_audit, fingerprint_of, load_cached, save_cached
 from .formats import write_label, yolo_lines
-from .projection import EQUIV, TASK_MODE, TASK_TYPES
-from .split import (absorbed_manifest, build_grouped_manifest, build_manifest,
-                    excluded_manifest, restored_manifest, save_manifest)
+from .projection import TASK_MODE, TASK_TYPES
+from .split import (build_grouped_manifest, build_manifest, excluded_manifest,
+                    restored_manifest, save_manifest)
 from .stats import build_stats, get_stats, recompose, save_stats
 from .tiling import JPEG_QUALITY, TILE_GRID_MAX, TILE_OVERLAP_MAX, TILE_TASKS, plan_image, summarize
-from .validate import scan_entries, validate_dataset
+from .validate import IMAGE_EXTS, scan_entries, validate_dataset
 
 VALID_TASK_TYPES = set(TASK_TYPES)
 
+SOURCE_SUBDIR = "source"          # 平台拥有的平铺真源目录名（spec §3.1）
+EXCLUDED_FILE = "excluded.json"   # 排除日志：随数据集目录，不由 DB 持有
+TRASH_SUBDIR = ".trash"           # 数据集级回收区（不自动清理）
+XAL_DELETED_SUBDIR = "_delete_"   # X-AnyLabeling 图片级回收区（平台认领、不自动清理）
+SOURCE_MODES = ("empty", "images", "labeled")
+TRANSFER_MODES = ("copy", "move")
+RUN_ACTIVE_STATUSES = ("queued", "running", "stopping")
+FULL_SET_UID = "full-set"         # 出生未切分时画像用的「全集」伪清单 uid（票 05 换切分实体）
+
+# dataset.json 的落盘字段集（spec §3.1 + 票 05 前暂留的清单两字段）
+_META_KEYS = ("name", "task_type", "form", "created_at", "origin", "validation_summary",
+              "manifests", "active_manifest", "tiling", "flip_idx")
+
 
 class DatasetError(Exception):
-    def __init__(self, code: str, message: str):
+    def __init__(self, code: str, message: str, detail: dict | None = None):
         super().__init__(message)
         self.code = code
         self.message = message
+        self.detail = detail or {}
 
 
 def get_datasets_root() -> Path:
@@ -71,7 +92,108 @@ def _slug(name: str) -> str:
     return name
 
 
-# ---------------------------------------------------------------- 导入/注册
+# ---------------------------------------------------------------- 真源目录与最终字段助手
+
+def _source_dir(ds_dir: Path) -> Path:
+    return ds_dir / SOURCE_SUBDIR
+
+
+def read_classes(ds_dir: Path) -> list[str]:
+    """类别表唯一读取助手：classes.txt 行序即类别 id（ADR 0009）；文件缺失视作空表。"""
+    p = ds_dir / "classes.txt"
+    if not p.is_file():
+        return []
+    return [line.strip() for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _write_classes(ds_dir: Path, classes: list[str]) -> None:
+    (ds_dir / "classes.txt").write_text(
+        "\n".join(classes) + ("\n" if classes else ""), encoding="utf-8")
+
+
+def load_excluded(ds_dir: Path) -> dict[str, dict]:
+    """excluded.json → {文件名: {at, reason}}（spec §3.1 文件形状）；缺省空。"""
+    p = ds_dir / EXCLUDED_FILE
+    if not p.is_file():
+        return {}
+    return dict(_read_meta(p).get("files") or {})
+
+
+def _save_excluded(ds_dir: Path, files: dict[str, dict]) -> None:
+    payload = {"version": 1, "files": {k: files[k] for k in sorted(files)}}
+    (ds_dir / EXCLUDED_FILE).write_text(json.dumps(payload, ensure_ascii=False, indent=2),
+                                        encoding="utf-8")
+
+
+def _prune_excluded(ds_dir: Path) -> list[str]:
+    """清理已不在 source/ 的排除条目（XAL 删图/详情页对账共用）；返回被清理的文件名。"""
+    files = load_excluded(ds_dir)
+    source = _source_dir(ds_dir)
+    pruned = [name for name in files if not (source / name).is_file()]
+    if pruned:
+        for name in pruned:
+            del files[name]
+        _save_excluded(ds_dir, files)
+    return pruned
+
+
+def source_fingerprint(source_dir: Path) -> str:
+    """统一指纹（spec §2.1）：sha256(sorted(文件名, size, mtime_ns))，覆盖 source/ 全部图片与 JSON。
+
+    只 stat 不读内容。**票 04 缝**：详情页「指纹变化 → 后台自动重校验 + 画像」的自动对账
+    归票 04 落地；本票列表页只做目录 mtime 粗判（`_may_have_changes`），两者共用此指纹
+    字段作为账本落点，票 04 直接消费、不再另造判据。
+    """
+    parts: list[str] = []
+    if not source_dir.is_dir():
+        return hashlib.sha256(b"").hexdigest()
+    for p in sorted(source_dir.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.suffix.lower() not in IMAGE_EXTS and p.suffix.lower() != ".json":
+            continue
+        st = p.stat()
+        parts.append(f"{p.name}|{st.st_size}|{st.st_mtime_ns}")
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()
+
+
+def _may_have_changes(meta: dict, ds_dir: Path) -> bool:
+    """列表页「可能有变更」粗判：source/ 目录 mtime 晚于校验时间即可疑（票 03 口径）。"""
+    checked_at = ((meta.get("validation_summary") or {}).get("checked_at")) or ""
+    if not checked_at:
+        return False
+    try:
+        checked = datetime.fromisoformat(checked_at).timestamp()
+    except ValueError:
+        return False
+    try:
+        return _source_dir(ds_dir).stat().st_mtime > checked + 1.0
+    except OSError:
+        return False
+
+
+def _compose_managed(meta: dict, ds_dir: Path) -> dict:
+    """托管数据集的读时组合视图：classes / source_dir / excluded / last_validation /
+    drops_pending_ack 均现取于真源文件（classes.txt、source/、excluded.json、
+    validation_report.json），dataset.json 不再持有这些字段。"""
+    out = dict(meta)
+    source = _source_dir(ds_dir)
+    out["classes"] = read_classes(ds_dir)
+    out["source_dir"] = str(source) if source.is_dir() else None
+    out["excluded"] = [{"file": name, "at": rec.get("at"), "reason": rec.get("reason")}
+                       for name, rec in load_excluded(ds_dir).items()]
+    report_path = ds_dir / "validation_report.json"
+    out["last_validation"] = _read_meta(report_path) if report_path.is_file() else None
+    out["drops_pending_ack"] = _drops_pending(meta.get("validation_summary") or {})
+    return out
+
+
+def _write_meta(ds_dir: Path, meta: dict) -> None:
+    """dataset.json 唯一落盘入口：只写 spec §3.1 字段集，读时组合键一律不落盘。"""
+    disk = {k: meta[k] for k in _META_KEYS if k in meta}
+    (ds_dir / "dataset.json").write_text(json.dumps(disk, ensure_ascii=False, indent=2),
+                                         encoding="utf-8")
+
 
 def _drops_signature(report: dict) -> str:
     """丢弃集合签名（M9 确认门）：同一批丢弃确认一次即粘住，重校验同签名不再要求确认。"""
@@ -81,106 +203,227 @@ def _drops_signature(report: dict) -> str:
     return hashlib.sha256(json.dumps(drops, ensure_ascii=False).encode()).hexdigest()
 
 
-def _mark_drops(meta: dict, report: dict) -> None:
-    meta["drops_signature"] = _drops_signature(report)
-    meta["drops_pending_ack"] = bool(report.get("drops")) and meta.get("drops_acked") != meta["drops_signature"]
+def _drops_pending(summary: dict) -> bool:
+    """未确认丢弃现算：count > 0 ∧ signature ≠ acked（不落独立布尔字段）。"""
+    drops = summary.get("drops") or {}
+    return bool(drops.get("count")) and drops.get("signature") != drops.get("acked")
 
 
-def _drift_report(entries: list[dict], manifest: dict, meta: dict) -> dict:
-    """清单漂移账目（spec「图片集漂移检测警告」落点）：扫描 vs 活跃清单对账。
-
-    新增 = 扫描到、不在清单、也不在排除日志（排除是用户裁决——不复活、不算漂移）；
-    已消失 = 清单内但扫描未见。new_classes = 新增文件携带的未注册类别（同步阻断项，
-    口径与 scan 的 unknown_labels 一致：任意 shape 的 label 不在 classes 即算）。
-    """
-    in_manifest = {f["image"] for f in manifest.get("files") or []}
-    excluded_log = {e["file"] for e in meta.get("excluded") or []}
-    scanned = {e["image"] for e in entries}
-    outside = scanned - in_manifest
-    added = sorted(outside - excluded_log)
-    missing = sorted(in_manifest - scanned)
-    added_set = set(added)
-    new_classes: set[str] = set()
-    for e in entries:
-        if e["image"] in added_set and e.get("label"):
-            for s in _read_json(e["label"]).get("shapes") or []:
-                if s.get("label") and s.get("label") not in meta["classes"]:
-                    new_classes.add(str(s["label"]))
+def _new_validation_summary(report: dict, fingerprint: str, prev: dict | None) -> dict:
+    """validation_report → dataset.json 摘要；prev 同签名时继承已确认账目（确认粘住）。"""
+    prev_drops = (prev or {}).get("drops") or {}
+    sig = _drops_signature(report)
+    count = int(report.get("drops") or 0)
+    acked = prev_drops.get("acked") or ""
+    if prev_drops.get("signature") != sig:
+        acked = ""  # 新丢弃集合 → 重新要求确认
+    if count == 0:
+        acked = ""
     return {
-        "added": len(added),
-        "added_sample": [Path(p).name for p in added[:3]],
-        "missing": len(missing),
-        "missing_sample": [Path(p).name for p in missing[:3]],
-        "excluded_present": len(outside & excluded_log),
-        "new_classes": sorted(new_classes),
+        "ok": bool(report.get("ok")),
+        "total_images": int(report.get("total_images") or 0),
+        "negatives": int(report.get("background") or 0),
+        "checked_at": report.get("checked_at"),
+        "source_fingerprint": fingerprint,
+        "drops": {"count": count, "signature": sig, "acked": acked},
     }
 
 
-def import_dataset(
+def _full_set_manifest(entries: list[dict]) -> dict:
+    """「全集」伪清单：出生未切分时画像/体检之外的统计聚合口径暂以全集呈现。
+
+    票 05 切分实体（splits/<uid>/split.json + agg_all）落地后由正牌全集视图取代；
+    此处只是让既有 build_stats 的 train/val 形状照常工作（全图入 train、val 空）。
+    """
+    paths = sorted(e["image"] for e in entries)
+    return {
+        "uid": FULL_SET_UID,
+        "seed": 0,
+        "ratio": 1.0,
+        "stratify": False,
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "files": [{"image": e["image"], "label": e["label"],
+                   "primary_label": e.get("primary_label")} for e in entries],
+        "train": paths,
+        "val": [],
+    }
+
+
+def _manifest_for_stats(ds_dir: Path, meta: dict, entries: list[dict]) -> dict:
+    """画像聚合基准清单：有活跃切分用之，未切分（票 03 出生形态）用全集伪清单。"""
+    uid = meta.get("active_manifest")
+    if uid:
+        path = ds_dir / "derived" / str(uid) / "split_manifest.json"
+        if path.is_file():
+            return _read_meta(path)
+    return _full_set_manifest(entries)
+
+
+# ---------------------------------------------------------------- 出生（唯一入口）
+
+def _probe_source_labels(src: Path) -> set[str]:
+    """探测已标目录里的全部类别名：所有 shape label + flags 为真键。
+
+    预填与「表外类别阻断」共用此口径——绝不漏看任何一个 label（永不静默丢弃）。
+    半截 JSON 跳过不炸（校验阶段会以 bad_json 红灯记账）。
+    """
+    found: set[str] = set()
+    for j in sorted(src.rglob("*.json")):
+        try:
+            data = json.loads(j.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        for s in data.get("shapes") or []:
+            if isinstance(s, dict) and s.get("label"):
+                found.add(str(s["label"]))
+        for k, v in (data.get("flags") or {}).items():
+            if v:
+                found.add(str(k))
+    return found
+
+
+def _plan_ingest(src: Path, mode: str) -> list[Path]:
+    """列出去重后的入图文件计划：images 态只收图片；labeled 态收图片 + 同词干 JSON。"""
+    images = sorted(p for p in src.rglob("*")
+                    if p.is_file() and p.suffix.lower() in IMAGE_EXTS)
+    files = list(images)
+    if mode == "labeled":
+        for img in images:
+            for cand in (img.with_suffix(".json"), *img.parent.glob(f"{img.stem}.json")):
+                if cand.is_file() and cand not in files:
+                    files.append(cand)
+                    break
+    seen: dict[str, Path] = {}
+    for p in files:
+        if p.name in seen and seen[p.name] != p:
+            raise DatasetError("invalid_args",
+                               f"平铺真源同名冲突：{p.name}（{seen[p.name]} 与 {p}）"
+                               "——同名文件只保留一份再创建（不自动改名）")
+        seen[p.name] = p
+    return files
+
+
+def _ingest(files: list[Path], source_dir: Path, transfer: str, progress=None) -> None:
+    """拷贝/移动入图：move 用 shutil.move（同分区 rename，绝不留反向符号链接）。"""
+    for i, p in enumerate(files):
+        if progress is not None and (i % 20 == 0 or i == len(files) - 1):
+            progress(i + 1, len(files))
+        dest = source_dir / p.name
+        if transfer == "move":
+            shutil.move(str(p), dest)
+        else:
+            shutil.copy2(p, dest)
+
+
+def create_dataset(
     name: str,
     task_type: str,
-    source_dir: str,
-    ratio: float = 0.8,
-    seed: int = 42,
-    stratify: bool = False,
+    classes: list[str],
+    source_mode: str,
+    source_path: str | None = None,
+    transfer: str = "copy",
     root: Path | None = None,
     progress_cb=None,
 ) -> dict:
-    """X-AnyLabeling 标注目录 → 托管数据集：探测类别 → 校验 → 首次切分 → 派生结构。
+    """托管数据集出生唯一入口（票 03 / ADR 0009；「导入」不再是独立入口）。
 
-    progress_cb(phase, cur, total)：三阶段（扫描标注/校验标注/派生训练结构）进度回调（UI 进度条用）。
+    Args:
+        name: 数据集名（字母数字 - _）。
+        task_type: detect / segment / obb / pose / classify 之一。
+        classes: 确认后的类别表，非空不重复；落成 classes.txt（行序即类别 id）。
+        source_mode: "empty" 空集 / "images" 图片目录（全负样本）/ "labeled" 已标 XAL 目录。
+        source_path: images/labeled 态的来源目录。
+        transfer: "copy"（默认）或 "move"；move 真搬走文件，不留反向链接。
+        root: 数据集根，缺省取配置。
+        progress_cb: (phase, cur, total) 进度回调（入图 / 校验标注两阶段）。
+
+    Returns:
+        dataset.json 的读时组合视图 + "validation"（出生校验报告，
+        drops>0 未确认时含 needs_confirm 确认门信息）。
+
+    Raises:
+        DatasetError: invalid_args 参数不合法 / 同名平铺冲突；state_conflict 重名、
+            或已标目录携带类别表之外的类别（detail.source_labels 列全清单，阻断不静默）。
+
+    出生只「校验 + 画像」一次遍历完成，不切分（切分实体归票 05）。
     """
     _slug(name)
     if task_type not in VALID_TASK_TYPES:
         raise DatasetError("invalid_args", f"task_type 必须是 {sorted(VALID_TASK_TYPES)}")
-    src = Path(source_dir).expanduser()
-    if not src.is_dir():
-        raise DatasetError("invalid_args", f"标注目录不存在：{src}")
-    ds_dir = _ds_dir(name, root)
-    if ds_dir.exists():
+    if source_mode not in SOURCE_MODES:
+        raise DatasetError("invalid_args", f"source_mode 必须是 {list(SOURCE_MODES)}")
+    if transfer not in TRANSFER_MODES:
+        raise DatasetError("invalid_args", f"transfer 必须是 {list(TRANSFER_MODES)}")
+    classes = [str(c) for c in classes or []]
+    if not classes or not all(classes) or len(set(classes)) != len(classes):
+        raise DatasetError("invalid_args", "类别表必填：不能为空且不能有重名/空类名")
+
+    root = root or get_datasets_root()
+    ds_dir = root / name
+    if ds_dir.exists() or (root / ".external" / f"{name}.json").exists():
         raise DatasetError("state_conflict", f"数据集已存在：{name}")
+
+    src: Path | None = None
+    if source_mode != "empty":
+        if not source_path:
+            raise DatasetError("invalid_args", f"source_mode={source_mode} 必须给 source_path")
+        src = Path(source_path).expanduser()
+        if not src.is_dir():
+            raise DatasetError("invalid_args", f"来源目录不存在：{src}")
+    if source_mode == "labeled":
+        assert src is not None
+        offenders = sorted(_probe_source_labels(src) - set(classes))
+        if offenders:
+            raise DatasetError(
+                "state_conflict",
+                f"来源目录携带类别表之外的类别：{'、'.join(offenders)}"
+                "——把这些类别加进类别表（或先在 X-AnyLabeling 归并到既有类别）再创建",
+                {"source_labels": offenders})
+
+    plan: list[Path] = _plan_ingest(src, source_mode) if src else []
 
     def _cb(phase: str):
         return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
 
-    scan = scan_entries(src, task_type, classes=[], progress=_cb("扫描标注"))  # classes 未定，先探测（探测不看校验问题）
-    detected: set[str] = set()
-    for e in scan["entries"]:
-        for s in _read_json(e["label"]).get("shapes", []):
-            if s.get("label") and s.get("shape_type") in EQUIV[task_type]:
-                detected.add(s["label"])
-    classes = sorted(detected)
-    if not classes and task_type != "classify":
-        raise DatasetError("invalid_args", f"未在 {src} 探测到匹配 {task_type} 的标注")
-
     ds_dir.mkdir(parents=True)
-    (ds_dir / "classes.txt").write_text("\n".join(classes) + ("\n" if classes else ""), encoding="utf-8")
-    # 带类别的正式扫描：校验报告 + 健康报告原料共用这一次遍历（M6 不二次扫盘）
-    scan = scan_entries(src, task_type, classes, progress=_cb("校验标注"))
-    report = validate_dataset(src, task_type, classes, progress=None, scan=scan)
-    (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        _write_classes(ds_dir, classes)
+        source_dir = _source_dir(ds_dir)
+        source_dir.mkdir()
+        _ingest(plan, source_dir, transfer, progress=_cb("入图"))
 
-    entries = [{"image": e["image"], "label": e["label"], "primary_label": e.get("primary_label")}
-               for e in scan["entries"]]
-    manifest = build_manifest(entries, ratio, seed, stratify)
-    save_manifest(ds_dir, manifest)
-    _derive(ds_dir, manifest, task_type, classes, progress=_cb("派生训练结构"))
-    save_stats(name, build_stats(scan["entries"], manifest, task_type, classes, name))
+        scan = scan_entries(source_dir, task_type, classes, progress=_cb("校验标注"))
+        report = validate_dataset(source_dir, task_type, classes, scan=scan)
+        (ds_dir / "validation_report.json").write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    meta = {
-        "name": name,
-        "task_type": task_type,
-        "form": "managed",
-        "source_dir": str(src),
-        "classes": classes,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "manifests": [_manifest_brief(manifest)],
-        "active_manifest": manifest["uid"],
-        "last_validation": report,
-    }
-    _mark_drops(meta, report)
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    return meta
+        now = datetime.now().isoformat(timespec="seconds")
+        meta = {
+            "name": name,
+            "task_type": task_type,
+            "form": "managed",
+            "created_at": now,
+            "origin": {"mode": source_mode, "path": str(src) if src else None,
+                       "at": now, "transfer": transfer if src else None},
+            "validation_summary": _new_validation_summary(
+                report, source_fingerprint(source_dir), None),
+            # 票 05 前的暂留字段（见模块 docstring）：出生不切分 → 空清单
+            "manifests": [],
+            "active_manifest": None,
+        }
+        _write_meta(ds_dir, meta)
+        save_stats(name, build_stats(scan["entries"], _full_set_manifest(scan["entries"]),
+                                     task_type, classes, name))
+    except Exception:
+        shutil.rmtree(ds_dir, ignore_errors=True)  # 半成品目录自清理（非已登记数据集，不适用回收区规则）
+        raise
+    return {**_compose_managed(_read_meta(ds_dir / "dataset.json"), ds_dir),
+            "validation": report}
+
+
+# ---------------------------------------------------------------- 注册外部（只读形态，保留）
 
 
 def register_external(name: str, task_type: str, path: str, root: Path | None = None) -> dict:
@@ -233,12 +476,12 @@ def list_datasets(root: Path | None = None) -> list[dict]:
     if root.exists():
         for ds_dir in sorted(root.iterdir()):
             meta_path = ds_dir / "dataset.json"
-            if meta_path.is_file():
-                out.append(_brief(_read_meta(meta_path)))
+            if meta_path.is_file() and ds_dir.name != TRASH_SUBDIR:
+                out.append(_brief(_compose_managed(_read_meta(meta_path), ds_dir), ds_dir))
     ext = root / ".external"
     if ext.is_dir():
         for f in sorted(ext.glob("*.json")):
-            out.append(_brief(_read_meta(f)))
+            out.append(_brief(_read_meta(f), None))
     return out
 
 
@@ -246,185 +489,155 @@ def get_dataset(name: str, root: Path | None = None) -> dict:
     root = root or get_datasets_root()
     ds_dir = _ds_dir(name, root)
     if (ds_dir / "dataset.json").is_file():
-        return _read_meta(ds_dir / "dataset.json")
+        return _compose_managed(_read_meta(ds_dir / "dataset.json"), ds_dir)
     ext = root / ".external" / f"{name}.json"
     if ext.is_file():
         return _read_meta(ext)
     raise DatasetError("not_found", f"数据集不存在：{name}")
 
 
-def delete_dataset(name: str, root: Path | None = None) -> None:
-    """删除平台创建的文件（dataset 目录 / 注册条目）；source_dir 是用户数据，永不触碰。"""
+def _active_run_count(ds_dir: Path) -> int:
+    """引用该数据集且未终止（queued/running/stopping）的 Run 数；DB 未装配时视作 0。"""
+    from ..db.runtime import get_session_factory
+
+    factory = get_session_factory()
+    if factory is None:
+        return 0
+    from sqlalchemy import func
+
+    from ..db.models import Run, Task
+
+    prefix = str(ds_dir) + os.sep
+    with factory() as s:
+        return int(
+            s.query(func.count(Run.id))
+            .join(Task, Run.task_id == Task.id)
+            .filter(Task.dataset_manifest_path.like(f"{prefix}%"),
+                    Run.status.in_(RUN_ACTIVE_STATUSES))
+            .scalar() or 0
+        )
+
+
+def delete_dataset(name: str, root: Path | None = None, force: bool = False) -> dict:
+    """删除托管数据集 = 整目录移入 `<root>/.trash/<name>-<时间戳>/`（票 03，永不物理删除）。
+
+    - 被未终止 Run 引用时须 force=True 确认门，否则 DatasetError(runs_referenced)
+      且 detail 携带数量——页面「复述引用数量再强制删除」的唯一判据；
+    - `_delete_/`（X-AnyLabeling 图片回收区）由平台认领随目录走，不自动清理；
+      存在 `_delete_/` 时同步清理 excluded.json 中已不在 source/ 的条目；
+    - 回收区不做任何自动清理；origin.path 指向的用户来源目录永不触碰；
+    - 外部数据集仅删注册条目。
+    """
     root = root or get_datasets_root()
     ds_dir = _ds_dir(name, root)
     if ds_dir.is_dir():
-        shutil.rmtree(ds_dir)
-        return
+        if not force:
+            count = _active_run_count(ds_dir)
+            if count:
+                raise DatasetError(
+                    "runs_referenced",
+                    f"数据集「{name}」仍被 {count} 个未终止的 Run 引用——确认后再删除",
+                    {"run_count": count, "confirm_required": True})
+        if (ds_dir / XAL_DELETED_SUBDIR).is_dir():
+            _prune_excluded(ds_dir)  # XAL 删图落点存在 → 平台认领并清理失效排除条目
+        trash_root = root / TRASH_SUBDIR
+        trash_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        target = trash_root / f"{name}-{stamp}"
+        seq = 1
+        while target.exists():
+            target = trash_root / f"{name}-{stamp}-{seq}"
+            seq += 1
+        shutil.move(str(ds_dir), str(target))
+        return {"deleted": name, "trashed": str(target)}
     ext = root / ".external" / f"{name}.json"
     if ext.is_file():
         ext.unlink()
-        return
+        return {"deleted": name}
     raise DatasetError("not_found", f"数据集不存在：{name}")
 
 
-# ---------------------------------------------------------------- 校验/切分/类别
+# ---------------------------------------------------------------- 校验/类别
 
 def validate_dataset_by_name(name: str, root: Path | None = None,
                              progress_cb=None) -> dict:
-    """重新校验托管数据集（扫描标注 → 规则校验 → 刷新丢弃账目与健康画像）。
+    """重新校验托管数据集（扫 source/ 真源 → 规则校验 → 刷新摘要/画像/排除对账）。
 
     progress_cb(phase, cur, total)：扫描阶段逐 20 张回调（UI 进度条用）。
+    「清单漂移报告」机制随票 03 退役；排除条目清理按 spec §3.1 详情页对账口径
+    （已不在 source/ 的条目删除）。票 04 把「指纹变化自动触发本函数」接进详情页。
     """
+    root = root or get_datasets_root()
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不做平台校验")
     ds_dir = _ds_dir(name, root)
-    src = Path(meta["source_dir"])
+    src = _source_dir(ds_dir)
+    task_type = meta["task_type"]
+    classes = read_classes(ds_dir)
 
     def _cb(phase: str):
         return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
 
-    scan = scan_entries(src, meta["task_type"], meta["classes"], progress=_cb("扫描校验"))
-    report = validate_dataset(src, meta["task_type"], meta["classes"], scan=scan)
-    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
-    report["drift"] = _drift_report(scan["entries"], manifest, meta)
-    (ds_dir / "validation_report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
-    meta["last_validation"] = report
-    _mark_drops(meta, report)  # M9：新丢弃集合出现才重新要求确认（同签名已确认则粘住）
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    # 健康报告聚合随校验刷新（当前活跃清单画像；M6 01 号票）
-    save_stats(name, build_stats(scan["entries"], manifest, meta["task_type"], meta["classes"], name))
+    scan = scan_entries(src, task_type, classes, progress=_cb("扫描校验"))
+    report = validate_dataset(src, task_type, classes, scan=scan)
+    (ds_dir / "validation_report.json").write_text(
+        json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    raw = _read_meta(ds_dir / "dataset.json")
+    raw["validation_summary"] = _new_validation_summary(
+        report, source_fingerprint(src), raw.get("validation_summary"))
+    _write_meta(ds_dir, raw)
+    _prune_excluded(ds_dir)
+    # 画像随校验刷新（活跃切分优先；未切分数据集按全集伪清单）
+    save_stats(name, build_stats(scan["entries"], _manifest_for_stats(ds_dir, raw, scan["entries"]),
+                                 task_type, classes, name))
     return report
 
 
-def resplit_dataset(name: str, ratio: float, seed: int, stratify: bool,
-                    approved_only: bool = False, root: Path | None = None) -> dict:
-    """显式重切：基于既有文件清单生成新 manifest（新 uid），派生新结构，切换 active。
-
-    approved_only（M9 03「只训已审」，默认关）：只保留有效状态=通过（checked:true）的图；
-    负样本（无标注 JSON）恒保留（无标注即无审查风险）；未审/驳回/跳过不入新清单，
-    旧清单保留可切回（机制同排除）。
-    """
-    meta = get_dataset(name, root)
-    if meta["form"] != "managed":
-        raise DatasetError("invalid_args", "外部数据集不参与切分")
-    ds_dir = _ds_dir(name, root)
-    prev = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
-    entries = [
-        {"image": f["image"], "label": f["label"], "primary_label": f.get("primary_label")}
-        for f in prev["files"]
-    ]
-    dropped_review = 0
-    if approved_only:
-        from . import review as rv
-
-        kept = []
-        for e in entries:
-            lbl = e.get("label")
-            if not lbl or not Path(lbl).exists():
-                kept.append(e)  # 负样本保留
-            elif rv.read_state(Path(lbl))["effective"] == "approved":
-                kept.append(e)
-            else:
-                dropped_review += 1
-        if not any(e.get("primary_label") for e in kept):
-            raise DatasetError("state_conflict",
-                               "「只训已审」过滤后没有任何已通过的标注图——先到数据集「标注审查」页判定")
-        entries = kept
-    manifest = build_manifest(entries, ratio, seed, stratify, prev_manifest=prev)
-    manifest["approved_only"] = bool(approved_only)
-    manifest["approved_dropped"] = dropped_review
-    _derive(ds_dir, manifest, meta["task_type"], meta["classes"])  # 先派生（会清空同 uid 目录）
-    save_manifest(ds_dir, manifest)  # 再落盘 manifest，避免被 _derive 的清理删除
-    if manifest["uid"] != meta["active_manifest"]:
-        meta["manifests"].append(_manifest_brief(manifest))
-        meta["active_manifest"] = manifest["uid"]
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    _refresh_stats_recompose(name, meta, prev, manifest)
-    return manifest
-
-
-def sync_added_files(name: str, root: Path | None = None, progress_cb=None) -> dict:
-    """同步新增图片：源目录清单外新图增量纳入活跃切分（确认门在 UI 层，此处复核真源）。
-
-    语义：以源目录现状重扫为准（不信任旧报告里的漂移快照）；既有文件 train/val
-    归属不动，新增文件按当前（ratio, seed, stratify）只在自身范围内入切；生成新
-    清单版本（旧版保留可切回）、按当前标注重建派生（老图改标一并生效）、随后全量
-    重校验（报告 + 画像 + 漂移账目一并刷新）。排除日志中的文件不复活；新增携带
-    未注册类别 → 阻断（类序变更牵连老模型可比性——先改标注映射到既有类别，或
-    另建数据集）。progress_cb(phase, cur, total)：扫描新增 / 派生训练结构 / 重校验。
-    """
-    meta = get_dataset(name, root)
-    if meta["form"] != "managed":
-        raise DatasetError("invalid_args", "外部数据集不参与同步")
-    ds_dir = _ds_dir(name, root)
-    prev = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
-
-    def _cb(phase: str):
-        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
-
-    scan = scan_entries(Path(meta["source_dir"]), meta["task_type"], meta["classes"],
-                        progress=_cb("扫描新增"))
-    in_manifest = {f["image"] for f in prev["files"]}
-    excluded_log = {e["file"] for e in meta.get("excluded") or []}
-    new_entries = [
-        {"image": e["image"], "label": e["label"], "primary_label": e.get("primary_label")}
-        for e in scan["entries"]
-        if e["image"] not in in_manifest and e["image"] not in excluded_log
-    ]
-    if not new_entries:
-        raise DatasetError("state_conflict", "源目录没有清单外新增图片——先「重新校验」刷新漂移账目")
-    new_classes = _drift_report(scan["entries"], prev, meta)["new_classes"]
-    if new_classes:
-        raise DatasetError("state_conflict",
-                           f"新增图片携带未注册类别：{'、'.join(new_classes)}"
-                           "——先在源标注中改为既有类别，或另建数据集")
-    manifest = absorbed_manifest(prev, new_entries)
-    _derive(ds_dir, manifest, meta["task_type"], meta["classes"], progress=_cb("派生训练结构"))
-    save_manifest(ds_dir, manifest)
-    if manifest["uid"] != meta["active_manifest"] and \
-            not any(b["uid"] == manifest["uid"] for b in meta["manifests"]):
-        meta["manifests"].append(_manifest_brief(manifest))
-    meta["active_manifest"] = manifest["uid"]
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    report = validate_dataset_by_name(name, root, progress_cb=progress_cb)
-    return {"uid": manifest["uid"], "added": len(new_entries),
-            "train": len(manifest["train"]), "val": len(manifest["val"]),
-            "validation": report}
-
-
 def rename_classes(name: str, classes: list[str], root: Path | None = None) -> dict:
-    """类别改名/重排（显式操作）：重写 classes.txt 并按新 ids 重建全部派生结构。"""
+    """类别改名/重排（显式操作）：重写 classes.txt（唯一真源）并重建全部派生结构。
+
+    注：spec §2.1 的「改名同步改写真源 JSON shape label + 备份 + 审查继承」属类别四动作
+    票（04/06）范围；本票维持 classes.txt 与派生重转换的既有语义。
+    """
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集的类别不在平台管辖内")
     if not classes or len(set(classes)) != len(classes):
         raise DatasetError("invalid_args", "classes 必须非空且不重复")
+    root = root or get_datasets_root()
     ds_dir = _ds_dir(name, root)
-    (ds_dir / "classes.txt").write_text("\n".join(classes) + "\n", encoding="utf-8")
-    meta["classes"] = classes
-    for brief in meta["manifests"]:
+    _write_classes(ds_dir, classes)
+    for brief in meta.get("manifests") or []:
         manifest = _read_meta(ds_dir / "derived" / brief["uid"] / "split_manifest.json")
         _derive(ds_dir, manifest, meta["task_type"], classes)
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    raw = _read_meta(ds_dir / "dataset.json")
+    _write_meta(ds_dir, raw)  # 类别表已不在 dataset.json——重写只为刷新清单侧字段
     # 健康报告画像按新类别表重算 meta（逐图行的标注名来自 JSON 真源，保持原样）
-    payload = get_stats(name, meta["active_manifest"])
+    payload = get_stats(name, raw.get("active_manifest") or FULL_SET_UID)
     if payload:
         payload["classes"] = classes
         save_stats(name, payload)
-    return meta
+    return get_dataset(name, root)
 
 
 # ---------------------------------------------------------------- 切片（Tiling）
 
 def _tile_guard(name: str, root: Path | None) -> dict:
-    """切片前置：托管数据集 + 任务类型受限（ADR 0004 / spec 2.1）。"""
+    """切片前置：托管数据集 + 任务类型受限（ADR 0004 / spec 2.1）。
+
+    票 03 出生不切分（无活跃清单）——切片以活跃清单为输入，未切分数据集先走票 05
+    的切分入口（当前用 conftest `build_dataset` 或训练派生门产生清单）。
+    """
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不支持切片（平台对其零写入）")
     if meta["task_type"] not in TILE_TASKS:
         raise DatasetError("invalid_args",
                            f"切片仅支持检测/分割/旋转框任务（当前 {meta['task_type']}）")
+    if not meta.get("active_manifest"):
+        raise DatasetError("state_conflict",
+                           "数据集尚无切分清单（票 03 出生不切分；切分实体由票 05 提供）")
     return meta
 
 
@@ -590,61 +803,86 @@ def tile_dataset(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
         _derive(ds_dir, manifest_new, task_type, classes, progress=_cb("派生训练结构"))
         save_stats(new_name, build_stats(scan["entries"], manifest_new, task_type, classes, new_name))
 
+        now = datetime.now().isoformat(timespec="seconds")
         summary = _tile_summary(items, keep_empty, name, rows, cols, overlap)
         meta_new = {
             "name": new_name,
             "task_type": task_type,
             "form": "managed",
-            "source_dir": str(src_dir),
-            "classes": classes,
-            "created_at": datetime.now().isoformat(timespec="seconds"),
+            "created_at": now,
+            "origin": {"mode": "labeled", "path": str(_source_dir(_ds_dir(name, root))),
+                       "at": now, "transfer": "copy"},
+            "validation_summary": _new_validation_summary(
+                report, source_fingerprint(src_dir), None),
             "manifests": [_manifest_brief(manifest_new)],
             "active_manifest": manifest_new["uid"],
-            "last_validation": report,
+            # spec §3.1：tiling{source,rows,cols,overlap,keep_empty,groups}——groups 持久化瓦片→源图组键
             "tiling": {"source": name, "rows": rows, "cols": cols, "overlap": overlap,
                        "keep_empty": keep_empty,
-                       "created_at": datetime.now().isoformat(timespec="seconds")},
+                       "groups": {g["source"]: [Path(en["image"]).name for en in g["entries"]]
+                                  for g in groups if g["entries"]}},
         }
-        _mark_drops(meta_new, report)
-        (ds_dir / "dataset.json").write_text(
-            json.dumps(meta_new, ensure_ascii=False, indent=2), encoding="utf-8")
-        return {"meta": meta_new, "summary": summary}
+        _write_meta(ds_dir, meta_new)
+        return {"meta": _compose_managed(meta_new, ds_dir), "summary": summary}
     except Exception:
         shutil.rmtree(ds_dir, ignore_errors=True)
         raise
 
 
-def exclude_files(name: str, files: list[str], reason: str = "", root: Path | None = None) -> dict:
-    """质量审计处置（M6 04 号票）：从切分清单排除文件——只动清单，不动标注真源。
+def _norm_source_names(files: list[str]) -> list[str]:
+    """排除/恢复入参归一为真源文件名：接受文件名或 source/ 内完整路径，拒绝空引用。"""
+    out: list[str] = []
+    for f in files:
+        name = Path(f).name
+        if not name:
+            raise DatasetError("invalid_args", f"非法文件引用：{f!r}")
+        out.append(name)
+    if len(set(out)) != len(out):
+        raise DatasetError("invalid_args", "文件清单含重复项")
+    return out
 
-    生成新 manifest（剩余文件 train/val 归属保持不变）、重建派生结构并切换 active；
-    旧清单与旧派生保留可查；健康报告聚合同步重组。重新切分以排除后文件集为基线。
+
+def exclude_files(name: str, files: list[str], reason: str = "", root: Path | None = None) -> dict:
+    """质量审计处置：从切分清单排除文件 + 记入 excluded.json——只动清单与排除账，不动真源。
+
+    排除账目落 `<ds>/excluded.json`（spec §3.1：文件名键字典，随数据集目录回收，
+    不由 DB 持有）。生成新 manifest（剩余文件 train/val 归属保持不变）、重建派生
+    结构并切换 active；旧清单与旧派生保留可查；健康报告聚合同步重组。
     """
     if not files:
         raise DatasetError("invalid_args", "排除清单为空")
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不在平台处置范围")
+    uid = meta.get("active_manifest")
+    if not uid:
+        raise DatasetError("state_conflict",
+                           "数据集尚无切分清单（票 03 出生不切分；切分实体由票 05 提供）")
     ds_dir = _ds_dir(name, root)
-    prev = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
-    known = {f["image"] for f in prev["files"]}
-    unknown = [f for f in files if f not in known]
+    prev = _read_meta(ds_dir / "derived" / uid / "split_manifest.json")
+    names = _norm_source_names(files)
+    known = {Path(f["image"]).name: f["image"] for f in prev["files"]}
+    unknown = [n for n in names if n not in known]
     if unknown:
-        raise DatasetError("invalid_args", f"不在当前切分清单内：{Path(unknown[0]).name} 等共 {len(unknown)} 个")
-    manifest = excluded_manifest(prev, files)
+        raise DatasetError("invalid_args",
+                           f"不在当前切分清单内：{unknown[0]} 等共 {len(unknown)} 个")
+    paths = [known[n] for n in names]
+    manifest = excluded_manifest(prev, paths)
     if not manifest["val"] or not manifest["train"]:
         raise DatasetError("state_conflict", "排除后 train 或 val 将为空，拒绝执行（各须至少保留 1 张）")
     _derive(ds_dir, manifest, meta["task_type"], meta["classes"])
     save_manifest(ds_dir, manifest)
-    if manifest["uid"] != meta["active_manifest"] and \
-            not any(b["uid"] == manifest["uid"] for b in meta["manifests"]):
-        meta["manifests"].append(_manifest_brief(manifest))
-    meta["active_manifest"] = manifest["uid"]
-    excluded_log = list(meta.get("excluded") or [])
-    excluded_log.extend({"file": f, "at": datetime.now().isoformat(timespec="seconds"),
-                         "reason": reason or "质量审计处置"} for f in sorted(files))
-    meta["excluded"] = excluded_log
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    raw = _read_meta(ds_dir / "dataset.json")
+    if manifest["uid"] != raw.get("active_manifest") and \
+            not any(b["uid"] == manifest["uid"] for b in raw.get("manifests") or []):
+        raw.setdefault("manifests", []).append(_manifest_brief(manifest))
+    raw["active_manifest"] = manifest["uid"]
+    ex = load_excluded(ds_dir)
+    now = datetime.now().isoformat(timespec="seconds")
+    for n in names:
+        ex[n] = {"at": now, "reason": reason or "质量审计处置"}
+    _save_excluded(ds_dir, ex)
+    _write_meta(ds_dir, raw)
     _refresh_stats_recompose(name, meta, prev, manifest)
     return manifest
 
@@ -668,18 +906,19 @@ def _history_entry(ds_dir: Path, manifest: dict, image: str) -> dict:
             "primary_label": None, "split": "train"}
 
 
-def _refresh_stats_full(name: str, meta: dict, manifest: dict) -> None:
-    """恢复/切回后画像全量重算（recompose 只删行不增行，回加文件必须重扫一次盘）。"""
-    src = Path(meta["source_dir"])
-    scan = scan_entries(src, meta["task_type"], meta["classes"])
-    save_stats(name, build_stats(scan["entries"], manifest, meta["task_type"], meta["classes"], name))
+def _refresh_stats_full(name: str, meta: dict, ds_dir: Path, manifest: dict) -> None:
+    """恢复后画像全量重算（recompose 只删行不增行，回加文件必须重扫一次盘）。"""
+    src = _source_dir(ds_dir)
+    classes = read_classes(ds_dir)
+    scan = scan_entries(src, meta["task_type"], classes)
+    save_stats(name, build_stats(scan["entries"], manifest, meta["task_type"], classes, name))
 
 
 def restore_files(name: str, files: list[str], root: Path | None = None) -> dict:
     """排除恢复（单图/多图）：按该文件最近一次 train/val 归属重新纳入活跃清单。
 
     exclude_files 的对偶：沿 prev_uid 链回溯归属（归属稳定——既有文件不动，恢复文件
-    回原位）、生成新清单并重建派生切换活跃、从排除日志清出、画像全量重算
+    回原位）、生成新清单并重建派生切换活跃、从 excluded.json 清出、画像全量重算
     （全量恢复时文件集回到原版，uid 天然复现原版本号）。
     """
     if not files:
@@ -687,56 +926,37 @@ def restore_files(name: str, files: list[str], root: Path | None = None) -> dict
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不在平台处置范围")
+    uid = meta.get("active_manifest")
+    if not uid:
+        raise DatasetError("state_conflict",
+                           "数据集尚无切分清单（票 03 出生不切分；切分实体由票 05 提供）")
     ds_dir = _ds_dir(name, root)
-    active = _read_json(str(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json"))
-    present = {f["image"] for f in active.get("files") or []}
-    in_active = [f for f in files if f in present]
+    active = _read_json(str(ds_dir / "derived" / uid / "split_manifest.json"))
+    names = _norm_source_names(files)
+    source = _source_dir(ds_dir)
+    present = {Path(f["image"]).name for f in active.get("files") or []}
+    in_active = [n for n in names if n in present]
     if in_active:
         raise DatasetError("invalid_args",
-                           f"已在当前清单内：{Path(in_active[0]).name} 等共 {len(in_active)} 个")
-    excluded_log = {e["file"] for e in (meta.get("excluded") or [])}
-    unknown = [f for f in files if f not in excluded_log]
+                           f"已在当前清单内：{in_active[0]} 等共 {len(in_active)} 个")
+    ex = load_excluded(ds_dir)
+    unknown = [n for n in names if n not in ex]
     if unknown:
-        raise DatasetError("invalid_args",
-                           f"不在排除日志中（未被本平台排除过）：{Path(unknown[0]).name}")
-    entries = [_history_entry(ds_dir, active, f) for f in sorted(files)]
+        raise DatasetError("invalid_args", f"不在排除日志中（未被本平台排除过）：{unknown[0]}")
+    entries = [_history_entry(ds_dir, active, str(source / n)) for n in sorted(names)]
     manifest = restored_manifest(active, entries)
     _derive(ds_dir, manifest, meta["task_type"], meta["classes"])
     save_manifest(ds_dir, manifest)
-    if manifest["uid"] != meta["active_manifest"] and \
-            not any(b["uid"] == manifest["uid"] for b in meta["manifests"]):
-        meta["manifests"].append(_manifest_brief(manifest))
-    meta["active_manifest"] = manifest["uid"]
-    meta["excluded"] = [e for e in (meta.get("excluded") or []) if e["file"] not in set(files)]
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    _refresh_stats_full(name, meta, manifest)
-    return manifest
-
-
-def switch_manifest(name: str, uid: str, root: Path | None = None) -> dict:
-    """切回历史清单版本：活跃指回旧 uid，按当前标注重建派生并全量重算画像。
-
-    切回语义：文件集回到该版本（排除过的文件随之回清单）；派生重建保证与当前
-    标注 JSON 一致；排除日志中已回到清单内的条目同步清出。
-    """
-    meta = get_dataset(name, root)
-    if meta["form"] != "managed":
-        raise DatasetError("invalid_args", "外部数据集不在平台处置范围")
-    if uid == meta.get("active_manifest"):
-        raise DatasetError("state_conflict", "该清单已是当前活跃版本")
-    ds_dir = _ds_dir(name, root)
-    path = ds_dir / "derived" / uid / "split_manifest.json"
-    if not any(b["uid"] == uid for b in meta.get("manifests") or []) or not path.is_file():
-        raise DatasetError("not_found", f"清单版本不存在：{uid}")
-    prev_active = _read_json(str(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json"))
-    manifest = _read_json(str(path))
-    _derive(ds_dir, manifest, meta["task_type"], meta["classes"])
-    save_manifest(ds_dir, manifest)
-    meta["active_manifest"] = uid
-    back = {f["image"] for f in manifest.get("files") or []}
-    meta["excluded"] = [e for e in (meta.get("excluded") or []) if e["file"] not in back]
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    _refresh_stats_full(name, meta, manifest)
+    raw = _read_meta(ds_dir / "dataset.json")
+    if manifest["uid"] != raw.get("active_manifest") and \
+            not any(b["uid"] == manifest["uid"] for b in raw.get("manifests") or []):
+        raw.setdefault("manifests", []).append(_manifest_brief(manifest))
+    raw["active_manifest"] = manifest["uid"]
+    _write_meta(ds_dir, raw)
+    for n in names:
+        ex.pop(n, None)
+    _save_excluded(ds_dir, ex)
+    _refresh_stats_full(name, meta, ds_dir, manifest)
     return manifest
 
 
@@ -749,11 +969,17 @@ def dataset_stats(name: str, root: Path | None = None) -> dict:
 
 
 def run_quality_audit(name: str, progress=None, root: Path | None = None) -> dict:
-    """跑体检（M6 03 号票，长操作）：指纹命中缓存直接回，否则全量计算并缓存。"""
+    """跑体检（M6 03 号票，长操作）：指纹命中缓存直接回，否则全量计算并缓存。
+
+    体检对象是活跃切分清单成员；票 03 出生的未切分数据集须先有切分（票 05）。
+    """
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不做质量审计")
-    manifest = _read_meta(_ds_dir(name, root) / "derived" / meta["active_manifest"] / "split_manifest.json")
+    uid = meta.get("active_manifest")
+    if not uid:
+        raise DatasetError("state_conflict", "数据集尚无切分清单，体检无从按成员执行")
+    manifest = _read_meta(_ds_dir(name, root) / "derived" / str(uid) / "split_manifest.json")
     fp = fingerprint_of(manifest)
     cached = load_cached(name, manifest["uid"])
     if cached and cached.get("fingerprint") == fp:
@@ -766,21 +992,30 @@ def run_quality_audit(name: str, progress=None, root: Path | None = None) -> dic
 def cached_audit(name: str, root: Path | None = None) -> dict | None:
     """读缓存体检报告（无则 None，UI 据此显示「尚未体检」）。"""
     meta = get_dataset(name, root)
-    if meta["form"] != "managed":
+    if meta["form"] != "managed" or not meta.get("active_manifest"):
         return None
-    return load_cached(name, meta.get("active_manifest"))
+    return load_cached(name, meta["active_manifest"])
 
 
 def ack_drops(name: str, root: Path | None = None) -> dict:
-    """确认接受丢弃（M9 确认门）：签名粘住——同一批丢弃确认一次，直到出现新丢弃集合。"""
+    """确认接受丢弃（M9 确认门）：签名粘住——同一批丢弃确认一次，直到出现新丢弃集合。
+
+    账目落 validation_summary.drops{count, signature, acked}；「未确认」不落独立字段，
+    按 count > 0 ∧ signature ≠ acked 现算（spec §3.1）。
+    """
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集无丢弃确认概念")
-    meta["drops_acked"] = meta.get("drops_signature") or ""
-    meta["drops_pending_ack"] = False
     ds_dir = _ds_dir(name, root)
-    (ds_dir / "dataset.json").write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    return {"name": name, "drops_acked": True, "pending": False}
+    raw = _read_meta(ds_dir / "dataset.json")
+    summary = raw.get("validation_summary") or {}
+    drops = summary.get("drops") or {}
+    if drops.get("signature"):
+        drops["acked"] = drops["signature"]
+        summary["drops"] = drops
+        raw["validation_summary"] = summary
+        _write_meta(ds_dir, raw)
+    return {"name": name, "drops_acked": True, "pending": _drops_pending(summary)}
 
 
 def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> dict:
@@ -829,8 +1064,12 @@ def relabel_refresh(name: str, force: bool = False, root: Path | None = None,
     meta = get_dataset(name, root)
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集只读，无重转换概念")
+    uid = meta.get("active_manifest")
+    if not uid:
+        raise DatasetError("state_conflict",
+                           "数据集尚无切分清单（票 03 出生不切分），无派生可刷新")
     ds_dir = _ds_dir(name, root)
-    manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
+    manifest = _read_meta(ds_dir / "derived" / uid / "split_manifest.json")
     task_type, classes = meta["task_type"], meta["classes"]
     by_image = {f["image"]: f for f in manifest["files"]}
     train_set = set(manifest["train"])
@@ -853,13 +1092,15 @@ def relabel_refresh(name: str, force: bool = False, root: Path | None = None,
                     continue
             except OSError:
                 continue
-        lines: list[str] = []
-        if lbl_path and lbl_path.exists():
-            data = _read_json(str(lbl_path))
-            if data.get("imageWidth") is not None:
-                lines, d = yolo_lines(data, task_type, classes)
-                drops.extend({"image": img, **item} for item in d)
-        write_label(txt, lines)
+        content, d, broken = _expected_projection(str(lbl_path) if lbl_path else None,
+                                                  task_type, classes)
+        if broken:
+            # 与 _derive、出队门同口径：无法投影的标注不静默落成空标签，直接拒刷新
+            raise DatasetError("state_conflict",
+                               f"{p.name} 的标注无法投影（坏 JSON / 缺画布尺寸 / 坏坐标）"
+                               "——刷新中止，先处理校验页红灯")
+        drops.extend({"image": img, **item} for item in d)
+        write_label(txt, [content])
         refreshed += 1
     return {"refreshed": refreshed, "drops": drops, "manifest": manifest["uid"]}
 
@@ -908,7 +1149,8 @@ def ensure_fresh_derivation(data_yaml: str | Path) -> dict:
     meta = _read_meta(ds_dir / "dataset.json")
     if meta.get("form") != "managed":
         return {"checked": 0, "refreshed": [], "dataset": ds_dir.name}
-    task_type, classes = meta["task_type"], meta["classes"]
+    task_type = meta["task_type"]
+    classes = read_classes(ds_dir)  # 类别唯一真源 classes.txt（spec §3.1）
     if TASK_MODE[task_type] == "classify":  # classify 走类目录链接，无派生 txt 概念
         return {"checked": 0, "refreshed": [], "dataset": ds_dir.name}
     manifest_path = manifest_dir / "split_manifest.json"
@@ -962,6 +1204,9 @@ def review_queue(name: str, root: Path | None = None) -> dict:
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不做标注审查")
     ds_dir = _ds_dir(name, root)
+    if not meta.get("active_manifest"):
+        raise DatasetError("state_conflict",
+                           "数据集尚无切分清单（票 03 出生不切分；切分实体由票 05 提供）")
     manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
     train_set = set(manifest["train"])
     susp = rv.compute_suspicion(meta, manifest, name)
@@ -1005,6 +1250,9 @@ def review_decide(name: str, image: str, state: str, reason: str = "",
     if meta["form"] != "managed":
         raise DatasetError("invalid_args", "外部数据集不做标注审查")
     ds_dir = _ds_dir(name, root)
+    if not meta.get("active_manifest"):
+        raise DatasetError("state_conflict",
+                           "数据集尚无切分清单（票 03 出生不切分；切分实体由票 05 提供）")
     manifest = _read_meta(ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
     entry = next((f for f in manifest["files"] if f["image"] == image), None)
     if entry is None:
@@ -1063,19 +1311,22 @@ def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
     只清理再生成物（images/labels/class 目录、data.yaml），split_manifest.json 原样保留。
     """
     derived = ds_dir / "derived" / manifest["uid"]
-    # 平铺派生（labels/<split>/<词干>.txt）的前置条件：同目录同词干的图源必须唯一，
-    # 否则两张图撞进同一个标签文件、后写覆盖前写。必须早于清目录——冲突时保留旧派生，
-    # 别让一次失败的再派生把上次可用产物也清空（票 02；校验侧另有 stem_conflict 红灯）
+    # 平铺派生（labels/<split>/<词干>.txt）的前置条件：**同一 split 内**词干必须唯一——
+    # 派生按词干平铺，子目录里的 a.png 与根上的 a.jpg 会撞进同一个标签文件、后写覆盖前写。
+    # 必须早于清目录——冲突时保留旧派生，别让一次失败的再派生把上次可用产物也清空
+    # （票 02；校验侧另有全局词干的 stem_conflict 红灯）
+    train_set = set(manifest["train"])
     stems: dict[tuple, list[str]] = {}
     for f in manifest["files"]:
         p = Path(f["image"])
-        stems.setdefault((str(p.parent), p.stem), []).append(p.name)
+        split = "train" if f["image"] in train_set or str(p) in train_set else "val"
+        stems.setdefault((split, p.stem), []).append(p.name)
     clash = {k: v for k, v in stems.items() if len(v) > 1}
     if clash:
         one = next(iter(clash.values()))
         raise DatasetError("state_conflict",
                            f"派生标签会同名覆盖（{len(clash)} 组词干冲突，如 {' / '.join(one)}）"
-                           "——同目录同词干的图片只保留一张，再「重新校验」")
+                           "——同词干的图片只保留一张，再「重新校验」")
     derived.mkdir(parents=True, exist_ok=True)
     for sub in ("images", "labels", "train", "val"):
         if (derived / sub).exists():
@@ -1105,12 +1356,14 @@ def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
                 _link(image, derived / split / flag / image.name)
             continue
         _link(image, derived / "images" / split / image.name)
-        lines: list[str] = []
-        if f["label"] and Path(f["label"]).exists():
-            data = _read_json(f["label"])
-            if data.get("imageWidth") is not None:  # 坏 JSON 解析为空 → 空标签（负样本处理）
-                lines, _drops = yolo_lines(data, task_type, classes)
-        write_label(derived / "labels" / split / f"{image.stem}.txt", lines)
+        content, _drops, broken = _expected_projection(f["label"], task_type, classes)
+        if broken:
+            # 三读者同口径（票 02）：校验记 unprojectable 红灯、出队门拒训、这里拒派生——
+            # 派生静默落空标签等于把坏标注当负样本喂给训练
+            raise DatasetError("state_conflict",
+                               f"{image.name} 的标注无法投影（坏 JSON / 缺画布尺寸 / 坏坐标）——"
+                               "先处理校验页红灯再派生")
+        write_label(derived / "labels" / split / f"{image.stem}.txt", [content])
 
     if mode != "classify":
         names = {i: c for i, c in enumerate(classes)}
@@ -1148,15 +1401,19 @@ def _manifest_brief(manifest: dict) -> dict:
     }
 
 
-def _brief(meta: dict) -> dict:
+def _brief(meta: dict, ds_dir: Path | None = None) -> dict:
+    """列表页摘要：validation_summary 直读落盘字段；「可能有变更」只做目录 mtime 粗判。"""
     keep = ["name", "task_type", "form", "created_at"]
     brief = {k: meta.get(k) for k in keep}
-    if meta["form"] == "managed":
+    if meta.get("form") == "managed":
+        summary = meta.get("validation_summary") or {}
         brief["classes"] = meta.get("classes", [])
         brief["active_manifest"] = meta.get("active_manifest")
-        brief["validation_ok"] = (meta.get("last_validation") or {}).get("ok")
+        brief["validation_ok"] = summary.get("ok")
         brief["source_dir"] = meta.get("source_dir")
-        brief["images"] = (meta.get("last_validation") or {}).get("total_images")
+        brief["origin"] = meta.get("origin")
+        brief["images"] = summary.get("total_images")
+        brief["may_have_changes"] = _may_have_changes(meta, ds_dir) if ds_dir else False
     else:
         brief["path"] = meta.get("path")
         brief["has_data_yaml"] = meta.get("has_data_yaml")

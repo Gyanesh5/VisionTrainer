@@ -52,14 +52,16 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
     if meta["form"] == "managed":
         uid = manifest_id or meta.get("active_manifest")
         if not uid:
-            raise _http_err("invalid_args", "数据集没有可用切分清单", 400)
+            raise _http_err("invalid_args",
+                            "数据集还没有可用切分：新建只校验 + 画像不切分，训练前先建切分", 400)
         data_yaml = Path(ds.get_datasets_root()) / meta["name"] / "derived" / uid / "data.yaml"
     else:
         data_yaml = Path(meta["path"]) / "data.yaml"
         if not data_yaml.exists():
             raise _http_err("invalid_args", "外部数据集缺 data.yaml，平台不代写（只读承诺）", 400)
     if not data_yaml.exists():
-        raise _http_err("invalid_args", f"派生结构缺失：{data_yaml}（请重切分或重新导入）", 400)
+        raise _http_err("invalid_args",
+                        f"派生结构缺失：{data_yaml}——在数据集页重新校验即可重建派生", 400)
 
     train_args = {"epochs": epochs, "imgsz": imgsz, "batch": batch,
                   "device": device, "workers": workers, "seed": seed}
@@ -439,14 +441,20 @@ PRIMARY_BY_TASK = {
 
 
 def _dataset_meta_of_task(task) -> dict:
-    """从任务的派生路径反查数据集元数据（task_type/classes）。"""
+    """从任务的派生路径反查数据集元数据（task_type/classes/source_dir…）。
+
+    票 03 起 classes/source_dir/last_validation 不再落 dataset.json（spec §3.1），一律经
+    `datasets.service.get_dataset` 取读时组合视图——消费侧字段口径与改造前保持一致。
+    """
     if not task.dataset_manifest_path:
         return {}
     dataset_dir = Path(task.dataset_manifest_path).parent.parent.parent
     meta_path = dataset_dir / "dataset.json"
     if not meta_path.exists():
         return {}
-    return json.loads(meta_path.read_text(encoding="utf-8"))
+    from ..datasets import service as ds_svc
+
+    return ds_svc.get_dataset(dataset_dir.name, root=dataset_dir.parent)
 
 
 def compare_runs(manager, task_id: int) -> dict:

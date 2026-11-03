@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from PIL import Image as PILImage
 
-from conftest import make_image
+from conftest import build_dataset, make_image
 
 from visiontrainer.datasets import review as rv
 from visiontrainer.datasets import service as svc
@@ -155,7 +155,7 @@ def _manifest_of(root, name):
 
 def test_tile_dataset_end_to_end(datasets_root, tmp_path):
     src = _mk_source(tmp_path)
-    svc.import_dataset("src-ds", "detect", str(src), ratio=0.8, seed=42)
+    build_dataset("src-ds", "detect", str(src), ratio=0.8, seed=42)
     src_manifest = _manifest_of(datasets_root, "src-ds")
     img = {Path(f["image"]).stem: f["image"] for f in src_manifest["files"]}
     svc.review_decide("src-ds", img["a"], "approved")
@@ -214,7 +214,7 @@ def test_tile_dataset_end_to_end(datasets_root, tmp_path):
 
 def test_tile_keep_empty_writes_negatives(datasets_root, tmp_path):
     src = _mk_source(tmp_path)
-    svc.import_dataset("src-ds", "detect", str(src))
+    build_dataset("src-ds", "detect", str(src))
     r = svc.tile_dataset("src-ds", 2, 2, 0.0, keep_empty=True)
     assert r["summary"]["tiles_written"] == 12
     tdir = datasets_root / "src-ds-tile2x2" / "source"
@@ -225,7 +225,7 @@ def test_tile_keep_empty_writes_negatives(datasets_root, tmp_path):
 
 def test_tile_failures_and_cleanup(datasets_root, tmp_path):
     src = _mk_source(tmp_path)
-    svc.import_dataset("src-ds", "detect", str(src))
+    build_dataset("src-ds", "detect", str(src))
     with pytest.raises(DatasetError) as e:
         svc.tile_dataset("src-ds", 5, 2, 0.2)
     assert e.value.code == "invalid_args"
@@ -238,7 +238,7 @@ def test_tile_failures_and_cleanup(datasets_root, tmp_path):
     big.mkdir()
     _real_img(big, "only.png")
     _lbl(big, "only", [_rect("car", 5, 5, 395, 295)])
-    svc.import_dataset("big-ds", "detect", str(big))
+    build_dataset("big-ds", "detect", str(big))
     with pytest.raises(DatasetError) as e:
         svc.tile_dataset("big-ds", 2, 2, 0.2)
     assert e.value.code == "state_conflict"
@@ -256,7 +256,7 @@ def test_tile_failures_and_cleanup(datasets_root, tmp_path):
     make_image(clf, "x.png")
     (clf / "x.json").write_text(json.dumps(
         {"imageWidth": 10, "imageHeight": 10, "shapes": [], "flags": {"ok": True}}))
-    svc.import_dataset("clf-ds", "classify", str(clf))
+    build_dataset("clf-ds", "classify", str(clf))
     with pytest.raises(DatasetError) as e:
         svc.tile_dataset_preview("clf-ds", 2, 2)
     assert e.value.code == "invalid_args"
@@ -270,7 +270,7 @@ def test_tile_failures_and_cleanup(datasets_root, tmp_path):
 
 def test_api_tile_endpoints(datasets_root, tmp_path, client):
     src = _mk_source(tmp_path)
-    svc.import_dataset("src-ds", "detect", str(src))
+    build_dataset("src-ds", "detect", str(src))
     r = client.post("/api/v1/datasets/src-ds/tile/preview",
                     json={"rows": 2, "cols": 2, "overlap": 0.2})
     assert r.status_code == 200
