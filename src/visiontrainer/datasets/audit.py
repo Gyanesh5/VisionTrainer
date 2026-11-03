@@ -22,7 +22,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .convert import shape_bbox_px
+from .projection import shape_bbox_px
 
 NEAR_HASH_THRESHOLD = 8  # phash 汉明距离阈值（64 位 hash，≤8 视为近似同图）
 IMBALANCE_RATIO = 0.1   # 类别失衡：min/max 实例数比低于此值

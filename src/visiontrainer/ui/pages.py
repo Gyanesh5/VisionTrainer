@@ -66,6 +66,8 @@ PROBLEM_ZH = {
     "polygon_invalid": "多边形无效（自交/退化）",
     "obb_invalid": "旋转框无效（退化/非凸）",
     "keypoints_invalid": "关键点坐标为负",
+    "stem_conflict": "同词干多图撞派生名",
+    "unprojectable": "标注无法投影（缺尺寸/坏坐标）",
 }
 
 # 恒可自动修复的问题码；obb_invalid 须靠 fixable 标记区分乱序（可修）与退化（人工）
@@ -5013,7 +5015,7 @@ document.addEventListener('scroll', function(e){
                     op = ops.begin(f"ds:{name}:export", f"导出标注 · {name}", scope=name)
                     with _busy(x_ok, "导出中…"):
                         try:
-                            r = await _io(ds.relabel_refresh, name, None, True, None, op.progress)
+                            r = await _io(ds.relabel_refresh, name, True, None, op.progress)
                             op.finish()
                             export_dialog.close()
                             n_drop = len(r.get("drops") or [])

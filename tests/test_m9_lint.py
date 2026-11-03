@@ -1,4 +1,4 @@
-"""M9 01 号票：转换守恒（drops）/ 标注级 lint / 确认门 / 单图重转换 / 同图重复 / 目标尺寸画像。"""
+"""M9 01 号票：转换守恒（drops）/ 标注级 lint / 确认门 / 派生增量重转 / 同图重复 / 目标尺寸画像。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import pytest
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.audit import compute_audit
-from visiontrainer.datasets.convert import json_to_yolo_lines
+from visiontrainer.datasets.formats import yolo_lines
 from visiontrainer.datasets.stats import build_stats
 from visiontrainer.datasets.validate import scan_entries, validate_dataset
 from visiontrainer.datasets.service import DatasetError
@@ -60,7 +60,7 @@ def test_conservation_mixed_drops():
         {"label": "car", "shape_type": "rectangle", "points": [[5, 5]]},  # 点数不足 → drop
     ]
     data = {"imageWidth": 640, "imageHeight": 480, "shapes": shapes}
-    lines, _has, drops = json_to_yolo_lines(data, "detect", ["car"])
+    lines, drops = yolo_lines(data, "detect", ["car"])
     assert len(lines) + len(drops) == len(shapes)
     assert [d["reason"] for d in drops] == ["unknown_class", "degenerate_box", "degenerate_box", "too_few_points"]
 
@@ -185,9 +185,10 @@ def test_import_drops_pending_ack_and_sticky(tmp_path, tmp_db):
     assert svc.get_dataset("m9drop", root=root)["drops_pending_ack"] is True
 
 
-# ---------------------------------------------------------------- 单图重转换（联动）
+# ---------------------------------------------------------------- 派生增量重转（联动）
 
-def test_relabel_refresh_single_and_incremental(tmp_path, tmp_db):
+
+def test_relabel_refresh_incremental(tmp_path, tmp_db):
     root = tmp_path / "root"
     root.mkdir()
     src = tmp_path / "src3"
@@ -214,12 +215,13 @@ def test_relabel_refresh_single_and_incremental(tmp_path, tmp_db):
     time.sleep(0.01)
     _label_file(src / "a.json", [_rect("car", (200, 200, 400, 400))])
 
-    r = svc.relabel_refresh("m9rf", image=str(src / "a.png"), root=root)
+    # 增量：只有 a 的 JSON 比 txt 新 → 只刷 a（单图显式重转入口随票 02 退役，漂移由这里兜住）
+    r = svc.relabel_refresh("m9rf", root=root)
     assert r["refreshed"] == 1 and _txt("a") != old_a
 
-    # 增量全量：只有 a 的 JSON 比 txt 新？a 刚刷新过 → 只有改动过的图会被再刷
+    # 无新变更：mtime 增量判据下零刷新
     r2 = svc.relabel_refresh("m9rf", root=root)
-    assert r2["refreshed"] == 0  # 无新变更
+    assert r2["refreshed"] == 0
 
     time.sleep(0.01)
     os.utime(src / "b.json")  # 模拟 b 被编辑（mtime 推进）
@@ -234,9 +236,6 @@ def test_relabel_refresh_single_and_incremental(tmp_path, tmp_db):
     with pytest.raises(DatasetError) as ei:
         svc.relabel_refresh("m9rf", force=True, root=root, format="coco")
     assert ei.value.code == "invalid_args" and "暂不支持" in ei.value.message
-
-    with pytest.raises(DatasetError):
-        svc.relabel_refresh("m9rf", image=str(src / "nope.png"), root=root)
 
 
 # ---------------------------------------------------------------- 同图重复（审计 D）

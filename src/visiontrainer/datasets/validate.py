@@ -8,7 +8,7 @@ M6 变更：
 - 五条规则各配「错误→原因→修法」三行文案（GUIDANCE）。
 
 M9 01 号票变更：
-- 转换守恒：scan 内嵌 json_to_yolo_lines，逐 shape 丢弃明细（drops）进报告，needs_confirm 确认门；
+- 转换守恒：scan 内嵌投影（projection.project_json），逐 shape 丢弃明细（drops）进报告，needs_confirm 确认门；
 - 标注级 lint：坐标越界（±1% 容差）/极小框警告/孤儿 JSON/多边形有效性（shapely）/
   obb 四点退化·凸性/关键点负坐标——按 task_type 启用；
 - 健康 meta 的 objs 升级带像素 w/h（小目标占比原料）。
@@ -26,7 +26,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
-from .convert import json_to_yolo_lines, shape_bbox_px, shape_matches_task
+from .projection import project_json, shape_bbox_px, shape_matches_task
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -46,9 +46,9 @@ GUIDANCE: dict[str, dict[str, str]] = {
         "fix": "在 X-AnyLabeling 中重新打开该图并重新保存标注（Ctrl+S）；若无法恢复则删除该 JSON 让图片降级为负样本",
     },
     "no_matching_shape": {
-        "error": "标注形状与数据集任务类型不匹配（如检测集里出现多边形标注）",
-        "cause": "该图按另一种任务类型标注过（例如先做了分割又导入为检测集）",
-        "fix": "在 X-AnyLabeling 中把该图标注改为本任务类型的形状（检测=矩形），或删除不匹配的形状",
+        "error": "标注形状无一能投影到该数据集的任务类型（如检测集里只有关键点/折线）",
+        "cause": "该图按另一种任务类型标注过（例如先做了姿态又导入为检测集）——矩形/圆/多边形/旋转框在检测集里是合法的（投影为外接框）",
+        "fix": "在 X-AnyLabeling 中补画本任务类型的形状（检测=矩形），或把该图归到对应任务的数据集",
     },
     "unknown_labels": {
         "error": "标注里出现类别表未登记的类别",
@@ -90,6 +90,16 @@ GUIDANCE: dict[str, dict[str, str]] = {
         "error": "关键点坐标为负（画布外）",
         "cause": "关键点拖出画布左/上边界",
         "fix": "数据集概览「一键修复」自动钳回画布内（贴边）",
+    },
+    "stem_conflict": {
+        "error": "同目录同词干的多个图片文件（如 a.jpg 与 a.png 共存）",
+        "cause": "图片被工具重编码或复制时留了第二种扩展名；派生标签按词干命名，两张图会撞在同一个 txt 上",
+        "fix": "删掉其中一种扩展名的文件（保留与标注 JSON 配套的那张；在 X-AnyLabeling 里另存常会再生成第二种），再「重新校验」",
+    },
+    "unprojectable": {
+        "error": "标注无法投影为训练几何（缺画布尺寸或坐标不是数字）",
+        "cause": "JSON 被手动改坏、导出工具漏写字段，或坐标写成了字符串/缺项",
+        "fix": "在 X-AnyLabeling 中重新打开该图并另存标注（会补回宽高），无法打开则删除该 JSON 让图片降级为负样本",
     },
 }
 
@@ -171,6 +181,19 @@ def _shape_bbox_center(s: dict, w, h) -> tuple[float, float, float, float] | Non
     return ((x0 + x1) / 2 / float(w), (y0 + y1) / 2 / float(h), round(x1 - x0, 1), round(y1 - y0, 1))
 
 
+_GEOM_CN = {"bbox": "外接框", "polygon": "多边形", "quad": "四角框", "pose": "位姿实例"}
+
+
+def _projected_lint(projected: dict | None) -> list[str]:
+    """等价展开的信息级摘要（按源形状聚合）：例「polygon→外接框 2 个」。"""
+    counts: dict[tuple[str, str], int] = {}
+    for o in (projected or {}).get("objects", []):
+        if o["projected"]:
+            key = (o["source_shape"], _GEOM_CN.get(o["geom"], o["geom"]))
+            counts[key] = counts.get(key, 0) + 1
+    return [f"{st}→{geom} {n} 个" for (st, geom), n in sorted(counts.items())]
+
+
 def scan_entries(source_dir: Path, task_type: str, classes: list[str],
                  progress=None) -> dict:
     """扫描 source_dir：图片 + 同词干 JSON。返回 entries 与发现的问题清单。
@@ -183,6 +206,11 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
     problems: list[dict] = []
     warnings: list[dict] = []  # M9：极小框等警告（不算错误、不影响 ok）
     images = list_images(source_dir)
+    # 平铺目录派生的前置条件：同目录同词干的多个图源（a.jpg + a.png）会撞在同一个
+    # 派生标签名上——词干唯一才谈得上「一图一标签」，撞名是红灯（票 02 stem_conflict）
+    stem_groups: dict[tuple, list[Path]] = {}
+    for p in images:
+        stem_groups.setdefault((p.parent, p.stem), []).append(p)
     for i, image in enumerate(images):
         if progress is not None and (i % 20 == 0 or i == len(images) - 1):
             progress(i + 1, len(images))
@@ -199,6 +227,11 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
             "problems": [],
             "meta": None,
         }
+        group = stem_groups[(image.parent, image.stem)]
+        if len(group) > 1:
+            entry["problems"].append("stem_conflict")
+            problems.append({"image": str(image), "code": "stem_conflict",
+                             "detail": ",".join(sorted(p.name for p in group))})
         if label_path is None:
             entry["problems"].append("missing_json")  # 无标注 → 负样本，不报错
             entries.append(entry)
@@ -225,13 +258,25 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
                 break
 
         w, h = data.get("imageWidth"), data.get("imageHeight")
-        # ── M9 01 号票：转换守恒 + 标注级 lint（同一份解析内完成；探测轮 classes 为空时跳过）
-        if classes and task_type != "classify":
-            _lines, _has, drops = json_to_yolo_lines(data, task_type, classes)
+        # ── 转换守恒 + 标注级 lint：与派生写入读同一份投影（票 02，ADR 0011）；探测轮 classes 为空时跳过
+        if classes and task_type != "classify" and not (w and h):
+            # 缺画布尺寸 → 无法投影：旧版在这里静默跳过守恒账目（派生成空标签），v1.4 起是红灯
+            entry["problems"].append("unprojectable")
+            problems.append({"image": str(image), "code": "unprojectable",
+                             "detail": "标注缺 imageWidth/imageHeight，无法投影为训练几何"})
+        elif classes and task_type != "classify":
+            try:
+                projected = project_json(data, task_type, classes)
+            except (KeyError, TypeError, ValueError, IndexError) as exc:
+                entry["problems"].append("unprojectable")
+                problems.append({"image": str(image), "code": "unprojectable",
+                                 "detail": f"标注几何无法解析：{exc}"})
+                projected = None
+            drops = projected["drops"] if projected else []
             for d in drops:
                 entry["problems"].append("drop")
                 # 误用折线工具画的封闭形状可一键闭合成 polygon（仅 segment——polygon
-                # 只在 seg 模式被转换器接受，detect/obb 翻转了照样丢弃不标可修）
+                # 只在 seg 模式被投影接受，detect/obb 不收 linestrip，翻转了照样丢弃不标可修）
                 fixable = (
                     task_type == "segment"
                     and d.get("reason") == "task_mismatch" and d.get("shape_type") == "linestrip"
@@ -240,6 +285,11 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
                 )
                 problems.append({"image": str(image), "code": "drop", "detail": d,
                                  "fixable": fixable})
+            # 跨任务可投影的形状（detect 里的 polygon、segment 里的 rectangle…）是**信息级**
+            # lint，不再算问题：等价表已把它投成任务规范几何（票 02 / ADR 0011）
+            for detail in _projected_lint(projected):
+                warnings.append({"image": str(image), "code": "projected_shape",
+                                "detail": detail})
             for s in shapes:
                 st = s.get("shape_type")
                 box = shape_bbox_px(s)
@@ -359,6 +409,8 @@ def validate_dataset(source_dir: Path, task_type: str, classes: list[str],
             "polygon_invalid": sum(1 for p in problems if p["code"] == "polygon_invalid"),
             "obb_invalid": sum(1 for p in problems if p["code"] == "obb_invalid"),
             "keypoints_invalid": sum(1 for p in problems if p["code"] == "keypoints_invalid"),
+            "stem_conflict": sum(1 for p in problems if p["code"] == "stem_conflict"),
+            "unprojectable": sum(1 for p in problems if p["code"] == "unprojectable"),
         },
         "fixables": len(problems) - len(blocking),  # 可自动修复项数（概览琥珀区 + 一键修复入口）
         "ok": not blocking,

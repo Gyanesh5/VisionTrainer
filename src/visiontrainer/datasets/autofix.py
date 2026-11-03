@@ -25,7 +25,7 @@ import logging
 import shutil
 from pathlib import Path
 
-from .convert import clamp_points
+from .projection import clamp_points
 from .review import _atomic_write_json, shapes_hash
 from .validate import _obb_shape_ok, linestrip_closable, list_images, obb_hull_reorderable
 

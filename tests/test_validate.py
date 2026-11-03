@@ -39,9 +39,10 @@ def test_unreadable_image_detected(tmp_path):
 
 
 def test_no_matching_shape_and_unknown_labels(tmp_path):
+    """无一可投影的形状才算 no_matching_shape：检测集里的 polygon 由等价表投成外接框（票 02）。"""
     src = _src(tmp_path)
     make_image(src, "mismatch.png")
-    make_annotation(src, "mismatch", [{"label": "car", "shape_type": "polygon", "points": [[1, 1], [2, 2], [3, 3]]}])
+    make_annotation(src, "mismatch", [{"label": "car", "shape_type": "point", "points": [[1, 1]]}])
     make_image(src, "unknown.png")
     make_annotation(src, "unknown", [{"label": "bus", "shape_type": "rectangle", "points": [[1, 1], [2, 2], [3, 3], [4, 4]]}])
     report = validate_dataset(src, "detect", ["car"])

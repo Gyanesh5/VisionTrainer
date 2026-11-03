@@ -19,14 +19,15 @@ from pathlib import Path
 from PIL import Image
 
 from .audit import compute_audit, fingerprint_of, load_cached, save_cached
-from .convert import TASK_SHAPES, json_to_yolo_lines, write_label
+from .formats import write_label, yolo_lines
+from .projection import EQUIV, TASK_MODE, TASK_TYPES
 from .split import (absorbed_manifest, build_grouped_manifest, build_manifest,
                     excluded_manifest, restored_manifest, save_manifest)
 from .stats import build_stats, get_stats, recompose, save_stats
 from .tiling import JPEG_QUALITY, TILE_GRID_MAX, TILE_OVERLAP_MAX, TILE_TASKS, plan_image, summarize
 from .validate import scan_entries, validate_dataset
 
-VALID_TASK_TYPES = set(TASK_SHAPES)
+VALID_TASK_TYPES = set(TASK_TYPES)
 
 
 class DatasetError(Exception):
@@ -146,7 +147,7 @@ def import_dataset(
     detected: set[str] = set()
     for e in scan["entries"]:
         for s in _read_json(e["label"]).get("shapes", []):
-            if s.get("label") and s.get("shape_type") in TASK_SHAPES[task_type][1]:
+            if s.get("label") and s.get("shape_type") in EQUIV[task_type]:
                 detected.add(s["label"])
     classes = sorted(detected)
     if not classes and task_type != "classify":
@@ -789,6 +790,7 @@ def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> d
     `<root>/<name>/autofix/<时间戳>/`。返回修复摘要 + 重校验摘要（完整报告读
     validation_report.json 或经 get_dataset）。
     progress_cb(phase, cur, total)：三阶段（修复写回/重转派生/扫描校验）进度回调。
+    「重转派生」是派生增量刷新阶段的现名，随票 07 格式池懒刷新退役（docs/spec.md 校验规则扩充/自动修复条）。
     """
     from .autofix import apply_autofix
 
@@ -810,16 +812,16 @@ def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> d
                            "needs_confirm": report["needs_confirm"]}}
 
 
-def relabel_refresh(name: str, image: str | None = None, force: bool = False,
-                    root: Path | None = None, progress_cb=None,
-                    format: str = "yolo") -> dict:
-    """标注变更联动（M9 01 号票）：单图（image 给定）或全清单按 mtime 增量重转换派生 YOLO txt。
+def relabel_refresh(name: str, force: bool = False, root: Path | None = None,
+                    progress_cb=None, format: str = "yolo") -> dict:
+    """标注变更联动（M9 01 号票）：全清单按 mtime 增量重转换派生 YOLO txt。
 
     force=True 跳过增量判断全量重转换——转换器规则变更后（如 OBB 越界改钳制），
     JSON mtime 未变但派生 txt 已过时，增量模式看不见，须强制重建；「导出标注」按钮
-    （YOLO 格式）即此路径。
+    （YOLO 格式）即此路径。单图显式重转入口随票 02 退役：三个读者读同一投影后，
+    派生漂移由出队门的逐图内容比对兜住，无须人工点名重转某一张。
     返回 {refreshed, drops}——刷新过程中出现的转换丢弃逐条带回（不自动确认，重校验后入账）。
-    progress_cb(phase, cur, total)：全清单模式逐 20 张回调（UI 进度条用）。
+    progress_cb(phase, cur, total)：逐 20 张回调（UI 进度条用）。
     format：导出格式，当前仅 yolo（派生结构即 YOLO 导出，训练直接使用）。
     """
     if format != "yolo":
@@ -832,21 +834,19 @@ def relabel_refresh(name: str, image: str | None = None, force: bool = False,
     task_type, classes = meta["task_type"], meta["classes"]
     by_image = {f["image"]: f for f in manifest["files"]}
     train_set = set(manifest["train"])
-    if image is not None and image not in by_image:
-        raise DatasetError("not_found", f"图片不在活跃切分清单内：{Path(image).name}")
-    targets = [image] if image is not None else list(by_image)
+    targets = list(by_image)
 
     refreshed = 0
     drops: list[dict] = []
     for i, img in enumerate(targets):
-        if progress_cb is not None and image is None and (i % 20 == 0 or i == len(targets) - 1):
+        if progress_cb is not None and (i % 20 == 0 or i == len(targets) - 1):
             progress_cb("重转派生", i + 1, len(targets))
         p = Path(img)
         split = "train" if img in train_set or str(p) in train_set else "val"
         txt = ds_dir / "derived" / manifest["uid"] / "labels" / split / f"{p.stem}.txt"
         lbl = by_image[img].get("label")
         lbl_path = Path(lbl) if lbl else None
-        if image is None and not force:  # 增量模式：JSON 未变（不比派生 txt 新）且 txt 存在则跳过
+        if not force:  # 增量模式：JSON 未变（不比派生 txt 新）且 txt 存在则跳过
             try:
                 if txt.exists() and (not lbl_path or lbl_path.exists()
                                      and lbl_path.stat().st_mtime_ns <= txt.stat().st_mtime_ns):
@@ -857,7 +857,7 @@ def relabel_refresh(name: str, image: str | None = None, force: bool = False,
         if lbl_path and lbl_path.exists():
             data = _read_json(str(lbl_path))
             if data.get("imageWidth") is not None:
-                lines, _has, d = json_to_yolo_lines(data, task_type, classes)
+                lines, d = yolo_lines(data, task_type, classes)
                 drops.extend({"image": img, **item} for item in d)
         write_label(txt, lines)
         refreshed += 1
@@ -868,7 +868,7 @@ def relabel_refresh(name: str, image: str | None = None, force: bool = False,
 
 def _expected_projection(label_path: str | None, task_type: str,
                          classes: list[str]) -> tuple[str, list[dict], bool]:
-    """真源标注 JSON → 当前应有的派生 txt 内容（与 _derive/relabel_refresh 同一转换器，逐字节可比）。
+    """真源标注 JSON → 当前应有的派生 txt 内容（与 _derive/relabel_refresh 同一投影，逐字节可比）。
 
     返回 (内容, drops, 损坏)。负样本（无 JSON）→ 空串；classify 无尺寸键属正常；
     非 classify 缺 imageWidth/imageHeight 视为损坏——按空串派生会静默丢光标注，必须红门。
@@ -881,7 +881,10 @@ def _expected_projection(label_path: str | None, task_type: str,
         return "", [], True
     if task_type != "classify" and (data.get("imageWidth") is None or data.get("imageHeight") is None):
         return "", [], True
-    lines, _has, drops = json_to_yolo_lines(data, task_type, classes)
+    try:
+        lines, drops = yolo_lines(data, task_type, classes)
+    except (KeyError, TypeError, ValueError, IndexError):
+        return "", [], True  # 坏点/坏结构（非数值坐标等）→ 红门，不静默派生空标签
     return "".join(lines), drops, False
 
 
@@ -906,7 +909,7 @@ def ensure_fresh_derivation(data_yaml: str | Path) -> dict:
     if meta.get("form") != "managed":
         return {"checked": 0, "refreshed": [], "dataset": ds_dir.name}
     task_type, classes = meta["task_type"], meta["classes"]
-    if TASK_SHAPES[task_type][0] == "classify":  # classify 走类目录链接，无派生 txt 概念
+    if TASK_MODE[task_type] == "classify":  # classify 走类目录链接，无派生 txt 概念
         return {"checked": 0, "refreshed": [], "dataset": ds_dir.name}
     manifest_path = manifest_dir / "split_manifest.json"
     if not manifest_path.is_file():
@@ -1060,13 +1063,26 @@ def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
     只清理再生成物（images/labels/class 目录、data.yaml），split_manifest.json 原样保留。
     """
     derived = ds_dir / "derived" / manifest["uid"]
+    # 平铺派生（labels/<split>/<词干>.txt）的前置条件：同目录同词干的图源必须唯一，
+    # 否则两张图撞进同一个标签文件、后写覆盖前写。必须早于清目录——冲突时保留旧派生，
+    # 别让一次失败的再派生把上次可用产物也清空（票 02；校验侧另有 stem_conflict 红灯）
+    stems: dict[tuple, list[str]] = {}
+    for f in manifest["files"]:
+        p = Path(f["image"])
+        stems.setdefault((str(p.parent), p.stem), []).append(p.name)
+    clash = {k: v for k, v in stems.items() if len(v) > 1}
+    if clash:
+        one = next(iter(clash.values()))
+        raise DatasetError("state_conflict",
+                           f"派生标签会同名覆盖（{len(clash)} 组词干冲突，如 {' / '.join(one)}）"
+                           "——同目录同词干的图片只保留一张，再「重新校验」")
     derived.mkdir(parents=True, exist_ok=True)
     for sub in ("images", "labels", "train", "val"):
         if (derived / sub).exists():
             shutil.rmtree(derived / sub)
     (derived / "data.yaml").unlink(missing_ok=True)
     train_set, val_set = set(manifest["train"]), set(manifest["val"])
-    mode = TASK_SHAPES[task_type][0]
+    mode = TASK_MODE[task_type]
 
     if mode == "classify":
         class_dirs = {derived / "train" / c for c in classes} | {derived / "val" / c for c in classes}
@@ -1093,7 +1109,7 @@ def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
         if f["label"] and Path(f["label"]).exists():
             data = _read_json(f["label"])
             if data.get("imageWidth") is not None:  # 坏 JSON 解析为空 → 空标签（负样本处理）
-                lines, _has, _drops = json_to_yolo_lines(data, task_type, classes)
+                lines, _drops = yolo_lines(data, task_type, classes)
         write_label(derived / "labels" / split / f"{image.stem}.txt", lines)
 
     if mode != "classify":

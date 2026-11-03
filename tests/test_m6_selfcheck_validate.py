@@ -82,13 +82,14 @@ def test_selfcheck_endpoint(tmp_path, monkeypatch):
 # ---------------------------------------------------------------- 校验修复指引（05 号票）
 
 def test_guidance_covers_all_problem_codes():
-    """修复指引覆盖全部问题码（05 号票五规则 + M9 01 号票标注级 lint）。"""
+    """修复指引覆盖全部问题码（05 号票五规则 + M9 01 标注级 lint + 票 02 投影 lint）。"""
     from visiontrainer.datasets.validate import GUIDANCE
 
     assert set(GUIDANCE) == {"unreadable_image", "bad_json", "no_matching_shape",
                              "unknown_labels", "missing_json",
                              "drop", "out_of_bounds", "orphan_json",
-                             "polygon_invalid", "obb_invalid", "keypoints_invalid"}
+                             "polygon_invalid", "obb_invalid", "keypoints_invalid",
+                             "stem_conflict", "unprojectable"}
     for code, g in GUIDANCE.items():
         assert all(g.get(k) for k in ("error", "cause", "fix")), f"{code} 缺三行文案之一"
         assert "X-AnyLabeling" in g["fix"] or "平台" in g["fix"] or "无需修复" in g["fix"] \
@@ -109,8 +110,8 @@ def test_report_problems_complete_per_entry(tmp_path):
     make_annotation(src, "fake", [{"label": "car", "shape_type": "rectangle",
                                    "points": [[1, 1], [2, 2], [3, 3], [4, 4]]}])
     make_image(src, "mismatch.png")
-    make_annotation(src, "mismatch", [{"label": "car", "shape_type": "polygon",
-                                       "points": [[1, 1], [2, 2], [3, 3]]}])   # no_matching_shape
+    make_annotation(src, "mismatch", [{"label": "car", "shape_type": "point",
+                                       "points": [[1, 1]]}])   # no_matching_shape（检测集收不了关键点）
     make_image(src, "unknown.png")
     make_annotation(src, "unknown", [{"label": "bus", "shape_type": "rectangle",
                                       "points": [[1, 1], [2, 2], [3, 3], [4, 4]]}])  # unknown_labels

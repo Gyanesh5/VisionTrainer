@@ -12,7 +12,7 @@ from __future__ import annotations
 import copy
 import math
 
-from .convert import shape_bbox_px
+from .projection import shape_bbox_px
 
 # 切片支持的任务（pose 关键点切碎无意义、classify 无形状；spec 2.1）
 TILE_TASKS = ("detect", "segment", "obb")

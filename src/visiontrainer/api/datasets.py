@@ -72,7 +72,6 @@ class TileBody(TilePreviewBody):
 
 
 class RelabelRefreshBody(BaseModel):
-    image: str | None = None  # 省略 = 全清单按 mtime 增量
     force: bool = False       # 跳过增量判断全量重转换（转换器规则变更后的恢复通道）
     format: str = "yolo"      # 导出格式，当前仅 yolo
 
@@ -235,10 +234,10 @@ def tile_dataset(name: str, body: TileBody):
 
 @router.post("/{name}/relabel-refresh")
 def relabel_refresh(name: str, body: RelabelRefreshBody | None = None):
-    """标注变更联动（M9）：单图重转换刷新派生 YOLO txt。body: `{image?, force?, format?}`。"""
+    """标注变更联动（M9）：全清单重转换刷新派生 YOLO txt。body: `{force?, format?}`。"""
     try:
         b = body or RelabelRefreshBody()
-        return svc.relabel_refresh(name, b.image, b.force, format=b.format)
+        return svc.relabel_refresh(name, b.force, format=b.format)
     except DatasetError as exc:
         return _error_response(exc)
 

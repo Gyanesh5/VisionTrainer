@@ -150,21 +150,6 @@ def test_relabel_refresh_reports_full_list_progress(managed_dataset: str) -> Non
     assert calls[-1][1] == calls[-1][2] == 9
 
 
-def test_relabel_refresh_single_image_skips_progress(managed_dataset: str,
-                                                     datasets_root: Path) -> None:
-    calls: list[tuple] = []
-    meta = svc.get_dataset(managed_dataset)
-    manifest_path = (datasets_root / managed_dataset / "derived"
-                     / meta["active_manifest"] / "split_manifest.json")
-    import json
-
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    image = manifest["train"][0]
-    svc.relabel_refresh(managed_dataset, image=image,
-                        progress_cb=lambda phase, cur, total: calls.append((phase, cur, total)))
-    assert calls == []  # 单图模式不走进度回调（毫秒级操作）
-
-
 def test_auto_fix_dataset_reports_three_phases(managed_dataset: str) -> None:
     calls: list[tuple] = []
     r = svc.auto_fix_dataset(
