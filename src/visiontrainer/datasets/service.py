@@ -36,9 +36,9 @@ from pathlib import Path
 from PIL import Image
 
 from . import classops
+from . import pool as pool_lib
 from . import split as split_lib
 from .audit import compute_audit, leak_view, load_cached, save_cached
-from .formats import write_label, yolo_lines
 from .projection import TASK_MODE, TASK_TYPES
 from . import stats as stats_lib
 from .stats import build_stats, get_stats, save_stats
@@ -1191,21 +1191,15 @@ def create_split(name: str, *, mode: str, seed: int, ratio: float, stratify: boo
     首次训练强制它。**同划分命中既有 uid 直接复用**（不产生第二份文件、不改既有 memo），
     切分独立确认落盘、不随任务取消回滚。
 
-    派生树沿用 `<ds>/derived/<uid>/` 既有形态（票 07 才换格式池）：输入是**切分实体的成员名单**
-    （不是实效集——排除与缺图只在出队时剔，派生树与画像按清单口径），逐字节产物与票 02 一致。
+    票 07：切分落盘即返回（`progress` 参数随派生树退役保留占位）——格式池与切分无关，
+    出队时按版本戳懒建/核对；新建切分零派生、零画像写入（读时视图，票 06）。
     """
     meta, ds_dir = _managed_or_404(name, root, "新建切分")
     kwargs = _plan_kwargs(meta, mode, seed, ratio, stratify, approved_only, parent_uid)
     planned = _entity_call(split_lib.plan_split, ds_dir, memo=memo, **kwargs)
     _entity_call(split_lib.save_split, ds_dir, planned)
     # 以落盘形态为准：命中既有 uid 时 save_split 不覆盖，回来的是既有那一份（memo 也不动）
-    split = _entity_call(split_lib.load_split, ds_dir, planned["uid"])
-    task_type, classes = meta["task_type"], read_classes(ds_dir)
-    view = split_lib.files_view(ds_dir, split)
-    if not (ds_dir / "derived" / split["uid"]).is_dir():
-        _derive(ds_dir, view, task_type, classes, progress=progress)
-    # 票 06 一行制：新建切分**不写画像行**——健康报告读时按切分实体组成（零重算）
-    return split
+    return _entity_call(split_lib.load_split, ds_dir, planned["uid"])
 
 
 def set_split_memo(name: str, uid: str, memo: str, root: Path | None = None) -> dict:
@@ -1651,170 +1645,50 @@ def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> d
     run_dir = _ds_dir(name, root) / "autofix" / datetime.now().strftime("%Y%m%d-%H%M%S")
     summary = apply_autofix(Path(meta["source_dir"]), meta["task_type"], run_dir,
                             progress=_cb("修复写回"))
-    relabel = relabel_refresh(name, root=root, progress_cb=progress_cb)  # 增量：只有被改写的 JSON 比派生 txt 新
+    # 票 07：不再增量重转派生——流程内即时重校验 + 画像，格式池由出队门懒刷新
     report = validate_dataset_by_name(name, root, progress_cb=progress_cb)
-    return {**summary, "relabel": relabel,
+    return {**summary,
             "validation": {"ok": report["ok"], "fixables": report["fixables"],
                            "counts": report["counts"], "drops": report["drops"],
                            "needs_confirm": report["needs_confirm"]}}
 
 
-def relabel_refresh(name: str, force: bool = False, root: Path | None = None,
-                    progress_cb=None, format: str = "yolo") -> dict:
-    """标注变更联动（M9 01 号票）：按 **最新切分** 的成员清单增量重转换派生 YOLO txt。
+# ---------------------------------------------------------------- 格式池与逐 Run 入口（票 07，ADR 0012）
 
-    force=True 跳过增量判断全量重转换——转换器规则变更后（如 OBB 越界改钳制），
-    JSON mtime 未变但派生 txt 已过时，增量模式看不见，须强制重建；「导出标注」按钮
-    （YOLO 格式）即此路径。单图显式重转入口随票 02 退役：三个读者读同一投影后，
-    派生漂移由出队门的逐图内容比对兜住，无须人工点名重转某一张。
-    未切分的数据集没有派生树（票 05：`derived/<uid>/` 的 uid 就是切分 uid），刷新天然是
-    no-op——返回零计数，不报错（「一键修复」在未切分数据集上仍要能跑完校验阶段）。
-    返回 {refreshed, drops, split}——刷新过程中出现的转换丢弃逐条带回（不自动确认，重校验后入账）。
-    progress_cb(phase, cur, total)：逐 20 张回调（UI 进度条用）。
-    format：导出格式，当前仅 yolo（派生结构即 YOLO 导出，训练直接使用）。
+def check_pool(name: str, split: dict, effective: dict,
+               root: Path | None = None, progress=None) -> dict:
+    """出队六步②③④（票 07）：格式池版本戳核对 → 实效成员逐字节比对刷新 → 清除断链。
+
+    入参用切分实体与实效集（manager 的 task_inputs 产物），返回 `pool.prepare_pool`
+    的结果；ValueError（词干冲突/标注损坏/投影丢弃）一律转 state_conflict 拒训。
     """
-    if format != "yolo":
-        raise DatasetError("invalid_args", f"暂不支持的导出格式：{format}（当前仅支持 yolo）")
-    meta, ds_dir = _managed_dataset(name, root, "重转派生标注")
-    split = split_lib.latest_split(ds_dir)
-    if split is None:
-        return {"refreshed": 0, "drops": [], "split": None}
-    view = split_lib.files_view(ds_dir, split)
-    task_type, classes = meta["task_type"], meta["classes"]
-    by_image = {f["image"]: f for f in view["files"]}
-    train_set = set(view["train"])
-    targets = list(by_image)
-
-    refreshed = 0
-    drops: list[dict] = []
-    for i, img in enumerate(targets):
-        if progress_cb is not None and (i % 20 == 0 or i == len(targets) - 1):
-            progress_cb("重转派生", i + 1, len(targets))
-        p = Path(img)
-        split_name = "train" if img in train_set or str(p) in train_set else "val"
-        txt = ds_dir / "derived" / view["uid"] / "labels" / split_name / f"{p.stem}.txt"
-        lbl = by_image[img].get("label")
-        lbl_path = Path(lbl) if lbl else None
-        if not force:  # 增量模式：JSON 未变（不比派生 txt 新）且 txt 存在则跳过
-            try:
-                if txt.exists() and (not lbl_path or lbl_path.exists()
-                                     and lbl_path.stat().st_mtime_ns <= txt.stat().st_mtime_ns):
-                    continue
-            except OSError:
-                continue
-        content, d, broken = _expected_projection(str(lbl_path) if lbl_path else None,
-                                                  task_type, classes)
-        if broken:
-            # 与 _derive、出队门同口径：无法投影的标注不静默落成空标签，直接拒刷新
-            raise DatasetError("state_conflict",
-                               f"{p.name} 的标注无法投影（坏 JSON / 缺画布尺寸 / 坏坐标）"
-                               "——刷新中止，先处理校验页红灯")
-        drops.extend({"image": img, **item} for item in d)
-        write_label(txt, [content])
-        refreshed += 1
-    return {"refreshed": refreshed, "drops": drops, "split": view["uid"]}
-
-
-# ---------------------------------------------------------------- 派生新鲜度门（2026-10-31 用户裁决「派生遵从真源」）
-
-def _expected_projection(label_path: str | None, task_type: str,
-                         classes: list[str]) -> tuple[str, list[dict], bool]:
-    """真源标注 JSON → 当前应有的派生 txt 内容（与 _derive/relabel_refresh 同一投影，逐字节可比）。
-
-    返回 (内容, drops, 损坏)。负样本（无 JSON）→ 空串；classify 无尺寸键属正常；
-    非 classify 缺 imageWidth/imageHeight 视为损坏——按空串派生会静默丢光标注，必须红门。
-    """
-    if not label_path or not Path(label_path).exists():
-        return "", [], False
+    _managed_dataset(name, root, "格式池核对")
+    ds_dir = _ds_dir(name, root)
+    task_type = _read_meta(ds_dir / "dataset.json")["task_type"]
+    names = list((effective.get("train") or [])) + list((effective.get("val") or []))
     try:
-        data = json.loads(Path(label_path).read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return "", [], True
-    if task_type != "classify" and (data.get("imageWidth") is None or data.get("imageHeight") is None):
-        return "", [], True
-    try:
-        lines, drops = yolo_lines(data, task_type, classes)
-    except (KeyError, TypeError, ValueError, IndexError):
-        return "", [], True  # 坏点/坏结构（非数值坐标等）→ 红门，不静默派生空标签
-    return "".join(lines), drops, False
+        return pool_lib.prepare_pool(ds_dir, task_type, read_classes(ds_dir), names,
+                                     progress=progress)
+    except KeyError as exc:  # 未注册格式
+        raise DatasetError("invalid_args", f"未注册的格式适配器：{exc}") from exc
+    except ValueError as exc:
+        raise DatasetError("state_conflict", f"开训前检查未通过：{exc}") from exc
 
 
-def refresh_derivation(name: str, split_uid: str, progress=None) -> dict:
-    """出队前把**该切分**的派生 txt 对齐真源标注 JSON 的当前投影（消费点强制新鲜）。
-
-    票 05 换入口（旧 `ensure_fresh_derivation(data_yaml)` 随清单层一起删除）：Task 三列
-    `(dataset, split_uid, format_id)` 里的 split_uid 就是内容寻址的切分 uid，派生树按同一个
-    uid 落在 `<ds>/derived/<uid>/`，无须再从冻结的 data.yaml 反推数据集。逐图**内容**比对
-    （不比 mtime——转换器规则升级也能查出漂移），漂移文件就地重转换，使「改完标注直接开训」
-    仍是唯一正确用法。
-
-    口径两点：
-    - 成员取**切分清单全体**而非实效集：排除在册与盘上缺图只在出队实效集里剔，派生标签不跟着
-      抹掉（恢复排除即自动回效，无需重建）；真源已不存在的成员顺手清掉断链与残留标签。
-    - 外部数据集（平台零写入）与未落盘的切分都在此拒绝，不静默跳过。
-
-    返回 {"checked", "refreshed"（漂移图片绝对路径名单）, "dataset"}。
-    Raises:
-        DatasetError: invalid_args——外部数据集；not_found——切分实体不存在；
-            state_conflict——派生结构缺失、标注 JSON 损坏，或比对中转换出现丢弃
-            （unknown_class / 退化框等）：宁可拒训，不静默旧账、也不静默脏账。
-    """
-    meta, ds_dir = _managed_dataset(name, root=None, action="刷新派生")
-    split = _entity_call(split_lib.load_split, ds_dir, split_uid)
-    derived = ds_dir / "derived" / split["uid"]
+def write_run_entry(name: str, run_dir: Path, effective: dict,
+                    pool_info: dict | None = None, root: Path | None = None) -> dict:
+    """出队六步⑤（票 07）：逐 Run 训练入口写进 `<run_dir>/data/`，返回入口与快照 format 段。"""
+    _managed_dataset(name, root, "逐 Run 训练入口")
+    ds_dir = _ds_dir(name, root)
+    meta = _read_meta(ds_dir / "dataset.json")
     task_type = meta["task_type"]
-    classes = read_classes(ds_dir)  # 类别唯一真源 classes.txt（spec §3.1）
-    if TASK_MODE[task_type] == "classify":  # classify 走类目录链接，无派生 txt 概念
-        return {"checked": 0, "refreshed": [], "dataset": name}
-    if not derived.is_dir():
-        raise DatasetError("state_conflict",
-                           f"派生结构缺失（{split['uid']}）——请重建该切分或重建任务")
-    view = split_lib.files_view(ds_dir, split)
-    train_set = set(view["train"])
-    source = _source_dir(ds_dir)
-    stale: list[str] = []
-    all_drops: list[dict] = []
-    total = len(view["files"])
-    for i, f in enumerate(view["files"]):
-        if progress is not None and (i % 20 == 0 or i == total - 1):
-            progress(i + 1, total)
-        p = Path(f["image"])
-        split_name = "train" if f["image"] in train_set or str(p) in train_set else "val"
-        txt = derived / "labels" / split_name / f"{p.stem}.txt"
-        img_link = derived / "images" / split_name / p.name
-        if not p.is_file():
-            # 真源已不存在（XAL 删图 / 手工清理）：清掉链接与标签，别让训练吃到断链
-            if (img_link.is_symlink() or img_link.exists()):
-                img_link.unlink(missing_ok=True)
-            txt.unlink(missing_ok=True)
-            continue
-        expected, drops, broken = _expected_projection(f.get("label"), task_type, classes)
-        if broken:
-            raise DatasetError("state_conflict",
-                               f"标注 JSON 损坏（{name} / {p.name}）——"
-                               "请到数据集页「重新校验」查看修复指引")
-        try:
-            actual = txt.read_text(encoding="utf-8") if txt.is_file() else None
-        except OSError:
-            actual = None
-        if not img_link.is_symlink() and not img_link.is_file():
-            _link(p, img_link)  # 派生图片链接补齐（真源换了名/新增同词干文件）
-        if actual != expected:
-            write_label(txt, expected)
-            stale.append(f["image"])
-            all_drops.extend({"image": f["image"], **d} for d in drops)
-    if all_drops:
-        reasons: dict[str, int] = {}
-        for d in all_drops:
-            reasons[d["reason"]] = reasons.get(d["reason"], 0) + 1
-        detail = "、".join(f"{k}×{v}" for k, v in sorted(reasons.items()))
-        raise DatasetError(
-            "state_conflict",
-            f"标注新增了无法进入训练的形状（{name}：{detail}，如 "
-            f"{Path(all_drops[0]['image']).name}）——请到数据集页「重新校验」查看问题清单，"
-            "修复标注或确认丢弃后再训")
-    _ = source  # source/ 只用于上面的存在性判据（成员名单口径见 docstring）
-    return {"checked": total, "refreshed": stale, "dataset": name}
+    class_map = (pool_info or {}).get("class_map")
+    if class_map is None:                      # 池未备（异常路径）：按当前类别表现算
+        class_map = read_classes(ds_dir) and {c: i for i, c in enumerate(read_classes(ds_dir))}
+    result = pool_lib.write_run_entry(Path(run_dir), ds_dir, task_type,
+                                      read_classes(ds_dir), class_map, effective)
+    result["labels_dir_abs"] = result["labels_dir"] or ""
+    return result
 
 
 # ---------------------------------------------------------------- 标注审查（M9 02 号票）
@@ -1924,85 +1798,6 @@ def export_review_rejects(name: str, root: Path | None = None) -> dict:
     out.write_text("\n".join(lines), encoding="utf-8")
     return {"path": str(out), "count": len(rejects),
             "entries": [{"image": it["image"], "reason": it["reason"]} for it in rejects]}
-
-
-# ---------------------------------------------------------------- 派生结构
-
-def _derive(ds_dir: Path, manifest: dict, task_type: str, classes: list[str],
-            progress=None) -> None:
-    """按 manifest 生成标准 YOLO 训练目录（图片 symlink，标签转换；05 号票零拷贝）。
-
-    只清理再生成物（images/labels/class 目录、data.yaml），split_manifest.json 原样保留。
-    """
-    derived = ds_dir / "derived" / manifest["uid"]
-    # 平铺派生（labels/<split>/<词干>.txt）的前置条件：**同一 split 内**词干必须唯一——
-    # 派生按词干平铺，子目录里的 a.png 与根上的 a.jpg 会撞进同一个标签文件、后写覆盖前写。
-    # 必须早于清目录——冲突时保留旧派生，别让一次失败的再派生把上次可用产物也清空
-    # （票 02；校验侧另有全局词干的 stem_conflict 红灯）
-    train_set = set(manifest["train"])
-    stems: dict[tuple, list[str]] = {}
-    for f in manifest["files"]:
-        p = Path(f["image"])
-        split = "train" if f["image"] in train_set or str(p) in train_set else "val"
-        stems.setdefault((split, p.stem), []).append(p.name)
-    clash = {k: v for k, v in stems.items() if len(v) > 1}
-    if clash:
-        one = next(iter(clash.values()))
-        raise DatasetError("state_conflict",
-                           f"派生标签会同名覆盖（{len(clash)} 组词干冲突，如 {' / '.join(one)}）"
-                           "——同词干的图片只保留一张，再「重新校验」")
-    derived.mkdir(parents=True, exist_ok=True)
-    for sub in ("images", "labels", "train", "val"):
-        if (derived / sub).exists():
-            shutil.rmtree(derived / sub)
-    (derived / "data.yaml").unlink(missing_ok=True)
-    train_set, val_set = set(manifest["train"]), set(manifest["val"])
-    mode = TASK_MODE[task_type]
-
-    if mode == "classify":
-        class_dirs = {derived / "train" / c for c in classes} | {derived / "val" / c for c in classes}
-        for d in class_dirs:
-            d.mkdir(parents=True, exist_ok=True)
-    else:
-        for split in ("train", "val"):
-            (derived / "images" / split).mkdir(parents=True, exist_ok=True)
-            (derived / "labels" / split).mkdir(parents=True, exist_ok=True)
-
-    for i, f in enumerate(manifest["files"]):
-        if progress is not None and (i % 20 == 0 or i == len(manifest["files"]) - 1):
-            progress(i + 1, len(manifest["files"]))
-        image = Path(f["image"])
-        split = "train" if image.as_posix() in train_set or str(image) in train_set else "val"
-        if mode == "classify":
-            data = _read_json(f["label"])
-            flag = next((k for k, v in (data.get("flags") or {}).items() if v), None)
-            if flag and (derived / split / flag).is_dir():
-                _link(image, derived / split / flag / image.name)
-            continue
-        _link(image, derived / "images" / split / image.name)
-        content, _drops, broken = _expected_projection(f["label"], task_type, classes)
-        if broken:
-            # 三读者同口径（票 02）：校验记 unprojectable 红灯、出队门拒训、这里拒派生——
-            # 派生静默落空标签等于把坏标注当负样本喂给训练
-            raise DatasetError("state_conflict",
-                               f"{image.name} 的标注无法投影（坏 JSON / 缺画布尺寸 / 坏坐标）——"
-                               "先处理校验页红灯再派生")
-        write_label(derived / "labels" / split / f"{image.stem}.txt", [content])
-
-    if mode != "classify":
-        names = {i: c for i, c in enumerate(classes)}
-        yaml_text = f"path: {derived}\ntrain: images/train\nval: images/val\nnames: {json.dumps(names, ensure_ascii=False)}\nnc: {len(classes)}\n"
-        (derived / "data.yaml").write_text(yaml_text, encoding="utf-8")
-
-
-def _link(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        return
-    try:
-        os.symlink(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
 
 
 # ---------------------------------------------------------------- 内部工具

@@ -199,15 +199,17 @@ def _db_path(factory) -> Path:
 
 
 def test_restore_does_not_rebuild_derivation(ds14, datasets_root):
+    """票 07：恢复/排除都不碰格式池与切分（池只在出队核对时写）。"""
     name = "ledger"
     split = svc.latest_split(name)
-    derived = ds14 / "derived" / split["uid"]
-    marker = derived / "data.yaml"
-    before_mtime = marker.stat().st_mtime_ns
+    derived_root = ds14 / "derived"
+    before = sorted(str(p) for p in derived_root.rglob("*")) if derived_root.exists() else None
     svc.exclude_files(name, [split["train"][0]], "测")
-    assert marker.stat().st_mtime_ns == before_mtime     # 排除不碰派生
+    after_ex = sorted(str(p) for p in derived_root.rglob("*")) if derived_root.exists() else None
+    assert after_ex == before                            # 排除不碰池
     svc.restore_files(name, [split["train"][0]])
-    assert marker.stat().st_mtime_ns == before_mtime     # 恢复也不重建派生
+    after_rs = sorted(str(p) for p in derived_root.rglob("*")) if derived_root.exists() else None
+    assert after_rs == before                            # 恢复也不重建
     assert svc.latest_split(name)["uid"] == split["uid"]  # 不回溯历史清单链（uid 不变）
 
 

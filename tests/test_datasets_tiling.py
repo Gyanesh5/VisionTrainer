@@ -179,9 +179,12 @@ def test_tile_dataset_end_to_end(datasets_root, tmp_path):
     side = lambda n: "train" if n in set(split["train"]) else "val"  # noqa: E731
     assert side("a_r0c0.png") == side("a_r1c1.png")
     assert len(split["train"]) + len(split["val"]) == 3
-    derived = datasets_root / "tiled" / "derived" / split["uid"]
-    assert (derived / "data.yaml").exists()
-    assert list((derived / "labels").rglob("*.txt"))
+    # 票 07：出队池核对落位——池平铺标签含全部瓦片（同源同侧已由切分实体保证）
+    pool_info = svc.check_pool("tiled", split,
+                               {"train": list(split["train"]), "val": list(split["val"])})
+    pool = datasets_root / "tiled" / "derived" / "yolo"
+    assert (pool / "data.yaml").exists() is False          # 入口在 run_dir/data/，池只有 images/labels
+    assert list((pool / "labels").glob("*.txt"))
 
     # 源集零改动 + 删除解耦
     assert (src_dir / "a.png").exists() and src.exists()

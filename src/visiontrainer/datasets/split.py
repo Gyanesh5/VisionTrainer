@@ -9,8 +9,8 @@
 - 无 active 指针、无版本链：切分历史就是 splits/ 目录本身，「最近」= created_at 最新。
 
 全部纯文件层函数：不碰 DB、不碰 REST，错误只用 `FileNotFoundError`/`ValueError`，
-由 service 层转译为 `DatasetError`。旧清单层（build_manifest / excluded_manifest /
-restored_manifest 等活跃指针机制）已随票 05 硬切删除，无兼容层。
+由 service 层转译为 `DatasetError`。旧清单层（build_manifest 等）随票 05 硬切；
+消费视图 files_view（旧派生树/画像的清单形态）随票 07 格式池退役。
 """
 
 from __future__ import annotations
@@ -490,37 +490,3 @@ def effective_set(ds_dir: Path, split: dict) -> dict:
 
 
 # ---------------------------------------------------------------- 派生树消费视图
-
-def files_view(ds_dir: Path, split: dict) -> dict:
-    """切分实体 → 既有派生树/画像/体检消费的清单形态（{uid, files, train, val}）。
-
-    票 05 保留现有派生目录形态（每切分一棵树，键换成切分 uid），本票不换格式池抽象：
-    files 逐成员现扫 source/（image/label 为绝对路径字符串、primary_label 现取），
-    train/val 为绝对路径名单——与旧清单消费方（_derive、stats、audit、
-    ensure_fresh_derivation）逐字段兼容。成员在盘缺失也保留条目（实效集口径归
-    effective_set 与出队门裁决）。
-    """
-    source = ds_dir / _SOURCE_SUBDIR
-    classes = _classes_of(ds_dir)
-    paths: dict[str, str] = {}
-    files: list[dict] = []
-    for name in sorted(set(split["train"]) | set(split["val"])):
-        image = source / name
-        label_path = label_json_of(source, image)
-        paths[name] = str(image)
-        files.append({"image": str(image),
-                      "label": str(label_path) if label_path else None,
-                      "primary_label": _primary_label_of(label_path, classes)})
-    tset, vset = set(split["train"]), set(split["val"])
-    return {
-        "uid": split["uid"],
-        "created_at": split["created_at"],
-        "seed": split["params"]["seed"],
-        "ratio": split["params"]["ratio"],
-        "stratify": split["params"]["stratify"],
-        "approved_only": split["params"]["approved_only"],
-        "grouped": split["grouped"],
-        "files": files,
-        "train": sorted(paths[n] for n in tset if n in paths),
-        "val": sorted(paths[n] for n in vset if n in paths),
-    }

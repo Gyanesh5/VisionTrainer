@@ -242,31 +242,14 @@ def write_split(ds_dir: Path, train: list[str], val: list[str], *, seed: int = 4
     return split
 
 
-def write_derived_tree(ds_dir: Path, split: dict, classes: list[str]) -> Path:
-    """手搭该切分的派生树 `<ds>/derived/<uid>/{data.yaml,images/labels}`（票 05 保留旧形态，
-    键换成切分 uid；格式池归票 07）。标签内容不参与 stub 训练器，落盘只为 labels_frozen 有据。"""
-    derived = ds_dir / "derived" / split["uid"]
-    names = ", ".join(f"{i}: {c}" for i, c in enumerate(classes)) or "0: x"
-    for side in ("train", "val"):
-        (derived / "images" / side).mkdir(parents=True, exist_ok=True)
-        labels = derived / "labels" / side
-        labels.mkdir(parents=True, exist_ok=True)
-        for name in split[side]:
-            (labels / f"{Path(name).stem}.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
-    (derived / "data.yaml").write_text(
-        f"path: {derived}\ntrain: images/train\nval: images/val\nnames: {{{names}}}\n",
-        encoding="utf-8")
-    return derived
-
-
 def build_split_dataset(name: str, task_type: str, source_dir: Path | str, *,
                         train: list[str] | None = None, val: list[str] | None = None,
                         classes: list[str] | None = None, root: Path | None = None,
                         **split_kwargs) -> tuple[Path, dict]:
-    """托管出生（票 03 唯一入口）+ 手写切分实体与派生树，返回 (数据集目录, 切分实体)。
+    """托管出生（票 03 唯一入口）+ 手写切分实体，返回 (数据集目录, 切分实体)。
 
-    名单缺省 = `source/` 下盘上文件按名排序后 8:2 分（train 取前 80%，val 取余），
-    与 `write_split` 一样完全脱离服务层，可单独验证训练侧的实效集消费。
+    名单缺省 = `source/` 下盘上文件按名排序后 8:2 分（train 取前 80%，val 取余）。
+    票 07：不搭任何派生树——格式池与切分无关，出队时按版本戳懒建/核对。
     """
     src = Path(source_dir)
     if classes is None:
@@ -279,7 +262,6 @@ def build_split_dataset(name: str, task_type: str, source_dir: Path | str, *,
         k = int(len(names) * 0.8)
         train, val = names[:k], names[k:]
     split = write_split(ds_dir, list(train or []), list(val or []), **split_kwargs)
-    write_derived_tree(ds_dir, split, classes)
     return ds_dir, split
 
 

@@ -171,10 +171,10 @@ def test_exclude_files_only_writes_excluded_log(tmp_path, datasets_root, tmp_db,
     assert r["excluded"] == [victim] and r["excluded_total"] == 1
     # 排除账读时组合视图（excluded.json：文件名键，视图给 {file, at, reason}）
     assert [e["file"] for e in svc.get_dataset(name)["excluded"]] == [victim]
-    # 切分实体不动：uid 不变、无新目录、派生树原样
+    # 切分实体不动：uid 不变、无新目录；票 07 池懒建——排除更不触发任何派生写
     assert svc.latest_split(name)["uid"] == old_split["uid"]
     assert [s["uid"] for s in svc.list_splits(name)] == [old_split["uid"]]
-    assert (datasets_root / name / "derived" / old_split["uid"] / "data.yaml").is_file()
+    assert not (datasets_root / name / "derived").exists()
     # 画像原料行不动（一行制：排除不写账不重算），读时视图即时缩水（票 06 验收①）
     from visiontrainer.datasets.stats import get_stats as _raw_stats
 

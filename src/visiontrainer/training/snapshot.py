@@ -6,14 +6,16 @@
 - **切分段** `split{uid, params, memo, grouped}`：本次钉住的切分实体溯源（uid 只由划分内容
   决定，参数/血缘仅作溯源——ADR 0010）
 - **实效段** `effective{train[], val[], dropped{missing[], excluded[]}}`：出队时按
-  「切分成员 − 盘上缺失 − 排除在册」算出的实际训练名单快照（绝对路径口径，供历史 Run
-  详情页完整查看当时名单与错误分析 GT 定位）
+  「切分成员 − 盘上缺失 − 排除在册」算出的实际训练名单快照（相对 source/ 文件名口径，
+  供历史 Run 详情页完整查看当时名单与错误分析 GT 定位）
+- **格式段** `format{format_id, converter_version, projection_version, class_map,
+  entry_path}`（票 07）：本次实际生效的格式与类别映射——错误分析与部署回查类别以
+  class_map 为准，不回读当前类别表
 - 类别表：内容 + sha256（此后改名/重排不影响旧 Run 查证）
 - 派生标签：逐文件 sha256 的聚合哈希（val 副本另落 run_dir/labels_frozen/，错误分析 GT 对账用）
 
 外部数据集无切分实体：`split` / `effective` 两段为 null，训练入口沿用其自带 data.yaml。
 
-`format` 段（format_id / 版本 / class_map / entry_path）属票 07 的格式池，本票不写。
 数据集此后重切/排除/改名/漂移，旧 Run 快照不受影响（跨 Run diff 完整）。
 """
 
@@ -61,7 +63,8 @@ def _effective_segment(effective: dict | None) -> dict | None:
 
 def build_snapshot(*, run_uid: str, round_no: int, base_model: str, train_args: dict,
                    data_yaml: str, dataset_dir: str,
-                   split: dict | None = None, effective: dict | None = None) -> dict:
+                   split: dict | None = None, effective: dict | None = None,
+                   fmt: dict | None = None, labels_dir: str | None = None) -> dict:
     """组装快照。
 
     - `data_yaml`：本次逐 Run 训练入口（托管集 = `<ds>/derived/<split_uid>/data.yaml`，
@@ -81,9 +84,10 @@ def build_snapshot(*, run_uid: str, round_no: int, base_model: str, train_args: 
     weight_identity = ({"kind": "file", "path": str(weight_path), "sha256": _file_sha256(weight_path)}
                        if weight_path.is_file() else {"kind": "resolved_by_trainer", "name": base_model})
 
-    # 派生标签逐文件 sha256 的聚合哈希：开训门重转后取值——此后派生目录改标/重建不回头改旧 Run 查证
+    # 池标签逐文件 sha256 的聚合哈希（票 07）：托管集 = 格式池平铺标签；外部集 = 自带 labels。
+    # 此后池重建/改标不回头改旧 Run 查证——可复现性来自快照本身。
     labels_files: dict[str, str] = {}
-    labels_root = derived / "labels"
+    labels_root = Path(labels_dir) if labels_dir else derived / "labels"
     if labels_root.is_dir():
         for p in sorted(labels_root.rglob("*.txt")):
             digest = _file_sha256(p)
@@ -104,6 +108,7 @@ def build_snapshot(*, run_uid: str, round_no: int, base_model: str, train_args: 
         "dataset_dir": str(dataset_dir),
         "split": _split_segment(split),
         "effective": _effective_segment(effective),
+        "format": dict(fmt) if fmt else None,
         "classes": {"list": classes,
                     "sha256": hashlib.sha256("\n".join(classes).encode("utf-8")).hexdigest()},
         "labels": {"sha256": labels_sha, "n_files": len(labels_files)},

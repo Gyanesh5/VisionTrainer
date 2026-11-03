@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import build_split_dataset, write_derived_tree, write_split
+from conftest import build_split_dataset, write_split
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
@@ -72,7 +72,13 @@ def _wait(ctx, run_uid: str, statuses: set[str], timeout: float = 15.0) -> dict:
         if last.get("status") in statuses:
             return last
         time.sleep(0.1)
-    raise AssertionError(f"等待 {statuses} 超时，最后状态：{last.get('status')} / {last.get('error')}")
+    err = last.get("error")
+    if not err:
+        for tr in ctx.client.get(f"/api/v1/tasks").json():
+            for r in tr.get("runs") or []:
+                if r.get("uid") == run_uid and r.get("error"):
+                    err = r["error"]
+    raise AssertionError(f"等待 {statuses} 超时，最后状态：{last.get('status')} / {err}")
 
 
 def _launch(ctx, run_uid: str, statuses: set[str] = {"done"}) -> dict:
@@ -211,20 +217,28 @@ def test_实效为空时建任务与出队两处都拒(eff_ctx):
     assert _task_row(ctx, brief["id"])["status"] == "failed"
 
 
-def test_出队只训实效成员且派生刷新按切分键走(eff_ctx):
+def test_出队只训实效成员且池按版本戳核对(eff_ctx):
     ctx = eff_ctx
     seen: list[tuple] = []
-    ctx.monkeypatch.setattr(svc, "refresh_derivation",
-                            lambda name, uid, progress=None: seen.append((name, uid)) or
-                            {"checked": 0, "refreshed": ["x"], "dataset": name}, raising=False)
+    real = svc.check_pool
+
+    def _spy(name, split, effective, root=None, progress=None):
+        seen.append(name)
+        return real(name, split, effective, root=root, progress=progress)
+
+    ctx.monkeypatch.setattr(svc, "check_pool", _spy)
     (ctx.ds_dir / "source" / CAR[0]).unlink()
     brief = _create_task(ctx, split_uid=ctx.split["uid"])
     run = _launch(ctx, _run_uids(ctx, brief["id"])[0])
     assert run["status"] == "done"
-    assert seen == [("plate", ctx.split["uid"])], "出队刷新派生应传 (数据集名, 切分 uid)"
+    assert seen == ["plate"], "出队六步②③④按 (数据集, 实效集) 核对格式池"
     snap = run["snapshot"]
     assert CAR[0] not in snap["effective"]["train"]
     assert snap["effective"]["dropped"]["missing"] == [CAR[0]]
+    # 池在数据集侧按 format_id 落位（与切分无关）；逐 Run 入口在 run_dir/data/
+    assert (ctx.ds_dir / "derived" / "yolo" / "derived.json").is_file()
+    assert snap["data_yaml"].endswith("/data/data.yaml")
+    assert snap["format"]["format_id"] == "yolo" and "car" in snap["format"]["class_map"]
 
 
 # ---------------------------------------------------------------- 可比性不变式
@@ -233,8 +247,6 @@ def test_同uid与val名单一致互为充要(eff_ctx):
     ctx = eff_ctx
     other = write_split(ctx.ds_dir, train=CAR + PERSON[:3], val=[PERSON[3]],
                         created_at="2026-01-02T00:00:00")
-    # 出队会走真身 refresh_derivation：切分须有派生树（create_split 的产物），手写实体时一并手搭
-    write_derived_tree(ctx.ds_dir, other, svc.read_classes(ctx.ds_dir))
     a = _create_task(ctx, split_uid=ctx.split["uid"], name="同切分甲")
     b = _create_task(ctx, split_uid=ctx.split["uid"], name="同切分乙")
     c = _create_task(ctx, split_uid=other["uid"], name="另一切分")
@@ -321,9 +333,9 @@ def test_快照冻结split与effective两段(eff_ctx):
     assert sorted(eff["train"]) == sorted(set(ctx.split["train"]) - {CAR[1], CAR[2]})
     assert eff["val"] == sorted([PERSON[3], "negative.png"])
     assert eff["dropped"] == {"missing": [CAR[1]], "excluded": [CAR[2]]}
-    assert snap["data_yaml"].endswith(f"derived/{ctx.split['uid']}/data.yaml")
+    assert snap["data_yaml"].endswith("/data/data.yaml")   # 逐 Run 入口（票 07）
     assert snap["dataset_dir"] == str(ctx.ds_dir)
-    assert "format" not in snap, "format 段属票 07，本票不发明中间态"
+    assert snap["format"]["class_map"] == {"car": 0, "person": 1}
     # 历史 Run 详情页读快照即可完整还原当时名单：冻结副本与实效 val 一一对应
     frozen = sorted(p.name for p in (Path(run["run_dir"]) / "labels_frozen" / "val").iterdir())
     assert frozen == [f"{Path(n).stem}.txt" for n in sorted(eff["val"])]

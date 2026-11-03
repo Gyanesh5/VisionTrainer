@@ -132,11 +132,6 @@ class SplitMemoBody(BaseModel):
     memo: str
 
 
-class RelabelRefreshBody(BaseModel):
-    force: bool = False       # 跳过增量判断全量重转换（转换器规则变更后的恢复通道）
-    format: str = "yolo"      # 导出格式，当前仅 yolo
-
-
 class ReviewDecideBody(BaseModel):
     image: str
     state: str  # pending / approved / rejected / skipped
@@ -383,16 +378,6 @@ def tile_dataset(name: str, body: TileBody):
     try:
         return svc.tile_dataset(name, body.rows, body.cols, body.overlap, body.name,
                                 body.keep_empty)
-    except DatasetError as exc:
-        return _error_response(exc)
-
-
-@router.post("/{name}/relabel-refresh")
-def relabel_refresh(name: str, body: RelabelRefreshBody | None = None):
-    """标注变更联动（M9）：全清单重转换刷新派生 YOLO txt。body: `{force?, format?}`。"""
-    try:
-        b = body or RelabelRefreshBody()
-        return svc.relabel_refresh(name, b.force, format=b.format)
     except DatasetError as exc:
         return _error_response(exc)
 

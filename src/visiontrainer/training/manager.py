@@ -171,16 +171,15 @@ def dataset_dir_of(name: str) -> tuple[dict, Path]:
     return meta, Path(path)
 
 
-def _entry_yaml_of(ds_dir: Path, form: str, split_uid: str | None) -> Path:
-    """逐 Run 训练入口 data.yaml。
+def _entry_yaml_of(ds_dir: Path, form: str, split_uid: str | None) -> Path | None:
+    """逐 Run 训练入口 data.yaml（票 07 前置形态）。
 
-    - 托管集：`<ds>/derived/<split_uid>/data.yaml`——本票保留「每切分一棵派生树」的旧形态，
-      键换成切分 uid（票 07 才换成格式池，此处不发明中间态）；
+    - 托管集：入口在出队⑤写进 `<run_dir>/data/`，此处返回 None（任务创建时不预知）；
     - 外部集：沿用其自带 data.yaml（平台零写入，spec §2.2）。
     """
     if form != "managed":
         return ds_dir / "data.yaml"
-    return ds_dir / "derived" / str(split_uid) / "data.yaml"
+    return None
 
 
 def _empty_effective_reason(name: str, split: dict, eff: dict) -> str:
@@ -243,25 +242,27 @@ def task_inputs(name: str, split_uid: str | None) -> dict:
     eff = split_ent.effective_set(ds_dir, split)
     if not (eff.get("train") or []) or not (eff.get("val") or []):
         raise DatasetError("state_conflict", _empty_effective_reason(name, split, eff))
-    entry = _entry_yaml_of(ds_dir, form or "", uid)
     return {"form": "managed", "dataset": name, "split_uid": uid, "split": split,
             "effective": {"train": list(eff.get("train") or []), "val": list(eff.get("val") or []),
                           "dropped": {"missing": list((eff.get("dropped") or {}).get("missing") or []),
                                       "excluded": list((eff.get("dropped") or {}).get("excluded") or [])}},
-            "data_yaml": str(entry), "dataset_dir": str(ds_dir)}
+            "data_yaml": None, "dataset_dir": str(ds_dir)}
 
 
-def effective_val_labels(ds_dir: Path, data_yaml: Path, effective: dict | None) -> list[Path]:
-    """本次实效 val 的派生标签文件（冻结副本 `labels_frozen/val` 的取数口径）。
+def effective_val_labels(ds_dir: Path, data_yaml: Path, effective: dict | None,
+                         pool_labels_dir: str | None = None) -> list[Path]:
+    """本次实效 val 的池标签文件（冻结副本 `labels_frozen/val` 的取数口径，票 07）。
 
-    `effective` 为 null（外部集）时整目录沿用——外部集的平台侧派生不存在，标签由其自备。
+    托管集从格式池平铺标签取（`<ds>/derived/<format_id>/labels/<stem>.txt`）；`effective`
+    为 null（外部集）时整目录沿用其自带 val 标签目录。
     """
-    labels_val = data_yaml.parent / "labels" / "val"
     if effective is None:
+        labels_val = data_yaml.parent / "labels" / "val"
         return [p for p in labels_val.iterdir() if p.is_file()] if labels_val.is_dir() else []
+    labels_dir = Path(pool_labels_dir) if pool_labels_dir else data_yaml.parent / "labels" / "val"
     out = []
     for name in effective.get("val") or []:
-        p = labels_val / f"{Path(name).stem}.txt"
+        p = labels_dir / f"{Path(name).stem}.txt"
         if p.is_file():
             out.append(p)
     return out
@@ -399,6 +400,8 @@ class TrainingManager:
         try:
             self._launch_inner(run_id)
         except Exception as exc:  # 启动失败（含派生新鲜度门拒训）→ run 转 failed，queued/running 都回收
+            import traceback as _tb
+            _tb.print_exc()
             with self.Session() as s:
                 run = s.get(Run, run_id)
                 if run and run.status in ("queued", "running"):
@@ -419,50 +422,55 @@ class TrainingManager:
                 # 选中到启动之间被取消/任务被删：不复活、不启动
                 return
             task = s.get(Task, run.task_id)
-            # 出队门（票 05，spec §2.2 六步的①②③本票形态）：任务三列 → 切分实体 → 实效集
-            # （成员 − 盘上缺失 − 排除在册，只剔不加）→ 派生按当前标注刷新。任一步不可用
-            # 即 DatasetError（_launch 转 failed，错误可读）——实效 train/val 为空、切分缺失、
-            # 标注损坏或新增不可转形状都拒训，改完标注直接开训仍是唯一正确用法。
+            # 出队六步（票 07，spec §2.2 / ADR 0012）：①任务三列 → 切分实体 → 实效集
+            # （成员 − 盘上缺失 − 排除在册，只剔不加）；②③④格式池版本戳核对 + 实效成员
+            # 逐字节比对刷新 + 断链清理——任一步不可用即 DatasetError（_launch 转 failed，
+            # 错误可读，**不产 run_dir**）。改完标注直接开训仍是唯一正确用法。
             inputs = task_inputs(task.dataset, task.split_uid)
-            data_yaml = Path(inputs["data_yaml"])
-            fresh = None
+            data_yaml = Path(inputs["data_yaml"]) if inputs.get("data_yaml") else None
+            pool_info = None
             if inputs["form"] == "managed":
-                fresh = ds.refresh_derivation(task.dataset, inputs["split_uid"])
-            launch_note = (f"「{task.dataset}」{len(fresh.get('refreshed') or [])} 张派生标签"
-                           "已按当前标注重转后再开训") if fresh and fresh.get("refreshed") else None
+                pool_info = ds.check_pool(task.dataset, inputs["split"], inputs["effective"])
             run.status = "running"
             run.run_dir = str(self.s.runs_dir / task.uid / run.uid)
             run.started_at = _now()
             s.commit()
             task_id, run_dir = run.task_id, run.run_dir
-            payload = {
-                "run_dir": run_dir,
-                "base_model": task.base_model,
-                "data_yaml": str(data_yaml),
-                "args": task.train_args,
-            }
             ds_dir = Path(inputs["dataset_dir"])
             split, effective = inputs["split"], inputs["effective"]
 
         run_dir = Path(run_dir)
         run_dir.mkdir(parents=True, exist_ok=True)
+        # ⑤ 逐 Run 训练入口（托管集写 <run_dir>/data/；外部集沿用自带 data.yaml）
+        entry = None
+        if inputs["form"] == "managed":
+            entry = ds.write_run_entry(task.dataset, run_dir, effective, pool_info)
+            data_yaml = Path(entry["data_yaml"])
+        payload = {
+            "run_dir": str(run_dir),
+            "base_model": task.base_model,
+            "data_yaml": str(data_yaml),
+            "args": task.train_args,
+        }
         payload_path = run_dir / "payload.json"
         payload_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-        # 运行快照（M6 06 号票 / 票 05）：启动即冻结训练输入——切分段（uid/params/memo/grouped）
-        # 与实效段（train/val 名单 + 缺图/排除剔除项）随产物归档，此后数据集重切/排除/漂移
-        # 不影响本 Run 查证；历史 Run 详情页读它看当时名单。
+        # 运行快照（M6 06 号票 / 票 05/07）：启动即冻结训练输入——split/effective/format
+        # 三段随产物归档，此后数据集重切/排除/漂移/池重建不影响本 Run 查证；历史 Run
+        # 详情页读它看当时名单与实际生效类别映射。
         from .snapshot import build_snapshot, save_snapshot
 
         save_snapshot(run_dir, build_snapshot(
             run_uid=run.uid, round_no=run.round_no, base_model=task.base_model,
             train_args=task.train_args or {}, data_yaml=str(data_yaml),
-            dataset_dir=str(ds_dir), split=split, effective=effective))
+            dataset_dir=str(ds_dir), split=split, effective=effective,
+            fmt=(entry or {}).get("format"), labels_dir=(entry or {}).get("labels_dir")))
 
-        # 冻结 val 标签副本：错误分析逐框对账永远对启动时点——只冻本次实效 val，
-        # 派生目录此后改标/重建不影响旧 Run 口径
+        # 冻结 val 标签副本：错误分析逐框对账永远对启动时点——只冻本次实效 val
+        #（托管集从池取标签；外部集沿用其自带目录），池此后重建不影响旧 Run 口径
         frozen_val = run_dir / "labels_frozen" / "val"
-        for lbl in effective_val_labels(ds_dir, data_yaml, effective):
+        for lbl in effective_val_labels(ds_dir, data_yaml, effective,
+                                        pool_labels_dir=(entry or {}).get("labels_dir")):
             frozen_val.mkdir(parents=True, exist_ok=True)
             shutil.copy2(lbl, frozen_val / lbl.name)
 
@@ -483,10 +491,6 @@ class TrainingManager:
         w.start()
         self._publish_queue(s=None)
         publish_threadsafe({"type": "run.status", "run_uid": run.uid, "status": "running", "error": None})
-        if launch_note:  # 开训门重转过派生时告知（通知失败静默，不影响链路）
-            from ..core.notify import desktop_notify
-
-            desktop_notify("开训前标注更新", launch_note)
 
     # ------------------------------------------------------------ watchdog
 

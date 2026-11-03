@@ -75,20 +75,19 @@ def test_stem_conflict_is_red(tmp_path):
     assert "词干" in GUIDANCE["stem_conflict"]["error"]
 
 
-def test_stem_conflict_blocks_derivation(tmp_path, tmp_db, datasets_root: Path):
-    """同 split 内撞词干才阻断派生（派生按 labels/<split>/ 各自平铺）。
-
-    校验侧的 stem_conflict 红灯按**全局词干**判——票 07 的格式池是全数据集平铺，
-    那时跨 split 同名也会撞；两套口径各自对自家布局成立。
-    """
+def test_stem_conflict_blocks_dequeue_pool(tmp_path, tmp_db, datasets_root: Path):
+    """票 07：格式池全数据集平铺——词干冲突在出队池核对时拒训（宁可拒训不静默覆盖）。"""
     src = tmp_path / "src"
     _image(src / "a.png", "PNG")
     _image(src / "a.jpg", "JPEG")
     make_annotation(src, "a", [CAR])
+    build_dataset("clash", "detect", str(src), ratio=1.0, seed=42)   # 出生/切分不再派生
+    split = svc.latest_split("clash")
     with pytest.raises(svc.DatasetError) as excinfo:
-        build_dataset("clash", "detect", str(src), ratio=1.0, seed=42)
+        svc.check_pool("clash", split,
+                       {"train": list(split["train"]), "val": list(split["val"])})
     assert excinfo.value.code == "state_conflict"
-    assert "覆盖" in excinfo.value.message
+    assert "词干冲突" in excinfo.value.message
 
 
 def test_missing_canvas_size_is_red_not_silent(tmp_path):

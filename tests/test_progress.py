@@ -141,16 +141,8 @@ def test_validate_dataset_by_name_reports_scan_progress(managed_dataset: str) ->
     assert calls[-1][1] == calls[-1][2] == 9  # 收尾一拍打满
 
 
-def test_relabel_refresh_reports_full_list_progress(managed_dataset: str) -> None:
-    calls: list[tuple] = []
-    r = svc.relabel_refresh(managed_dataset, force=True,
-                            progress_cb=lambda phase, cur, total: calls.append((phase, cur, total)))
-    assert r["refreshed"] == 9
-    assert {c[0] for c in calls} == {"重转派生"}
-    assert calls[-1][1] == calls[-1][2] == 9
-
-
-def test_auto_fix_dataset_reports_three_phases(managed_dataset: str) -> None:
+def test_auto_fix_dataset_reports_two_phases(managed_dataset: str) -> None:
+    """票 07：自动修复不再重转派生（格式池由出队门懒刷新）——两段进度。"""
     calls: list[tuple] = []
     r = svc.auto_fix_dataset(
         managed_dataset, progress_cb=lambda phase, cur, total: calls.append((phase, cur, total)))
@@ -158,7 +150,7 @@ def test_auto_fix_dataset_reports_three_phases(managed_dataset: str) -> None:
     for phase, _cur, _total in calls:
         if not phases or phases[-1] != phase:
             phases.append(phase)
-    assert phases == ["修复写回", "重转派生", "扫描校验"]
+    assert phases == ["修复写回", "扫描校验"]
     assert r["fixed_files"] == 0  # 干净数据集无可修项，但进度贯通
 
 

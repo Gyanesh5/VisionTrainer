@@ -207,13 +207,17 @@ def test_service_auto_fix_end_to_end(datasets_root, tmp_path):
     assert svc.get_dataset("autofix-e2e")["last_validation"]["fixables"] == 1
 
     result = svc.auto_fix_dataset("autofix-e2e")
-    assert result["fixed_files"] == 1 and result["relabel"]["refreshed"] >= 1
+    assert result["fixed_files"] == 1
     assert result["validation"]["ok"] is True and result["validation"]["fixables"] == 0
 
     assert not svc.get_dataset("autofix-e2e")["last_validation"]["problems"]
-    derived = datasets_root / "autofix-e2e" / "derived" / svc.latest_split("autofix-e2e")["uid"] / "labels"
-    txt = next(p for split in ("train", "val") for p in (derived / split).glob("a.txt"))
-    assert txt.read_text(encoding="utf-8").strip().startswith("0 ")  # 钳制后派生已重转
+    # 票 07：钳制后不再重转派生——池由出队门核对，这里锁「池标签出队时与钳制后真源逐字节一致」
+    split = svc.latest_split("autofix-e2e")
+    pool_info = svc.check_pool("autofix-e2e", split,
+                               {"train": list(split["train"]), "val": list(split["val"])})
+    assert pool_info["refreshed"] == ["a.png"]  # a.png 的越界框已钳制，池标签随之重写
+    txt = (datasets_root / "autofix-e2e" / "derived" / "yolo" / "labels" / "a.txt")
+    assert txt.read_text(encoding="utf-8").strip().startswith("0 ")
     # 备份与隔离区落在数据集侧 autofix/ 运行目录，源目录保持纯标注
     assert (datasets_root / "autofix-e2e" / "autofix").exists()
 

@@ -57,8 +57,8 @@ def test_splits_crud_roundtrip(client, datasets_root, detect_source):
     assert [h["uid"] for h in hist] == [s["uid"]]
     assert hist[0]["memo"] == "首轮"
 
-    # 派生树与 data.yaml 随切分落位（票 05 保留旧形态，键 = 切分 uid）
-    assert (datasets_root / name / "derived" / s["uid"] / "data.yaml").is_file()
+    # 票 07：切分落盘零派生——格式池与切分无关，出队时懒建
+    assert not (datasets_root / name / "derived").exists()
 
     # PATCH 仅 memo：uid 不变；GET 单条不存在 404
     pa = client.patch(f"/api/v1/datasets/{name}/splits/{s['uid']}",
