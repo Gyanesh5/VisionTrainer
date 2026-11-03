@@ -11,10 +11,8 @@ from ..db.models import AgentExperience, Run, Task
 
 
 def dataset_of(task) -> str | None:
-    from pathlib import Path
-
-    return (Path(task.dataset_manifest_path).parent.parent.parent.name
-            if task.dataset_manifest_path else None)
+    """任务的数据集名（票 05 三列引用：Task.dataset 直取，不再从派生路径反查）。"""
+    return getattr(task, "dataset", None) or None
 
 
 def archive_experience(Session, task_id: int) -> None:

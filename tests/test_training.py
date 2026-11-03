@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import build_dataset
+from conftest import build_split_dataset
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
@@ -34,7 +34,7 @@ def _wait_status(client: TestClient, run_uid: str, statuses: set[str], timeout: 
 
 @pytest.fixture()
 def training_client(tmp_path: Path, datasets_root, detect_source, monkeypatch: pytest.MonkeyPatch):
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     cfg = {
         "training": {
             "python": sys.executable,
@@ -150,7 +150,7 @@ def test_tasks_list_run_records(training_client):
 def test_task_status_latest_round_wins(tmp_path, datasets_root, detect_source):
     """聚合口径=最新一轮终态（用户实测回归）：轮 1 failed(-9) + 续训轮 2 done → Task 应显示 done，
     不被历史失败轮永久压成 failed。"""
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
@@ -193,7 +193,7 @@ def test_task_status_cancelled_round_not_sticky(training_client):
 
 def test_restart_reaggregates_stale_task_status(tmp_path, datasets_root, detect_source):
     """启动自愈：聚合字段遗留错态（runs 已 failed+done 但 tasks.status 卡 failed）重启即重算。"""
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
@@ -286,7 +286,7 @@ def test_orphan_adoption_after_platform_restart(tmp_path, datasets_root, detect_
     """M2 验收④：平台重启不杀训练；重启后收养存活进程恢复监控（ADR 0001）。"""
     from visiontrainer.datasets import service as svc
 
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     monkey_root = datasets_root
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
@@ -351,7 +351,7 @@ def test_orphan_adoption_after_platform_restart(tmp_path, datasets_root, detect_
 
 def test_orphan_completed_during_downtime_judged_done(tmp_path, datasets_root, detect_source):
     """收养回归：脱离进程在平台停机期间自然跑完 → 按产物判定 done（不是孤儿死亡 failed）。"""
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
@@ -387,7 +387,7 @@ def test_orphan_completed_during_downtime_judged_done(tmp_path, datasets_root, d
 
 def test_adopted_run_natural_exit_judged_done(tmp_path, datasets_root, detect_source):
     """收养回归：watchdog 监控中的收养进程自然退出（无退出码）→ 按产物判 done，不再误判 failed(-1)。"""
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
@@ -521,7 +521,7 @@ def test_adopt_stopping_orphan_resumes_stop_chain(tmp_path, datasets_root, detec
     app2 的 stop_timeout 调小到 2s 加速 SIGKILL 升级。断言窗口 < app1 watchdog 的
     10s 兜底升级，保证失败构建（不收养 stopping）在窗口内必然超时。
     """
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     monkeypatch.setenv("STUB_TRAP_SIGTERM", "1")
     db = tmp_path / "db.sqlite"
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
@@ -557,7 +557,7 @@ def test_adopt_stopping_orphan_resumes_stop_chain(tmp_path, datasets_root, detec
 
 def test_adopt_stopping_dead_pid_finalizes_cancelled(tmp_path, datasets_root, detect_source):
     """回归②：pid 已死的 stopping 孤儿按用户停止意图落 cancelled，不误判 failed。"""
-    build_dataset("plate", "detect", str(detect_source), ratio=0.8, seed=42)
+    build_split_dataset("plate", "detect", str(detect_source))
     db = tmp_path / "db.sqlite"
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{db}",
@@ -622,7 +622,8 @@ def test_force_stop_orphaned_stopping(training_client):
     try:
         with mgr.Session() as s:
             t = Task(uid="orph0001", name="fs-orphan", source="manual", status="running",
-                     base_model="stub", train_args={"epochs": 1})
+                     base_model="stub", train_args={"epochs": 1},
+                     dataset="plate", split_uid="aa", format_id="yolo")
             s.add(t)
             s.flush()
             task_id = t.id

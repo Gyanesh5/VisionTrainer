@@ -764,8 +764,7 @@ def _decide_core(Session, task_id: int, objective: str, history: list[dict],
                    .order_by(EpochMetric.epoch).all()]
         train_args = dict(t.train_args or {})
         run_dir = run.run_dir
-        dataset = (Path(t.dataset_manifest_path).parent.parent.parent.name
-                   if t.dataset_manifest_path else None)
+        dataset = t.dataset or None  # 票 05 三列引用：Task.dataset 直取
         pruned_rounds = (t.agent_config or {}).get("pruned_rounds") or []
 
     # 参数重要性（M7 05 号票）：同数据集+同预训练权重的历史 Run 统计，注入决策上下文

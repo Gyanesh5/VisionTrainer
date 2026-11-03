@@ -48,7 +48,7 @@ class TaskCreateBody(BaseModel):
     name: str
     base_model: str = "yolo11n"
     dataset: str
-    manifest_id: str | None = None
+    split_uid: str | None = None    # 票 05：省略即沿用最近切分；format_id 由后端注册表定（恒 yolo）
     epochs: int = 50
     imgsz: int = 640
     batch: int = 16
@@ -64,7 +64,7 @@ class TaskCreateBody(BaseModel):
 @_maps_errors
 def create_task(body: TaskCreateBody, request: Request):
     brief = tsvc.create_task(_manager(request), name=body.name, base_model=body.base_model,
-                             dataset=body.dataset, manifest_id=body.manifest_id, epochs=body.epochs,
+                             dataset=body.dataset, split_uid=body.split_uid, epochs=body.epochs,
                              imgsz=body.imgsz, batch=body.batch, patience=body.patience,
                              device=body.device, workers=body.workers, seed=body.seed,
                              agent=body.agent.model_dump() if body.agent else None,

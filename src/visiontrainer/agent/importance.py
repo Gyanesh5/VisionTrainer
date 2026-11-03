@@ -25,7 +25,7 @@ def _collect(Session, dataset: str | None, base_model: str | None) -> list[dict]
         rows = q.all()
         out = []
         for run, task in rows:
-            if dataset and task.dataset_manifest_path and dataset not in task.dataset_manifest_path:
+            if dataset and task.dataset != dataset:
                 continue
             if base_model and task.base_model != base_model:
                 continue

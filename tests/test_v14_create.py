@@ -35,14 +35,13 @@ def test_create_empty_birth(datasets_root):
 
     disk = _disk_meta(datasets_root, "fresh")
     assert set(disk) == {"name", "task_type", "form", "created_at", "origin",
-                         "validation_summary", "manifests", "active_manifest"}
+                         "validation_summary"}  # 票 05：清单两字段已硬删
     for retired in ("classes", "last_validation", "source_dir", "excluded",
                     "drops_signature", "drops_acked", "drops_pending_ack"):
         assert retired not in disk  # 全部不在 dataset.json 里（票 03 验收）
     assert disk["origin"] == {"mode": "empty", "path": None,
                               "at": disk["origin"]["at"], "transfer": None}
-    # manifests/active_manifest 暂留（票 05 才落切分实体）；出生不切分 → 空
-    assert disk["manifests"] == [] and disk["active_manifest"] is None
+    # 票 05：清单两字段（manifests/active_manifest）随活跃指针机制硬删，出生不落
 
     vs = disk["validation_summary"]
     assert vs["ok"] is True and vs["total_images"] == 0 and vs["negatives"] == 0
@@ -338,7 +337,7 @@ def _seed_active_run(ds_dir: Path) -> None:
     with factory() as s:
         t = Task(uid="tseed01", name="seed", source="manual", status="running",
                  base_model="yolo11n.pt", train_args={},
-                 dataset_manifest_path=str(ds_dir / "derived" / "abcd1234" / "data.yaml"))
+                 dataset=ds_dir.name, split_uid="abcd1234", format_id="yolo")
         s.add(t)
         s.flush()
         s.add(Run(uid="rseed01", task_id=t.id, round_no=1, status="running"))

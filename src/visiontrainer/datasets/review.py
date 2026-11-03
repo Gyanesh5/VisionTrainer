@@ -169,7 +169,7 @@ def compute_suspicion(meta: dict, manifest: dict, dataset: str) -> dict[str, dic
             with factory() as s:
                 task = (
                     s.query(Task)
-                    .filter(Task.dataset_manifest_path.like(f"%/{dataset}/derived/%"))
+                    .filter(Task.dataset == dataset)
                     .order_by(Task.id.desc())
                     .first()
                 )

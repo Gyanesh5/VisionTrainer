@@ -9,7 +9,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .manager import SubprocessHandle
+from .manager import (DEFAULT_FORMAT_ID, SubprocessHandle, task_inputs)
 from .snapshot import load_snapshot
 from ..datasets import service as ds
 from ..datasets.service import DatasetError
@@ -28,19 +28,54 @@ def _http_err(code: str, message: str, status: int) -> TaskError:
     return TaskError(code, message, status)
 
 
-def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_id: str | None = None,
-                epochs: int = 50, imgsz: int = 640, batch: int = 16, patience: int | None = None,
-                device: str = "0", workers: int = 8, seed: int = 42, agent: dict | None = None,
-                extra_args: dict | None = None) -> dict:
-    """extra_args：用户设定的训练参数（对齐 ultralytics 官方全量，见 training/params.py），
-    按 params schema 校验后并入 train_args；Agent 调参决策仍走 agent/allowlist.py 白名单。"""
+# DatasetError 的语义码 → HTTP 状态（REST 侧信封由 api/tasks.py 薄层转换）
+_STATUS_OF = {"invalid_args": 400, "not_found": 404, "state_conflict": 409}
+
+
+def _as_http_err(exc: DatasetError) -> TaskError:
+    return _http_err(exc.code, exc.message, _STATUS_OF.get(exc.code, 400))
+
+
+def _preview_of(inputs: dict) -> dict:
+    """建任务/表单预览的实效集回显（票 05「清单 N，实效 M：缺 a / 排除 b」）。
+
+    外部数据集无切分：各段回 null，消费侧据此不出切分选择器。
+    """
+    split = inputs.get("split") or {}
+    eff = inputs.get("effective") or {}
+    counts = split.get("counts") or {}
+    dropped = eff.get("dropped") or {}
+    if not split:
+        return {"split_uid": None, "counts": None, "effective": None,
+                "dropped": {"missing": [], "excluded": []}}
+    return {"split_uid": split.get("uid"),
+            "counts": {"train": counts.get("train", len(split.get("train") or [])),
+                       "val": counts.get("val", len(split.get("val") or []))},
+            "effective": {"train": len(eff.get("train") or []), "val": len(eff.get("val") or [])},
+            "dropped": {"missing": list(dropped.get("missing") or []),
+                        "excluded": list(dropped.get("excluded") or [])}}
+
+
+def create_task(manager, *, name: str, base_model: str, dataset: str, split_uid: str | None = None,
+                 epochs: int = 50, imgsz: int = 640, batch: int = 16, patience: int | None = None,
+                 device: str = "0", workers: int = 8, seed: int = 42, agent: dict | None = None,
+                 extra_args: dict | None = None) -> dict:
+    """建任务：引用落 `(dataset, split_uid, format_id)` 三列（票 05，schema 6）。
+
+    - `split_uid` 为 None 即「沿用最近」（created_at 最新一条，无 active 指针）；数据集还
+      没有任何切分时按 state_conflict 拒训（首次训练只能新建切分，判据在数据集/表单侧）；
+    - 建任务时同算实效集并预览：响应回显 `split_uid / counts / effective / dropped`，
+      剔除只提示不拒训，实效 train 或 val 为空拒训（409）；
+    - extra_args：用户设定的训练参数（对齐 ultralytics 官方全量，见 training/params.py），
+      按 params schema 校验后并入 train_args；Agent 调参决策仍走 agent/allowlist.py 白名单。
+    """
     from .manager import new_uid
     from visiontrainer.db.models import Run, Task
 
     try:
         meta = ds.get_dataset(dataset)
     except DatasetError as exc:
-        raise _http_err(exc.code, exc.message, {"invalid_args": 400, "not_found": 404, "state_conflict": 409}[exc.code])
+        raise _as_http_err(exc)
 
     # M9 确认门：存在未确认的转换丢弃时拒绝提交（到数据集页查看丢弃清单并确认，或先修复标注）
     if meta.get("drops_pending_ack"):
@@ -49,19 +84,11 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
                         f"数据集「{dataset}」有 {n} 条标注被转换丢弃且未确认——"
                         "请到数据集页查看丢弃清单：确认有意丢弃，或先回 X-AnyLabeling 修复", 409)
 
-    if meta["form"] == "managed":
-        uid = manifest_id or meta.get("active_manifest")
-        if not uid:
-            raise _http_err("invalid_args",
-                            "数据集还没有可用切分：新建只校验 + 画像不切分，训练前先建切分", 400)
-        data_yaml = Path(ds.get_datasets_root()) / meta["name"] / "derived" / uid / "data.yaml"
-    else:
-        data_yaml = Path(meta["path"]) / "data.yaml"
-        if not data_yaml.exists():
-            raise _http_err("invalid_args", "外部数据集缺 data.yaml，平台不代写（只读承诺）", 400)
-    if not data_yaml.exists():
-        raise _http_err("invalid_args",
-                        f"派生结构缺失：{data_yaml}——在数据集页重新校验即可重建派生", 400)
+    # 三列 → 切分实体 + 实效集（与出队门同一条解析链）；外部集不进实效集计算
+    try:
+        inputs = task_inputs(dataset, split_uid)
+    except DatasetError as exc:
+        raise _as_http_err(exc)
 
     train_args = {"epochs": epochs, "imgsz": imgsz, "batch": batch,
                   "device": device, "workers": workers, "seed": seed}
@@ -75,17 +102,21 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, manifest_i
             raise _http_err("invalid_args", "训练参数校验失败: " + "; ".join(errors), 400)
         train_args.update(applied)
 
+    preview = _preview_of(inputs)
     with manager.Session() as s:
         task = Task(uid=new_uid(), name=name, source="agent" if agent else "manual",
                     status="queued", base_model=base_model, train_args=train_args,
-                    agent_config=agent, dataset_manifest_path=str(data_yaml))
+                    agent_config=agent, dataset=inputs["dataset"],
+                    split_uid=inputs["split_uid"], format_id=DEFAULT_FORMAT_ID)
         s.add(task)
         s.flush()
         run = Run(uid=new_uid(), task_id=task.id, round_no=1, status="queued")
         s.add(run)
         s.commit()
         brief = {"id": task.id, "uid": task.uid, "name": task.name, "source": task.source,
-                 "status": task.status, "base_model": task.base_model}
+                 "status": task.status, "base_model": task.base_model,
+                 "dataset": task.dataset, "split_uid": task.split_uid,
+                 "format_id": task.format_id, **preview}
     return brief
 
 
@@ -105,9 +136,7 @@ def list_tasks(manager) -> list[dict]:
             runs = s.query(Run).filter(Run.task_id == t.id).order_by(Run.round_no).all()
             best = max((r.primary_metric or 0) for r in runs) if runs else None
             meta = _dataset_meta_of_task(t)
-            dataset = meta.get("name") or (
-                Path(t.dataset_manifest_path).parent.parent.parent.name
-                if t.dataset_manifest_path else "")
+            dataset = t.dataset or meta.get("name") or ""
             # Run 概要列表（训练记录行数据面，2026-10-30 任务列表按数据集分组、每 Run 一行）
             run_list = []
             for r in runs:
@@ -136,7 +165,8 @@ def list_tasks(manager) -> list[dict]:
             prog_frac = run_list[-1]["prog_frac"] if run_list else None
             out.append({"id": t.id, "uid": t.uid, "name": t.name, "source": t.source,
                         "status": t.status, "base_model": t.base_model,
-                        "dataset": dataset,
+                        "dataset": dataset, "split_uid": t.split_uid,
+                        "format_id": t.format_id,
                         "created_at": t.created_at.isoformat(timespec="seconds") if t.created_at else None,
                         "runs": run_list, "rounds": len(run_list),
                         "primary_metric": best,
@@ -167,6 +197,7 @@ def get_task(manager, task_id: int) -> dict:
                                .filter(Run.task_id == task_id).order_by(AgentDecision.round_no).all())]
         return {"id": t.id, "uid": t.uid, "name": t.name, "source": t.source, "status": t.status,
                 "base_model": t.base_model, "train_args": t.train_args, "agent_config": t.agent_config,
+                "dataset": t.dataset, "split_uid": t.split_uid, "format_id": t.format_id,
                 "agent_state": (t.agent_config or {}).get("state"), "runs": runs, "decisions": decisions}
 
 
@@ -256,15 +287,18 @@ def get_run(manager, uid: str) -> dict:
             total = int((task.train_args or {}).get("epochs", done_epochs) or done_epochs)
             avg = (datetime.now() - r.started_at).total_seconds() / done_epochs
             eta_seconds = max(int(avg * max(total - done_epochs, 0)), 0)
+        snap = load_snapshot(r.run_dir) if r.run_dir else None
         return {"uid": r.uid, "task_id": r.task_id, "task_name": task.name if task else "",
                 "task_type": _dataset_meta_of_task(task).get("task_type") if task else None,
+                "dataset": task.dataset if task else None,
+                "split_uid": ((snap or {}).get("split") or {}).get("uid") or (task.split_uid if task else None),
                 "round_no": r.round_no, "status": r.status, "pruned": bool(r.pruned),
                 "primary_metric": r.primary_metric,
                 "metrics": metrics, "run_dir": r.run_dir,
                 "started_at": r.started_at.isoformat(timespec="seconds") if r.started_at else None,
                 "eta_seconds": eta_seconds,
                 "progress": manager.current_progress.get(r.id),
-                "snapshot": load_snapshot(r.run_dir) if r.run_dir else None,
+                "snapshot": snap,
                 "artifacts": {"best_pt": r.best_pt, "last_pt": r.last_pt,
                               "training_log": str(run_dir / "training.log") if run_dir else None,
                               "results_csv": str(run_dir / "results.csv") if run_dir else None}}
@@ -337,8 +371,10 @@ def retry_run(manager, uid: str) -> dict:
             or dict(task.train_args or {})
 
     snap = load_snapshot(run.run_dir) if run.run_dir else None
-    dataset = Path(snap["dataset_dir"]).name if snap and snap.get("dataset_dir") else _dataset_meta_of_task(task).get("name")
-    manifest_id = (snap or {}).get("split_manifest", {}).get("uid") if snap else None
+    dataset = task.dataset or (Path(snap["dataset_dir"]).name if snap and snap.get("dataset_dir") else "")
+    # Retry 恒钉原切分 uid（可比性不变式，票 05）：任务列即该任务钉住的那一条，
+    # 列缺失（历史行）才回落快照 split.uid；两者都无（外部集）为 None，绝不取「最近」。
+    split_uid = task.split_uid or ((snap or {}).get("split") or {}).get("uid")
     if not dataset:
         raise _http_err("state_conflict", "无法还原数据集（快照缺失且任务元数据不可用）", 409)
 
@@ -350,7 +386,7 @@ def retry_run(manager, uid: str) -> dict:
         raise _http_err("invalid_args", "快照参数校验失败: " + "; ".join(errors), 400)
 
     return create_task(manager, name=f"{task_name}·重开", base_model=base_model, dataset=dataset,
-                       manifest_id=manifest_id, agent=None, extra_args=applied or None, **first)
+                       split_uid=split_uid, agent=None, extra_args=applied or None, **first)
 
 
 def estimate_training_time(manager) -> dict | None:
@@ -441,20 +477,17 @@ PRIMARY_BY_TASK = {
 
 
 def _dataset_meta_of_task(task) -> dict:
-    """从任务的派生路径反查数据集元数据（task_type/classes/source_dir…）。
+    """任务的数据集元数据（task_type/classes/source_dir…，读时组合视图）。
 
-    票 03 起 classes/source_dir/last_validation 不再落 dataset.json（spec §3.1），一律经
-    `datasets.service.get_dataset` 取读时组合视图——消费侧字段口径与改造前保持一致。
+    票 05：任务引用换成 `(dataset, split_uid, format_id)` 三列，按 `task.dataset` 直取，
+    不再从派生路径反查目录名；数据集已被回收/改名时返回空视图（读侧容错，不抛）。
     """
-    if not task.dataset_manifest_path:
+    if task is None or not getattr(task, "dataset", None):
         return {}
-    dataset_dir = Path(task.dataset_manifest_path).parent.parent.parent
-    meta_path = dataset_dir / "dataset.json"
-    if not meta_path.exists():
+    try:
+        return ds.get_dataset(task.dataset)
+    except DatasetError:
         return {}
-    from ..datasets import service as ds_svc
-
-    return ds_svc.get_dataset(dataset_dir.name, root=dataset_dir.parent)
 
 
 def compare_runs(manager, task_id: int) -> dict:
@@ -488,11 +521,17 @@ def compare_runs(manager, task_id: int) -> dict:
             if args is not None and base_args is not None:
                 changes = {k: v for k, v in args.items() if base_args.get(k) != v}
                 changes.update({k: None for k in base_args if k not in args})
+            # 可比性不变式对外可见（票 05）：同 split_uid ⇔ val 名单一致 ⇔ 指标可比；
+            # 各轮实效 val 张数按当轮快照报（缺图/排除会让它小于清单 val）
+            r_split = (snap or {}).get("split") or {}
+            r_eff = (snap or {}).get("effective") or {}
             rounds.append({"uid": r.uid, "round_no": r.round_no, "status": r.status,
                            "pruned": bool(r.pruned),
                            "primary_metric": r.primary_metric, "best_epoch": best_epoch,
                            "best_val": best_val, "curve": curve,
-                           "split_uid": (snap or {}).get("split_manifest", {}).get("uid"),
+                           "split_uid": r_split.get("uid") or task.split_uid,
+                           "effective": {"train": len(r_eff.get("train") or []),
+                                         "val": len(r_eff.get("val") or [])} if r_eff else None,
                            "args_changes": changes})
         # M7：任务内跨轮显存对比（有采样才带）+ 参数重要性（同数据集/同预训练权重全量 Run 统计）
         gpu_curves = []
@@ -508,7 +547,8 @@ def compare_runs(manager, task_id: int) -> dict:
         importance = compute_importance(manager.Session, dataset=meta.get("name"),
                                         base_model=task.base_model)
         # 任务级参数取展示口径（任务当前值）；各轮真实生效参数以快照 args_changes 为准
-        return {"task": {"id": task.id, "uid": task.uid, "name": task.name, "task_type": task_type},
+        return {"task": {"id": task.id, "uid": task.uid, "name": task.name, "task_type": task_type,
+                         "dataset": task.dataset, "split_uid": task.split_uid},
                 "rounds": rounds, "train_args": task.train_args,
                 "gpu_curves": gpu_curves or None, "param_importance": importance}
 
@@ -553,8 +593,15 @@ def compare_tasks(manager, task_ids: list[int]) -> dict:
                         continue
                     metrics_summary[k] = {"best": max(vals), "last": vals[-1],
                                           "min": min(vals), "max": max(vals)}
+            # 跨任务同屏时「可比」的判据也来自这两件：同 dataset + 同 split_uid 才同 val 名单
+            best_snap = load_snapshot(best.run_dir) if best is not None and best.run_dir else None
+            best_eff = (best_snap or {}).get("effective") or {}
+            best_split = (best_snap or {}).get("split") or {}
             items.append({"id": t.id, "uid": t.uid, "name": t.name, "status": t.status,
                           "base_model": t.base_model, "runs": len(runs), "train_args": t.train_args or {},
+                          "dataset": t.dataset,
+                          "split_uid": t.split_uid or best_split.get("uid"),
+                          "effective_val": len(best_eff.get("val") or []) if best_eff else None,
                           "best_run_uid": best.uid if best is not None else None,
                           "best_primary_metric": best.primary_metric if best else None,
                           "metrics_summary": metrics_summary,
@@ -577,21 +624,35 @@ def _first_present(metrics: dict) -> float | None:
 
 # ---------------------------------------------------------------- M8：错误分析
 
-def _analysis_payload(manager, run, task) -> dict:
+def _source_images(ds_dir: Path, names: list[str]) -> list[str]:
+    """实效名单 → 图片路径：成员按契约存相对 `source/` 的文件名（历史快照同形态），
+    绝对路径原样透传（v1.4 迁移前的旧快照存的就是绝对路径）。"""
+    out = []
+    for name in names:
+        p = Path(name)
+        out.append(str(p) if p.is_absolute() else str(ds_dir / "source" / name))
+    return out
+
+
+def _analysis_payload(manager, run) -> dict:
+    """错误分析的输入包：一切从运行快照取（票 05 起 GT 名单 = 快照 `effective.val`）。"""
     snap = load_snapshot(run.run_dir) if run.run_dir else None
-    sm = (snap or {}).get("split_manifest") or {}
-    val_images = sm.get("val") or []
-    if not val_images:
-        raise _http_err("state_conflict", "运行快照缺少 val 清单（旧 Run 请重跑后再分析）", 409)
+    eff = (snap or {}).get("effective") or {}
+    val_names = eff.get("val") or []
+    if not val_names:
+        raise _http_err("state_conflict", "运行快照缺少实效 val 名单（旧 Run 请重跑后再分析）", 409)
     best = run.best_pt or (str(Path(run.run_dir) / "weights" / "best.pt") if run.run_dir else None)
     if not best or not Path(best).exists():
         raise _http_err("state_conflict", "best.pt 不在（训练未产出权重），无法分析", 409)
-    derived = Path(task.dataset_manifest_path).parent
+    ds_dir = Path((snap or {}).get("dataset_dir") or "")
+    val_images = _source_images(ds_dir, val_names)
     # GT 口径：Run 启动时冻结的 val 标签副本（labels_frozen）——此后数据集改标/重建派生
-    # 不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；旧 Run（无副本）回退派生目录
+    # 不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；无副本时回退当轮派生目录
     frozen_val = Path(run.run_dir) / "labels_frozen" / "val" if run.run_dir else None
-    labels_dir = frozen_val if frozen_val and frozen_val.is_dir() else derived / "labels" / "val"
-    if not labels_dir.is_dir():
+    data_yaml = (snap or {}).get("data_yaml")
+    derived_labels = Path(data_yaml).parent / "labels" / "val" if data_yaml else None
+    labels_dir = frozen_val if frozen_val and frozen_val.is_dir() else derived_labels
+    if not labels_dir or not labels_dir.is_dir():
         raise _http_err("state_conflict", f"派生 val 标签目录缺失：{labels_dir}", 409)
     classes = ((snap or {}).get("classes") or {}).get("list") or []
     if not classes:
@@ -617,15 +678,14 @@ def run_error_analysis(manager, uid: str, conf: float = 0.25, progress=None) -> 
         raise _http_err("invalid_args", f"conf 须在 (0,1]，收到 {conf}", 400)
 
     with manager.Session() as s:
-        from visiontrainer.db.models import Run, Task
+        from visiontrainer.db.models import Run
 
         run = s.query(Run).filter(Run.uid == uid).one_or_none()
         if run is None:
             raise _http_err("not_found", f"Run 不存在：{uid}", 404)
         if run.status != "done":
             raise _http_err("state_conflict", f"仅已完成的 Run 可分析（当前 {run.status}）", 409)
-        task = s.get(Task, run.task_id)
-        payload = _analysis_payload(manager, run, task)
+        payload = _analysis_payload(manager, run)
         rid = run.id
 
     analysis_dir = Path(payload["run_dir"]) / "analysis"

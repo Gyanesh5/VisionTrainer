@@ -10,7 +10,7 @@ from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.service import DatasetError
 
 _DISK_KEYS = {"name", "task_type", "form", "created_at", "origin",
-              "validation_summary", "manifests", "active_manifest"}
+              "validation_summary", "tiling", "flip_idx"}  # spec §3.1 唯一键集（票 05 起无清单两字段）
 
 
 def _create_body(**kw) -> dict:
@@ -29,10 +29,10 @@ def test_create_labeled_lifecycle(datasets_root, detect_source, client):
     body = r.json()
     assert body["classes"] == ["car", "person"]  # 读时组合视图
     assert body["validation"]["counts"]["bad_json"] == 1  # 坏 JSON 进出生校验报告
-    assert body["manifests"] == [] and body["active_manifest"] is None  # 出生不切分（票 05）
+    assert "manifests" not in body and "active_manifest" not in body  # 出生不切分，也无清单字段（票 05 硬删）
 
     disk = json.loads((datasets_root / "plate" / "dataset.json").read_text(encoding="utf-8"))
-    assert set(disk) == _DISK_KEYS  # spec §3.1 落盘键集
+    assert set(disk) <= _DISK_KEYS  # spec §3.1 落盘键集（tiling/flip_idx 按需）
     assert (datasets_root / "plate" / "classes.txt").read_text(
         encoding="utf-8").splitlines() == ["car", "person"]
 
@@ -129,13 +129,10 @@ def test_api_error_envelope(datasets_root, client):
 
 
 def test_stratify_split_keeps_rare_class(datasets_root, detect_source):
-    """回归：manifest files 必须持久化 primary_label，否则分层切分失效（val 为空）。"""
-    meta = build_dataset("plate", "detect", str(detect_source), ratio=0.7, seed=7, stratify=True)
-    m = json.loads((datasets_root / "plate" / "derived" / meta["active_manifest"]
-                    / "split_manifest.json").read_text(encoding="utf-8"))
-    assert all("primary_label" in f for f in m["files"])
-    val_joined = "\n".join(m["val"])
-    assert "person" in val_joined, "分层切分后稀有类必须出现在 val"
+    """回归：分层切分必须把稀有类放进 val（切分实体按主类别分桶、桶内 seed 洗牌）。"""
+    build_dataset("plate", "detect", str(detect_source), ratio=0.7, seed=7, stratify=True)
+    split = svc.latest_split("plate")
+    assert "person" in "\n".join(split["val"]), "分层切分后稀有类必须出现在 val"
 
 
 def test_classes_action_single_entry_gates(datasets_root, detect_source, client):

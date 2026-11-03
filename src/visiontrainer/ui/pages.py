@@ -2538,7 +2538,9 @@ document.addEventListener('scroll', function(e){
                         if not snap:
                             ui.label("（本 Run 早于快照功能，或尚未实际启动）").classes("text-xs opacity-40")
                         else:
-                            sm = snap.get("split_manifest") or {}
+                            sm = snap.get("split") or {}
+                            eff = snap.get("effective")
+                            sp = (sm.get("params") or {}) if sm else {}
                             winfo = snap.get("weight") or {}
                             cls = snap.get("classes") or {}
 
@@ -2547,11 +2549,32 @@ document.addEventListener('scroll', function(e){
                                     ui.label(label).classes("text-xs opacity-50 w-20 shrink-0 pt-0.5")
                                     ui.label(value).classes("text-xs opacity-70 break-all flex-1 min-w-0")
 
-                            _snap_kv("切分清单", f"{sm.get('uid')} · train {sm.get('n_train')} / val {sm.get('n_val')}"
-                                     + (f" · 前序 {sm['prev_uid']}" if sm.get("prev_uid") else "")
-                                     + (f" · 含排除 {len(sm['excluded'])} 项" if sm.get("excluded") else ""))
-                            _snap_kv("切分参数", f"seed {sm.get('seed')} · train 比例 {sm.get('ratio')} · "
-                                     f"{'分层' if sm.get('stratify') else '不分层'}")
+                            if sm:
+                                n_tr = len((eff or {}).get("train") or [])
+                                n_va = len((eff or {}).get("val") or [])
+                                _snap_kv("切分", f"{sm.get('uid')} · 实效 train {n_tr} / val {n_va}"
+                                         + (f" · {sm['memo']}" if sm.get("memo") else "")
+                                         + (" · 按源图分组" if sm.get("grouped") == "source_image" else ""))
+                                _snap_kv("切分参数", f"seed {sp.get('seed')} · train 比例 {sp.get('ratio')} · "
+                                         f"{'分层' if sp.get('stratify') else '不分层'}"
+                                         + (" · 只训已审" if sp.get("approved_only") else ""))
+                            else:
+                                _snap_kv("切分", "外部数据集（自带 data.yaml，无切分实体）")
+                            if eff:
+                                dropped = eff.get("dropped") or {}
+                                n_miss = len(dropped.get("missing") or [])
+                                n_excl = len(dropped.get("excluded") or [])
+                                _snap_kv("剔除", f"缺图 {n_miss} / 排除 {n_excl}" if n_miss or n_excl
+                                         else "无（启动时点全员在册在盘）")
+                                with ui.expansion(f"当时名单（train {len(eff.get('train') or [])} · "
+                                                  f"val {len(eff.get('val') or [])}）",
+                                                  icon="list_alt").classes("w-full"):
+                                    for side in ("train", "val"):
+                                        names = eff.get(side) or []
+                                        ui.label(f"{side} · {len(names)} 张").classes(
+                                            "text-[10px] font-semibold opacity-60")
+                                        ui.label("、".join(names) if names else "（空）").classes(
+                                            "text-[10px] tabular-nums opacity-50 break-all")
                             _snap_kv("类别表", f"{len(cls.get('list') or [])} 类 · sha256 {str(cls.get('sha256', ''))[:12]}")
                             _snap_kv("预训练权重", f"{winfo.get('name') or _model_short(winfo.get('path'))}"
                                      + (f" · sha256 {winfo['sha256'][:12]}" if winfo.get("sha256") else "（训练端解析）"))
@@ -3198,6 +3221,303 @@ document.addEventListener('scroll', function(e){
                         if c_ds.value and (not cur or cur == _name_state["auto"]):
                             _name_state["auto"] = _auto_name()
                             c_name.set_value(_name_state["auto"])
+
+                    # ── 分区 1b：切分步（票 05；07 裁决 3a「表单内区段」）——
+                    # 三态分段：沿用最近（默认）/ 选历史 / 新建；外部数据集不出切分选择器。
+                    _form_section("call_split", "切分")
+                    sp_state: dict = {"meta": None, "splits": [], "mode": "latest",
+                                      "uid": None, "new_split": None, "load": 0}
+                    split_box = ui.column().classes("w-full gap-1")
+
+                    def _split_line(s: dict) -> str:
+                        c = s.get("counts") or {}
+                        return (f"{s.get('uid')} · train {c.get('train')} / val {c.get('val')}"
+                                + (f" · {s['memo']}" if s.get("memo") else "")
+                                + f" · {_fmt_ts(s.get('created_at'))}")
+
+                    def _counts_of(s: dict) -> str:
+                        c = s.get("counts") or {}
+                        return f"train {c.get('train', len(s.get('train') or []))} / val {c.get('val', len(s.get('val') or []))}"
+
+                    async def _eff_line(name: str, s: dict, box) -> None:
+                        """实效预览行：「清单 N，实效 M：缺 a / 排除 b」（与出队同口径）。"""
+                        try:
+                            eff = await _io(ds.effective_split, name, s["uid"])
+                        except Exception:  # noqa: BLE001 — 提示属增强
+                            return
+                        if getattr(box, "is_deleted", False):
+                            return
+                        n = eff.get("counts") or {}
+                        d = eff.get("dropped") or {}
+                        miss, excl = len(d.get("missing") or []), len(d.get("excluded") or [])
+                        with box:
+                            text = (f"清单 {_counts_of(s)} → 实效 train {n.get('train')} / val {n.get('val')}"
+                                    + (f"：缺图 {miss} / 排除 {excl}（只提示不拒训）" if miss or excl
+                                       else "（无剔除）"))
+                            ui.label(text).classes("text-[11px] tabular-nums opacity-55")
+
+                    def _set_mode(m: str) -> None:
+                        sp_state["mode"] = m
+                        if m in ("latest", "history"):
+                            sp_state["uid"] = (sp_state["splits"][0]["uid"]
+                                               if m == "latest" and sp_state["splits"]
+                                               else sp_state.get("uid"))
+                        _render_split_step()
+
+                    def _render_split_step() -> None:
+                        split_box.clear()
+                        meta = sp_state.get("meta")
+                        splits = sp_state.get("splits") or []
+                        with split_box:
+                            if meta is None:
+                                ui.label("先选数据集——切分随数据集走（首次训练在此新建，全部重洗）"
+                                         ).classes("text-xs opacity-40")
+                                return
+                            fmt_row = _labeled("数据格式", ui.input, label_w="w-16",
+                                               value="YOLO（Ultralytics）")
+                            fmt_row.props("readonly dense outlined")
+                            with fmt_row:
+                                ui.tooltip("数据格式绑定训练后端，不由任务选择（票 05）；"
+                                           "逐 Run 训练入口在出队时按切分解析")
+                            if meta.get("form") != "managed":
+                                ui.label("外部数据集：沿用自带 data.yaml，无切分选择"
+                                         ).classes("text-[11px] opacity-50")
+                                sp_state["uid"] = None
+                                return
+                            if not splits:
+                                ui.label("还没有切分——首次训练先「新建」（仅全部重洗）"
+                                         ).classes("text-[11px] opacity-60")
+                            else:
+                                with ui.row().classes("w-full items-center gap-1 q-ml-16"):
+                                    for key, label in (("latest", "沿用最近"),
+                                                       ("history", "选历史"),
+                                                       ("new", "新建")):
+                                        active = sp_state["mode"] == key
+                                        b = ui.button(label, on_click=lambda k=key: _set_mode(k)).props(
+                                            "dense size=sm no-caps padding=2px 10px"
+                                            + ("" if active else " outline"))
+                                        if active:
+                                            b.props("color=primary")
+                                        if key in ("latest", "history") and not splits:
+                                            b.props("disable")
+                                        with b:
+                                            tip = {"latest": "用 created_at 最新那一条（无活跃指针）",
+                                                   "history": "从切分历史里挑一条，可改备注",
+                                                   "new": "新建切分：继承归属 / 全部重洗"}[key]
+                                            ui.tooltip(tip)
+                            mode_box = ui.column().classes("w-full gap-1")
+                            _render_mode_panel(meta, splits, mode_box)
+                        _upd_create_gate()
+
+                    def _render_mode_panel(meta: dict, splits: list, box) -> None:
+                        box.clear()
+
+                        def _rerender() -> None:
+                            _render_mode_panel(meta, splits, box)
+
+                        with box:
+                            if sp_state["mode"] == "latest" and splits:
+                                latest = splits[0]
+                                sp_state["uid"] = latest["uid"]
+                                _labeled("最近切分", ui.input, label_w="w-16",
+                                         value=_split_line(latest)).props("readonly dense outlined")
+                                eff_box = ui.column().classes("w-full q-ml-16")
+                                asyncio.get_running_loop().create_task(
+                                    _eff_line(meta["name"], latest, eff_box))
+                            elif sp_state["mode"] == "history" and splits:
+                                opts = {s["uid"]: _split_line(s) for s in splits}
+                                cur = next((s for s in splits if s["uid"] == sp_state.get("uid")),
+                                           splits[0])
+                                sp_state["uid"] = cur["uid"]
+                                sel = _labeled("选切分", ui.select, label_w="w-16",
+                                               options=opts, value=cur["uid"], with_input=True)
+                                memo_in = _labeled("备注", ui.input, label_w="w-16",
+                                                   value=cur.get("memo") or "")
+                                with memo_in:
+                                    ui.tooltip("memo 是切分唯一可变字段（成员/参数/血缘不可变）")
+                                hist_eff = ui.column().classes("w-full q-ml-16")
+
+                                def _pick_hist(e) -> None:
+                                    sp_state["uid"] = e.value
+                                    picked = next((s for s in splits if s["uid"] == e.value), None)
+                                    if picked is not None:
+                                        memo_in.set_value(picked.get("memo") or "")
+                                    _upd_create_gate()
+                                    hist_eff.clear()
+                                    if picked is not None:
+                                        asyncio.get_running_loop().create_task(
+                                            _eff_line(meta["name"], picked, hist_eff))
+
+                                sel.on_value_change(_pick_hist)
+                                asyncio.get_running_loop().create_task(
+                                    _eff_line(meta["name"], cur, hist_eff))
+
+                                async def _save_memo(_b=None) -> None:
+                                    try:
+                                        await _io(ds.set_split_memo, meta["name"],
+                                                  sp_state["uid"], memo_in.value or "")
+                                        ui.notify("切分备注已保存", type="positive")
+                                    except Exception as exc:  # noqa: BLE001
+                                        ui.notify(f"保存失败：{exc}", type="negative")
+
+                                mb = ui.button("保存备注", icon="save", on_click=_save_memo).props(
+                                    "outline dense size=sm")
+                                mb.classes("q-ml-16")
+                            else:
+                                _render_new_split(meta, splits, box, _rerender)
+
+                    def _render_new_split(meta: dict, splits: list, box, rerender) -> None:
+                        """新建态：两模式 + 参数 + 常驻预览（数字与落盘同口径）+ 独立确认落盘。"""
+                        have_ref = bool(splits)
+                        sp_state["uid"] = None
+                        # 两模式选择跨重渲染保留（存 sp_state）：切模式即重入本函数，
+                        # 局部变量会把用户选择重置回默认
+                        if sp_state.get("mode2") not in ("inherit", "fresh") \
+                                or (sp_state["mode2"] == "inherit" and not have_ref):
+                            sp_state["mode2"] = "fresh" if not have_ref else "inherit"
+                        with box:
+                            with ui.row().classes("w-full items-center gap-1 q-ml-16"):
+                                for key, label in (("inherit", "继承归属"), ("fresh", "全部重洗")):
+                                    active = sp_state["mode2"] == key
+
+                                    def _switch_new(m2: str = key) -> None:
+                                        sp_state["mode2"] = m2
+                                        rerender()
+
+                                    b = ui.button(label, on_click=_switch_new).props(
+                                        "dense size=sm no-caps padding=2px 10px"
+                                        + ("" if active else " outline"))
+                                    if active:
+                                        b.props("color=primary")
+                                    if key == "inherit" and not have_ref:
+                                        b.props("disable")
+                                    with b:
+                                        ui.tooltip({"inherit": "锁参照 seed/ratio/分层，既有归属不动，"
+                                                   "只放新进合格文件（默认）",
+                                                    "fresh": "按全部合格成员重算；首次训练只有此模式"}[key])
+                            with ui.row().classes("w-full"):
+                                n_seed = _labeled("seed", ui.number, w="flex-1", label_w="w-16",
+                                                  value=42, precision=0, min=0)
+                                n_ratio = _labeled("ratio", ui.number, w="flex-1", label_w="w-16",
+                                                   value=0.8, min=0.05, max=0.95, step=0.05)
+                            with ui.row().classes("w-full"):
+                                sw_strat = _labeled("分层", ui.switch, w="flex-1", label_w="w-16",
+                                                    value=False)
+                                with sw_strat:
+                                    ui.tooltip("按主类别分桶、桶内按 seed 洗牌，稀有类在 val 有代表")
+                                sw_appr = _labeled("只训已审", ui.switch, w="flex-1", label_w="w-16",
+                                                   value=False)
+                                with sw_appr:
+                                    ui.tooltip("创建时只烘焙有效状态=通过的图；此后审查变化不回溯，"
+                                               "新过审须新建切分·继承归属")
+                            n_memo = _labeled("备注", ui.input, label_w="w-16", value="")
+                            if (meta.get("tiling") or {}).get("groups"):
+                                ui.label("切片集：恒按源图分组（同源瓦片同侧），无组键文件各自成组"
+                                         ).classes("text-[11px] opacity-55 q-ml-16")
+                            pv_box = ui.column().classes("w-full gap-0.5 q-ml-16")
+
+                            def _new_kwargs() -> dict:
+                                mode2 = sp_state["mode2"]
+                                return {"mode": mode2,
+                                        "parent_uid": splits[0]["uid"] if mode2 == "inherit" and splits else None,
+                                        "seed": int(n_seed.value or 42),
+                                        "ratio": float(n_ratio.value or 0.8),
+                                        "stratify": bool(sw_strat.value),
+                                        "approved_only": bool(sw_appr.value),
+                                        "memo": n_memo.value or ""}
+
+                            async def _load_preview(_e=None) -> None:
+                                token = sp_state["load"] = sp_state["load"] + 1
+                                try:
+                                    pv = await _io(ds.preview_split, meta["name"], **_new_kwargs())
+                                except Exception as exc:  # noqa: BLE001
+                                    pv_box.clear()
+                                    with pv_box:
+                                        ui.label(f"预览失败：{exc}").classes(
+                                            "text-[11px] text-rose-400")
+                                    return
+                                if token != sp_state["load"] or getattr(pv_box, "is_deleted", False):
+                                    return
+                                pv_box.clear()
+                                with pv_box:
+                                    c = pv.get("counts") or {}
+                                    base = (f"候选 {pv['uid']} · train {c.get('train')} / val {c.get('val')}")
+                                    if pv.get("reuses_existing"):
+                                        base += "（命中既有切分，落盘即复用）"
+                                    ui.label(base).classes("text-[11px] tabular-nums opacity-70")
+                                    ov = pv.get("overlap") or {}
+                                    if ov.get("val_total"):
+                                        ui.label(f"与参照 val 重合 {ov.get('val_shared')}/{ov.get('val_total')}"
+                                                 ).classes("text-[11px] tabular-nums opacity-55")
+                                    if pv.get("incomparable_warning"):
+                                        ui.label(pv["incomparable_warning"]).classes(
+                                            "text-[11px] text-amber-600")
+                                    if pv.get("leak_groups") is not None:
+                                        ui.label(f"跨切分泄漏组 {pv['leak_groups']}").classes(
+                                            "text-[11px] tabular-nums opacity-55")
+                                    eff = pv.get("effective") or {}
+                                    ec = eff.get("counts") or {}
+                                    if ec:
+                                        ui.label(f"实效 train {ec.get('train')} / val {ec.get('val')}"
+                                                 ).classes("text-[11px] tabular-nums opacity-55")
+
+                            for w in (n_seed, n_ratio, sw_strat, sw_appr, n_memo):
+                                w.on_value_change(lambda _e: asyncio.get_running_loop().create_task(
+                                    _load_preview()))
+                            asyncio.get_running_loop().create_task(_load_preview())
+
+                            async def _confirm_split(_b=None) -> None:
+                                try:
+                                    with _busy(_b):
+                                        s = await _io(ds.create_split, meta["name"], **_new_kwargs())
+                                except Exception as exc:  # noqa: BLE001
+                                    ui.notify(f"新建切分失败：{exc}", type="negative")
+                                    return
+                                sp_state["splits"] = await _io(ds.list_splits, meta["name"])
+                                sp_state["uid"] = s["uid"]
+                                sp_state["mode"] = "latest"
+                                ui.notify(f"切分已落盘：{s['uid']}（独立确认，不随任务取消回滚）",
+                                          type="positive")
+                                _render_split_step()
+
+                            cb = ui.button("落盘切分", icon="check", on_click=_confirm_split).props(
+                                "outline dense size=sm color=primary")
+                            cb.classes("q-ml-16")
+                            with cb:
+                                ui.tooltip("切分独立确认落盘（同划分命中既有 uid 直接复用）；"
+                                           "任务取消不回滚切分")
+
+                    def _upd_create_gate() -> None:
+                        """托管数据集必须钉住一份切分才可创建（新建态未落盘即拦）。"""
+                        meta = sp_state.get("meta")
+                        if meta is None or meta.get("form") != "managed":
+                            return
+                        c_ok.set_enabled(bool(sp_state.get("uid")))
+
+                    async def _reload_splits() -> None:
+                        name = c_ds.value
+                        if not name:
+                            sp_state.update(meta=None, splits=[], uid=None)
+                            _render_split_step()
+                            _upd_create_gate()
+                            return
+                        try:
+                            meta = await _io(ds.get_dataset, name)
+                            splits = (await _io(ds.list_splits, name)
+                                      if meta.get("form") == "managed" else [])
+                        except Exception:  # noqa: BLE001
+                            sp_state.update(meta=None, splits=[], uid=None)
+                            _render_split_step()
+                            return
+                        sp_state.pop("mode2", None)   # 换数据集即回到两模式默认态
+                        sp_state.update(meta=meta, splits=splits,
+                                        mode="latest" if splits else "new",
+                                        uid=splits[0]["uid"] if splits else None)
+                        _render_split_step()
+                        _upd_create_gate()
+
+                    c_ds.on_value_change(lambda _e: asyncio.get_running_loop().create_task(_reload_splits()))
+                    asyncio.get_running_loop().create_task(_reload_splits())
                     # ── M8 08：预设实验模板（批量建 Task；与手填二选一）
                     c_tpl = _labeled("实验模板", ui.select, label_w="w-16", value="", options={
                         "": "（不使用模板 · 手动填参）",
@@ -3360,6 +3680,10 @@ document.addEventListener('scroll', function(e){
                     if not c_ds.value:
                         ui.notify("请选择数据集", type="warning")
                         return
+                    if sp_state.get("meta") and sp_state["meta"].get("form") == "managed" \
+                            and not sp_state.get("uid"):
+                        ui.notify("托管数据集先在切分步钉住一份切分（新建须落盘确认）", type="warning")
+                        return
                     if "," in (c_device.value or ""):
                         ui.notify("多卡 DDP 未测试，仅作透传", type="warning")
                     plan = _tpl_plan()  # M8 08：模板批量创建分支
@@ -3373,6 +3697,7 @@ document.addEventListener('scroll', function(e){
                                     tsvc.create_task(get_manager(),
                                                      name=f"{c_name.value.strip()}·{v['suffix']}",
                                                      base_model=c_model.value, dataset=c_ds.value,
+                                                     split_uid=sp_state.get("uid"),
                                                      epochs=int(v.get("epochs") or c_epochs.value or 50),
                                                      imgsz=int(v.get("imgsz") or c_imgsz.value or 640),
                                                      batch=int(c_batch.value if c_batch.value is not None else 16),
@@ -3392,6 +3717,7 @@ document.addEventListener('scroll', function(e){
                         else:
                             brief = tsvc.create_task(get_manager(), name=c_name.value.strip(),
                                                      base_model=c_model.value, dataset=c_ds.value,
+                                                     split_uid=sp_state.get("uid"),
                                                      epochs=int(c_epochs.value or 50),
                                                      imgsz=int(c_imgsz.value or 640), batch=int(c_batch.value or 16),
                                                      device=c_device.value or "0",
@@ -3424,6 +3750,16 @@ document.addEventListener('scroll', function(e){
                         facts.append(("数据集", f"{c_ds.value} · {meta.get('task_type')} · {meta.get('form')}"
                                       + (f" · {lv.get('total_images')} 张" if lv.get("total_images") else "")
                                       + (f" · {cls_n} 类" if cls_n else "")))
+                    if sp_state.get("meta") and sp_state["meta"].get("form") == "managed":
+                        picked = next((s for s in sp_state.get("splits") or []
+                                       if s["uid"] == sp_state.get("uid")), None)
+                        if picked is not None:
+                            c_eff = picked.get("counts") or {}
+                            facts.append(("切分", f"{picked['uid']}（沿用最近）· "
+                                          f"train {c_eff.get('train')} / val {c_eff.get('val')}"
+                                          + (f" · {picked['memo']}" if picked.get("memo") else "")))
+                        else:
+                            facts.append(("切分", "新建切分（已落盘确认）"))
                     n_adv = len(_collect_params(param_fields))
                     facts.append(("参数", f"{_model_short(c_model.value) or '?'} · {int(c_epochs.value or 0)} 轮"
                                   f" · imgsz {c_imgsz.value}"
@@ -4810,7 +5146,7 @@ document.addEventListener('scroll', function(e){
                 _stats_txt = " · ".join(
                     [f"图片 {s.get('images', 0)}", f"标注 {n_ann}", f"train {s.get('train', 0)}",
                      f"val {s.get('val', 0)}", f"负样本 {s.get('background', 0)}",
-                     f"清单 {payload.get('manifest_uid', '—')}"])
+                     f"切分 {payload.get('manifest_uid', '—')}"])
                 _stat = ui.label(_stats_txt).classes("text-[11px] tabular-nums opacity-70")
                 with _stat:
                     ui.tooltip("标注条数（框/多边形/旋转框），非图片数")
@@ -6067,8 +6403,8 @@ document.addEventListener('scroll', function(e){
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.label("导出范围").classes("w-20 text-xs text-right opacity-70 shrink-0")
                     e_scope = ui.radio(EXPORT_SCOPES, value="all").props("dense")
-                e_split_note = ui.label("按切分导出要挑切分 uid——切分版本在票 05 落地后列出，"
-                                        "此刻只有全集可填").classes("text-xs text-amber-500").set_visibility(False)
+                e_split_note = ui.label("按切分导出的 uid 选择与写出入票 08——此刻只有全集可填"
+                                        ).classes("text-xs text-amber-500").set_visibility(False)
                 with ui.row().classes("w-full items-center gap-2"):
                     ui.label("图片").classes("w-20 text-xs text-right opacity-70 shrink-0")
                     e_img = ui.radio(EXPORT_IMAGES, value="link").props("dense")

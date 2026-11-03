@@ -11,7 +11,6 @@ from conftest import build_dataset, make_image
 from visiontrainer.datasets import review as rv
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets import tiling
-from visiontrainer.datasets.split import build_grouped_manifest
 from visiontrainer.datasets.service import DatasetError
 
 
@@ -125,41 +124,14 @@ def test_summarize_accounting():
     assert s2["tiles_written"] == 4
 
 
-def test_grouped_manifest_same_source_same_side():
-    def grp(src, lbl, imgs):
-        return {"source": src, "primary_label": lbl,
-                "entries": [{"image": i, "label": i + ".json", "primary_label": lbl}
-                            for i in imgs]}
-
-    groups = [grp("A", "car", ["a_r0c0", "a_r1c1"]),
-              grp("B", "person", ["b_r1c1"]),
-              grp("C", None, ["c_r0c0"])]
-    m1 = build_grouped_manifest(groups, 0.8, 42, False)
-    m2 = build_grouped_manifest(groups, 0.8, 42, False)
-    assert m1["uid"] == m2["uid"]  # 可复现（uid 不含时间戳）
-    assert m1["grouped"] == "source_image"
-    side = lambda img: "train" if img in set(m1["train"]) else "val"  # noqa: E731
-    assert side("a_r0c0") == side("a_r1c1")  # 同源小图同侧
-    assert sorted(m1["train"] + m1["val"]) == ["a_r0c0", "a_r1c1", "b_r1c1", "c_r0c0"]
-    assert side("c_r0c0") == "train"  # 负样本源图组只进 train
-    assert m1["files"][0]["image"] == "a_r0c0"  # 文件清单按图排序
-
-
 # ---------------------------------------------------------------- 服务编排（端到端）
-
-def _manifest_of(root, name):
-    meta = svc.get_dataset(name)
-    return json.loads((root / name / "derived" / meta["active_manifest"]
-                       / "split_manifest.json").read_text())
-
 
 def test_tile_dataset_end_to_end(datasets_root, tmp_path):
     src = _mk_source(tmp_path)
     build_dataset("src-ds", "detect", str(src), ratio=0.8, seed=42)
-    src_manifest = _manifest_of(datasets_root, "src-ds")
-    img = {Path(f["image"]).stem: f["image"] for f in src_manifest["files"]}
-    svc.review_decide("src-ds", img["a"], "approved")
-    svc.review_decide("src-ds", img["b"], "approved")
+    src_dir = datasets_root / "src-ds" / "source"
+    svc.review_decide("src-ds", str(src_dir / "a.png"), "approved")
+    svc.review_decide("src-ds", str(src_dir / "b.png"), "approved")
 
     # 预览：零写入、数字与执行同口径
     p = svc.tile_dataset_preview("src-ds", 2, 2, 0.2, False)
@@ -169,7 +141,7 @@ def test_tile_dataset_end_to_end(datasets_root, tmp_path):
     assert p["assignments"] == 7 and p["kept_assignments"] == 3
     assert p["shapes_nowhere"] == 0 and p["re_review"] == 1 and p["skipped"] == []
 
-    r = svc.tile_dataset("src-ds", 2, 2, 0.2, "tiled", False, 0.8, 42, False)
+    r = svc.tile_dataset("src-ds", 2, 2, 0.2, "tiled", False)
     meta = r["meta"]
     assert meta["tiling"]["source"] == "src-ds" and meta["tiling"]["rows"] == 2
     assert meta["source_dir"] == str(datasets_root / "tiled" / "source")
@@ -194,18 +166,25 @@ def test_tile_dataset_end_to_end(datasets_root, tmp_path):
     assert rv.read_state(tdir / "b_r1c1.json")["effective"] == "approved"
     assert rv.read_state(tdir / "a_r0c0.json")["effective"] == "pending"
 
-    # 分组切分：同源小图同侧；派生结构与 data.yaml 就位
-    m = _manifest_of(datasets_root, "tiled")
-    assert m["grouped"] == "source_image"
-    side = lambda i: "train" if i in set(m["train"]) else "val"  # noqa: E731
-    assert side(str(tdir / "a_r0c0.png")) == side(str(tdir / "a_r1c1.png"))
-    assert len(m["files"]) == 3
-    derived = datasets_root / "tiled" / "derived" / m["uid"]
+    # 票 05：产物出生不切分——splits/ 空、无派生树；tiling.groups 持久化「源图 → 瓦片」组键
+    assert svc.list_splits("tiled") == []
+    assert not (datasets_root / "tiled" / "derived").exists()
+    groups = meta["tiling"]["groups"]
+    assert sorted(groups) == ["a.png", "b.png"]
+    assert sorted(groups["a.png"]) == ["a_r0c0.png", "a_r1c1.png"]
+    # 新建切分恒按源图分组：同源瓦片同侧；派生树随切分落位
+    split = svc.create_split("tiled", mode="fresh", seed=42, ratio=0.5,
+                             stratify=False, approved_only=False)
+    assert split["grouped"] == "source_image"
+    side = lambda n: "train" if n in set(split["train"]) else "val"  # noqa: E731
+    assert side("a_r0c0.png") == side("a_r1c1.png")
+    assert len(split["train"]) + len(split["val"]) == 3
+    derived = datasets_root / "tiled" / "derived" / split["uid"]
     assert (derived / "data.yaml").exists()
     assert list((derived / "labels").rglob("*.txt"))
 
     # 源集零改动 + 删除解耦
-    assert Path(img["a"]).exists() and src.exists()
+    assert (src_dir / "a.png").exists() and src.exists()
     svc.delete_dataset("src-ds")
     assert svc.get_dataset("tiled")["name"] == "tiled"
     with PILImage.open(tdir / "b_r1c1.png"):

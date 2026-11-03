@@ -9,6 +9,11 @@ v1.4 票 03 硬切：`POST /datasets/import`、`POST /{name}/resplit`、`POST /{
 `GET /{name}/rename-suspects`（疑似改名识别，零写入）、`POST /{name}/classes/rollback`
 （一次回到上一份备份）、`POST /{name}/reconcile`（详情页打开的指纹对账＝改标回流入口）。
 两种加图阻断（同名冲突 / 未登记类别）都以 409 + `detail` 承载处置数据，供前端出二次动作按钮。
+
+票 05 新增切分实体端点：`GET /{name}/splits`（历史）、`POST /{name}/splits/preview`
+（零写入预览）、`POST /{name}/splits`（独立确认落盘，命中既有 uid 复用）、
+`PATCH /{name}/splits/{uid}`（仅 memo）、`GET /{name}/splits/{uid}/effective`（实效集
+预览，与出队同口径）。排除/恢复改纯账本语义（只写 excluded.json）；tile 产物出生不切分。
 """
 
 from __future__ import annotations
@@ -100,10 +105,31 @@ class TilePreviewBody(BaseModel):
 
 
 class TileBody(TilePreviewBody):
+    """票 05 起切片产物出生不切分：ratio/seed/stratify 三参随清单层退役删除。"""
+
     name: str | None = None
-    ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
+
+
+class SplitPlanBody(BaseModel):
+    """新建切分（preview / create 同 body，docs/api.md v1.4）。
+
+    mode 两模式：inherit（继承归属，默认）锁参照 seed/ratio/stratify、既有成员归属
+    不动、只放新进合格文件；fresh（全部重洗）按全部合格成员重算，首次训练强制它。
+    """
+
+    mode: Literal["fresh", "inherit"] = "inherit"
+    parent_uid: str | None = None
     seed: int = 42
+    ratio: float = Field(default=0.8, gt=0.0, lt=1.0)
     stratify: bool = False
+    approved_only: bool = False
+    memo: str = ""
+
+
+class SplitMemoBody(BaseModel):
+    """仅编辑 memo——成员/参数/血缘不可变，无删除端点（票 05 / ADR 0010）。"""
+
+    memo: str
 
 
 class RelabelRefreshBody(BaseModel):
@@ -272,23 +298,69 @@ def run_audit(name: str):
 
 @router.post("/{name}/exclude")
 def exclude_files(name: str, body: ExcludeBody):
-    """质量审计处置（M6）：从切分清单排除，生成新清单并切换活跃。"""
+    """质量审计处置（票 05）：只写排除日志——不产切分、不重建派生/画像，成员消失由实效集表达。"""
     try:
-        m = svc.exclude_files(name, body.files, body.reason)
-        return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"]),
-                "excluded": len(m.get("excluded") or [])}
+        return svc.exclude_files(name, body.files, body.reason)
     except DatasetError as exc:
         return _error_response(exc)
 
 
 @router.post("/{name}/restore")
 def restore_files(name: str, body: RestoreBody):
-    """排除恢复：按最近一次 train/val 归属重新纳入活跃清单（exclude 的对偶）。"""
+    """排除恢复（票 05）：从排除日志删键——原切分成员自动回效，无链回溯、无派生重转。"""
     try:
-        m = svc.restore_files(name, body.files)
-        left = len(svc.get_dataset(name).get("excluded") or [])
-        return {"uid": m["uid"], "train": len(m["train"]), "val": len(m["val"]),
-                "restored": len(m.get("restored") or []), "excluded_left": left}
+        return svc.restore_files(name, body.files)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+# ---------------------------------------------------------------- 切分实体（票 05，docs/api.md v1.4）
+
+@router.get("/{name}/splits")
+def list_splits(name: str):
+    """切分历史（created_at 倒序，每项都是完整实体）；外部数据集 400。"""
+    try:
+        return svc.list_splits(name)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/splits/preview")
+def preview_split(name: str, body: SplitPlanBody):
+    """新建切分预览（零写入）：候选 uid、张数、val 重合 M/N、不可比警示、实效计数与泄漏组数。"""
+    try:
+        return svc.preview_split(name, mode=body.mode, seed=body.seed, ratio=body.ratio,
+                                 stratify=body.stratify, approved_only=body.approved_only,
+                                 parent_uid=body.parent_uid, memo=body.memo)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/splits")
+def create_split(name: str, body: SplitPlanBody):
+    """新建切分（独立确认落盘，不随任务取消回滚）：同划分命中既有 uid 直接复用并建派生树。"""
+    try:
+        return svc.create_split(name, mode=body.mode, seed=body.seed, ratio=body.ratio,
+                                stratify=body.stratify, approved_only=body.approved_only,
+                                parent_uid=body.parent_uid, memo=body.memo)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.patch("/{name}/splits/{uid}")
+def set_split_memo(name: str, uid: str, body: SplitMemoBody):
+    """仅编辑 memo：成员/参数/血缘不可变，无删除端点。"""
+    try:
+        return svc.set_split_memo(name, uid, body.memo)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.get("/{name}/splits/{uid}/effective")
+def effective_split(name: str, uid: str):
+    """实效集预览（与出队同口径，只读）：`{train, val, dropped{missing[], excluded[]}, counts}`。"""
+    try:
+        return svc.effective_split(name, uid)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -307,7 +379,7 @@ def tile_dataset(name: str, body: TileBody):
     """执行切片 → 新托管数据集（源集不动；返回 meta 含 tiling 血缘 + summary 计数）。"""
     try:
         return svc.tile_dataset(name, body.rows, body.cols, body.overlap, body.name,
-                                body.keep_empty, body.ratio, body.seed, body.stratify)
+                                body.keep_empty)
     except DatasetError as exc:
         return _error_response(exc)
 

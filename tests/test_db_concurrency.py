@@ -19,7 +19,7 @@ from visiontrainer.db.models import Task, init_db
 def _mk_task(factory) -> int:
     with factory() as s:
         t = Task(name="并发任务", uid="c1", base_model="stub", source="agent",
-                 train_args={}, agent_config={})
+                 train_args={}, agent_config={}, dataset="c", format_id="yolo")
         s.add(t)
         s.commit()
         return t.id
@@ -79,7 +79,8 @@ def test_mutate_rolls_back_when_validation_fails(tmp_path):
     """锁内校验失败不落半块数据：非 Agent 任务没有审批档位。"""
     factory = init_db(f"sqlite:///{tmp_path / 'reject.db'}")
     with factory() as s:
-        t = Task(name="手动任务", uid="m1", base_model="stub", source="manual",
+        t = Task(name="手动任务", uid="m1", base_model="stub", source="manual", dataset="m",
+                 format_id="yolo",
                  train_args={}, agent_config={"approval": "supervised"})
         s.add(t)
         s.commit()

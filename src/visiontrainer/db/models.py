@@ -42,7 +42,12 @@ class Task(Base):
     base_model: Mapped[str] = mapped_column(String(255), nullable=False)
     train_args: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     agent_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    dataset_manifest_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    # 票 05：任务引用换成三列（spec §3.4）——切分语义归训练、物理随数据集目录走，
+    # 旧的活跃清单指针/派生路径列（dataset_manifest_path）硬删，无兼容层；
+    # format_id 本票恒 "yolo"（数据格式绑定训练后端，格式池归票 07）。
+    dataset: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    split_uid: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    format_id: Mapped[str] = mapped_column(String(32), nullable=False, default="yolo")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=_now)
 
@@ -184,7 +189,7 @@ class AgentExperience(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
@@ -202,7 +207,10 @@ def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
             "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY, version INTEGER)"
         )
         # 幂等迁移（10 号票约定）：v2 = stats/audits 两表；v3 = gpu_samples 表 + runs.pruned 列；
-        # v4 = run_sample_errors 表（create_all 已建）；v5 = agent_experiences 表（create_all 已建）
+        # v4 = run_sample_errors 表（create_all 已建）；v5 = agent_experiences 表（create_all 已建）；
+        # v6 = tasks 三列（dataset/split_uid/format_id，删 dataset_manifest_path）。
+        # 存量库的 ALTER 与旧行数据回填属 v1.4 一次性迁移（票 10 的 migrate_v14，spec §3.5），
+        # 本函数只保证新库/测试库结构正确并按当前值刷版本号。
         conn.exec_driver_sql("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
         if engine.dialect.name == "sqlite":
             cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(runs)")]

@@ -59,23 +59,21 @@ def test_snapshot_frozen_at_launch_and_survives_dataset_change(snap_client, data
 
     snap = run["snapshot"]
     assert snap is not None, "Run 详情应携带运行快照"
-    sm = snap["split_manifest"]
-    assert sm["n_train"] > 0 and sm["n_val"] > 0
-    assert len(sm["train"]) == sm["n_train"] and len(sm["val"]) == sm["n_val"]
+    sm = snap["split"]
+    eff = snap["effective"]
+    assert sm["uid"] and sm["params"]["seed"] == 42
+    assert len(eff["train"]) > 0 and len(eff["val"]) > 0
     assert snap["classes"]["sha256"] and snap["classes"]["list"] == ["car", "person"]
     assert snap["weight"]["kind"] == "resolved_by_trainer"  # 模型名权重不猜缓存位置
     assert snap["train_args"]["epochs"] == 2
     # 快照文件随产物归档（平台重启仍可查）
     assert (Path(run["run_dir"]) / "run_manifest.json").is_file()
 
-    # 数据集变动：排除一张图 → 清单版本前移，旧 Run 快照必须原样（冻结语义）
-    old_train_list, old_classes_sha = list(sm["train"]), snap["classes"]["sha256"]
-    meta_now = svc.get_dataset("snap")
-    man = json.loads((datasets_root / "snap" / "derived" / meta_now["active_manifest"]
-                      / "split_manifest.json").read_text(encoding="utf-8"))
-    svc.exclude_files("snap", [Path(man["train"][0]).name])
+    # 数据集变动：排除一张图 → 实效集缩水，旧 Run 快照必须原样（冻结语义）
+    old_train_list, old_classes_sha = list(eff["train"]), snap["classes"]["sha256"]
+    svc.exclude_files("snap", [Path(old_train_list[0]).name])
     run2 = c.get(f"/api/v1/runs/{uid}").json()
-    assert run2["snapshot"]["split_manifest"]["train"] == old_train_list
+    assert run2["snapshot"]["effective"]["train"] == old_train_list
     assert run2["snapshot"]["classes"]["sha256"] == old_classes_sha
 
 
@@ -116,9 +114,11 @@ def test_snapshot_local_weight_hash(tmp_path, detect_source):
     data_yaml = tmp_path / "data.yaml"
     data_yaml.write_text("path: .\n", encoding="utf-8")
     snap = build_snapshot(run_uid="r1", round_no=1, base_model=str(w),
-                          train_args={"epochs": 1}, data_yaml=str(data_yaml))
+                          train_args={"epochs": 1}, data_yaml=str(data_yaml),
+                          dataset_dir=str(tmp_path))
     assert snap["weight"]["kind"] == "file"
     assert len(snap["weight"]["sha256"]) == 64
+    assert snap["split"] is None and snap["effective"] is None  # 未给切分即两段缺席
 
 
 def test_load_snapshot_missing(tmp_path):

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from visiontrainer.datasets.stats import build_stats, recompose
+from visiontrainer.datasets.stats import build_stats
 
 
 def _entry(image: str, objs: list[dict], w=640, h=480, primary=None, meta_override=None):
@@ -80,54 +80,6 @@ def test_by_class_counts_instances():
     assert sp["by_class"] == {"car": 2, "person": 1}  # 实例数，非图数
     assert sp["images"] == 1
     assert payload["per_image"][0]["labels"] == ["car", "person"]  # 筛图仍按类名去重
-
-
-def test_recompose_legacy_rows_fallback():
-    """旧画像行无 label_counts：有 objs 按 objs 数实例（M9 后），全无则按每类一图回退。"""
-    entries = [
-        _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5, "w": 64, "h": 48},
-                   {"label": "car", "cx": 0.3, "cy": 0.3, "w": 32, "h": 24}]),
-        _entry(B, [{"label": "person", "cx": 0.5, "cy": 0.5}]),
-    ]
-    p1 = build_stats(entries, _manifest([A], [B], uid="m1"), "detect", ["car", "person"], "ds")
-
-    # 中代画像：M9 起有 objs、无 label_counts
-    mid = {**p1, "per_image": [{k: v for k, v in r.items() if k != "label_counts"} for r in p1["per_image"]]}
-    assert recompose(mid, _manifest([A], [B], uid="m2"))["agg"]["by_split"]["train"]["by_class"] == {"car": 2}
-
-    # 远古画像：连 objs 都没有（M9 前）→ 每类按一图计，不为空
-    old = {**p1, "per_image": [{k: v for k, v in r.items() if k not in ("label_counts", "objs")}
-                               for r in p1["per_image"]]}
-    assert recompose(old, _manifest([A], [B], uid="m2"))["agg"]["by_split"]["train"]["by_class"] == {"car": 1}
-
-
-def test_recompose_after_exclusion():
-    entries = [
-        _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5, "w": 64, "h": 48}]),
-        _entry(B, [{"label": "person", "cx": 0.5, "cy": 0.5}]),
-        _entry(NEG, []),
-    ]
-    m1 = _manifest([A], [B, NEG], uid="m1")
-    payload = build_stats(entries, m1, "detect", ["car", "person"], "ds")
-
-    m2 = _manifest([A], [NEG], uid="m2")
-    m2["prev_uid"] = "m1"
-    p2 = recompose(payload, m2)
-
-    assert [r["image"] for r in p2["per_image"]] == [A, NEG]
-    assert p2["manifest_uid"] == "m2"
-    assert p2["agg"]["by_split"]["val"]["by_class"] == {}  # person 图已排除
-    assert p2["summary"]["labeled"] == 1
-    assert sum(sum(r) for r in p2["agg"]["size_heat"]) == 1  # 尺寸热力图跟清单重组
-
-
-def test_recompose_after_resplit_reassigns():
-    """重切后同一批行换归属（画像跟新清单走）。"""
-    entries = [_entry(A, []), _entry(B, [])]
-    p1 = build_stats(entries, _manifest([A], [B], uid="m1"), "detect", ["car"], "ds")
-    p2 = recompose(p1, _manifest([B], [A], uid="m2"))
-    by_img = {r["image"]: r["split"] for r in p2["per_image"]}
-    assert by_img == {A: "val", B: "train"}
 
 
 # ---------------------------------------------------------------- 下钻过滤（02 号票前端谓词的纯函数底座）

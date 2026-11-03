@@ -210,9 +210,8 @@ def test_service_auto_fix_end_to_end(datasets_root, tmp_path):
     assert result["fixed_files"] == 1 and result["relabel"]["refreshed"] >= 1
     assert result["validation"]["ok"] is True and result["validation"]["fixables"] == 0
 
-    meta = svc.get_dataset("autofix-e2e")
-    assert not meta["last_validation"]["problems"]
-    derived = datasets_root / "autofix-e2e" / "derived" / meta["active_manifest"] / "labels"
+    assert not svc.get_dataset("autofix-e2e")["last_validation"]["problems"]
+    derived = datasets_root / "autofix-e2e" / "derived" / svc.latest_split("autofix-e2e")["uid"] / "labels"
     txt = next(p for split in ("train", "val") for p in (derived / split).glob("a.txt"))
     assert txt.read_text(encoding="utf-8").strip().startswith("0 ")  # 钳制后派生已重转
     # 备份与隔离区落在数据集侧 autofix/ 运行目录，源目录保持纯标注

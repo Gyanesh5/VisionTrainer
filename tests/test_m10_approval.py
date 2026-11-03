@@ -242,7 +242,7 @@ def test_wait_run_round_budget(factory, tmp_path, monkeypatch):
         training_python="python", trainer_entry="x", runs_dir=tmp_path / "runs"))
     with factory() as s:
         t = Task(uid="tkrb", name="时长熔断", source="agent", status="running",
-                 base_model="stub")
+                 base_model="stub", dataset="good", format_id="yolo")
         s.add(t)
         s.flush()
         run = Run(uid="rnrb", task_id=t.id, round_no=1, status="running")
@@ -308,7 +308,7 @@ def test_waiting_wake_applies_pending_verdict(factory, tmp_path, monkeypatch):
     with factory() as s:
         t = Task(uid="tkwake", name="唤醒", source="agent", status="running",
                  base_model="stub", train_args={"epochs": 2, "lr0": 0.015},
-                 dataset_manifest_path="/dsm/good/derived/aa/data.yaml")
+                 dataset="good", split_uid="aa", format_id="yolo")
         s.add(t)
         s.flush()
         for i in (1, 2):

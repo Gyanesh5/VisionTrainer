@@ -153,43 +153,37 @@ def test_audit_cache_roundtrip_and_invalidation(tmp_path, datasets_root, tmp_db,
         assert r3["from_cache"] is False
 
 
-def test_exclude_files_stable_assignment_and_cascade(tmp_path, datasets_root, tmp_db, detect_source):
+def test_exclude_files_only_writes_excluded_log(tmp_path, datasets_root, tmp_db, detect_source):
+    """票 05 语义：排除只写 excluded.json——不产新切分、不重建派生、不重算画像；
+    成员消失由实效集在消费时表达，恢复出账即自动回效。"""
     name = "exctest"
-    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
-    old_uid = meta["active_manifest"]
-    old_manifest = json.loads((datasets_root / name / "derived" / old_uid / "split_manifest.json")
-                              .read_text(encoding="utf-8"))
+    build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
+    old_split = svc.latest_split(name)
     old_stats = svc.dataset_stats(name)
-    victim = old_manifest["train"][0]
+    victim = old_split["train"][0]
 
-    m = svc.exclude_files(name, [victim], "测试排除")
-    assert m["uid"] != old_uid and m["prev_uid"] == old_uid
-    assert victim in m["excluded"]
-    # 归属稳定：剩余文件 train/val 与旧清单一致（只删不洗）
-    assert m["train"] == [p for p in old_manifest["train"] if p != victim]
-    assert m["val"] == old_manifest["val"]
-    # 旧清单与派生保留可查
-    assert (datasets_root / name / "derived" / old_uid / "split_manifest.json").is_file()
-    # 健康报告同步重组
-    new_stats = svc.dataset_stats(name)
-    assert new_stats["manifest_uid"] == m["uid"]
-    assert new_stats["summary"]["images"] == old_stats["summary"]["images"] - 1
-    assert all(r["image"] != victim for r in new_stats["per_image"])
-    # meta 记录排除日志（excluded.json：文件名键，读时组合视图给 {file, at, reason}）
-    meta2 = svc.get_dataset(name)
-    assert [e["file"] for e in meta2["excluded"]] == [Path(victim).name]
-
-
-def test_exclude_refuses_empty_split(tmp_path, datasets_root, tmp_db, detect_source):
-    name = "edgeexc"
-    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
-    manifest = json.loads((datasets_root / name / "derived" / meta["active_manifest"] / "split_manifest.json")
-                          .read_text(encoding="utf-8"))
+    r = svc.exclude_files(name, [victim], "测试排除")
+    assert r["excluded"] == [victim] and r["excluded_total"] == 1
+    # 排除账读时组合视图（excluded.json：文件名键，视图给 {file, at, reason}）
+    assert [e["file"] for e in svc.get_dataset(name)["excluded"]] == [victim]
+    # 切分实体不动：uid 不变、无新目录、派生树原样
+    assert svc.latest_split(name)["uid"] == old_split["uid"]
+    assert [s["uid"] for s in svc.list_splits(name)] == [old_split["uid"]]
+    assert (datasets_root / name / "derived" / old_split["uid"] / "data.yaml").is_file()
+    # 画像行不动（一行制：排除不换键不重算）
+    assert svc.dataset_stats(name) == old_stats
+    # 成员消失只在实效集出现（恢复即回效）
+    eff = svc.effective_split(name, old_split["uid"])
+    assert victim in eff["dropped"]["excluded"] and victim not in eff["train"] + eff["val"]
+    assert svc.restore_files(name, [victim])["restored"] == [victim]
+    assert svc.effective_split(name, old_split["uid"])["dropped"]["excluded"] == []
+    # 拒绝分支：真源没有的文件 / 已在册的文件
     with pytest.raises(DatasetError) as ei:
-        svc.exclude_files(name, manifest["val"])  # 排空 val
-    assert ei.value.code == "state_conflict"
+        svc.exclude_files(name, ["/not/on/disk.png"])
+    assert ei.value.code == "invalid_args"
+    svc.exclude_files(name, [victim])
     with pytest.raises(DatasetError) as ei2:
-        svc.exclude_files(name, ["/not/in/manifest.png"])  # 清单外文件
+        svc.exclude_files(name, [victim])
     assert ei2.value.code == "invalid_args"
 
 
@@ -306,51 +300,47 @@ def test_thumb_sign_and_url():
 
 
 def test_exclude_files_batch_multi(tmp_path, datasets_root, tmp_db, detect_source):
-    """批量排除（网格多选的服务底座）：一次多文件、归属稳定、逐个入排除日志。"""
+    """批量排除（网格多选的服务底座）：一次多文件入账、实效集同口径剔除、未涉及成员不动。"""
     name = "batchexc"
-    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
-    ds_dir = datasets_root / name
-    m1 = json.loads((ds_dir / "derived" / meta["active_manifest"] / "split_manifest.json")
-                    .read_text(encoding="utf-8"))
-    victims = [m1["train"][0], m1["train"][1]]
-    m2 = svc.exclude_files(name, victims, "质量审计批量处置")
+    build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
+    split = svc.latest_split(name)
+    victims = [split["train"][0], split["train"][1]]
+    svc.exclude_files(name, victims, "质量审计批量处置")
+    eff = svc.effective_split(name, split["uid"])
     for v in victims:
-        assert v not in m2["train"] and v not in m2["val"]
-    assert m2["val"] == m1["val"]  # 未涉及文件归属不变
+        assert v in eff["dropped"]["excluded"]
+        assert v not in eff["train"] + eff["val"]
+    assert eff["val"] == split["val"]  # 未涉及文件实效归属不变
     meta2 = svc.get_dataset(name)
-    assert {e["file"] for e in meta2["excluded"]} == {Path(v).name for v in victims}
+    assert {e["file"] for e in meta2["excluded"]} == set(victims)
 
 
 def test_restore_files_roundtrip(tmp_path, datasets_root, tmp_db, detect_source):
-    """排除恢复：回最近一次归属、日志清出、全量恢复 uid 复现原版本、画像回原数。"""
+    """排除恢复（票 05）：只从 excluded.json 删键——无链回溯、无派生重转、无画像重算；
+    原切分成员因出账自动回到实效集。"""
     from visiontrainer.datasets.service import DatasetError as DE
 
     name = "rstexc"
-    meta = build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
-    old_uid = meta["active_manifest"]
-    old_manifest = json.loads((datasets_root / name / "derived" / old_uid / "split_manifest.json")
-                              .read_text(encoding="utf-8"))
-    old_images = svc.dataset_stats(name)["summary"]["images"]
-    victims = [old_manifest["train"][0], old_manifest["val"][0]]
+    build_dataset(name, "detect", str(detect_source), ratio=0.8, seed=42)
+    split = svc.latest_split(name)
+    old_stats = svc.dataset_stats(name)
+    victims = [split["train"][0], split["val"][0]]
 
     svc.exclude_files(name, victims, "测试排除")
-    # 恢复 val 那张 → 归属回到 val，train/其余文件不动
-    m2 = svc.restore_files(name, [victims[1]])
-    assert victims[1] in m2["val"] and victims[1] not in m2["train"]
-    assert victims[0] not in {f["image"] for f in m2["files"]}
-    assert [e["file"] for e in svc.get_dataset(name)["excluded"]] == [Path(victims[0]).name]
-    # 恢复剩余 → 文件集回到原版，uid 复现原版本号，日志清空，画像回原数
-    m3 = svc.restore_files(name, [victims[0]])
-    assert {f["image"] for f in m3["files"]} == {f["image"] for f in old_manifest["files"]}
-    assert m3["uid"] == old_uid
-    assert svc.get_dataset(name)["active_manifest"] == old_uid
+    # 恢复 val 那张 → 实效 val 立即回效，train 侧仍剔
+    r2 = svc.restore_files(name, [victims[1]])
+    assert r2["restored"] == [victims[1]]
+    eff2 = svc.effective_split(name, split["uid"])
+    assert victims[1] in eff2["val"]
+    assert victims[0] in eff2["dropped"]["excluded"]
+    assert [e["file"] for e in svc.get_dataset(name)["excluded"]] == [victims[0]]
+    # 恢复剩余 → 划分内容从头到尾没变（uid 不变），日志清空，画像行原样
+    svc.restore_files(name, [victims[0]])
+    assert svc.latest_split(name)["uid"] == split["uid"]
     assert svc.get_dataset(name)["excluded"] == []
-    assert svc.dataset_stats(name)["manifest_uid"] == old_uid
-    assert svc.dataset_stats(name)["summary"]["images"] == old_images
-    # 拒绝分支：已在清单内 / 从未排除过
-    with pytest.raises(DE) as ei:
-        svc.restore_files(name, [victims[0]])
-    assert ei.value.code == "invalid_args"
+    assert svc.dataset_stats(name) == old_stats
+    assert svc.effective_split(name, split["uid"])["counts"] == split["counts"]
+    # 拒绝分支：从未排除过的文件
     with pytest.raises(DE) as ei2:
         svc.restore_files(name, ["/never/excluded.png"])
     assert ei2.value.code == "invalid_args"

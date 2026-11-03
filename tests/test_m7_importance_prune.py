@@ -30,7 +30,7 @@ def _seed_run(factory, root: Path, *, lr0: float, primary: float, epochs=2, stat
     with factory() as s:
         t = Task(uid=f"tk{time.time_ns()%10**8}", name=name, source="manual", status=status,
                  base_model=base, train_args={"epochs": epochs, "lr0": lr0},
-                 dataset_manifest_path=f"{dataset_path}/derived/aa/data.yaml")
+                 dataset=Path(dataset_path).name, split_uid="aa", format_id="yolo")
         s.add(t)
         s.flush()
         run = Run(uid=f"rn{time.time_ns()%10**8}", task_id=t.id, round_no=1, status=status,
@@ -154,7 +154,7 @@ def test_prune_decision_function_unit(tmp_path, monkeypatch):
         t = Task(uid="ptask", name="P", source="agent", status="running", base_model="b",
                  train_args={"epochs": 4},
                  agent_config={"state": "running", "max_rounds": 5, "approval": "auto"},
-                 dataset_manifest_path="/x/ds/derived/ab/data.yaml")
+                 dataset="ds", split_uid="ab", format_id="yolo")
         s.add(t)
         s.flush()
         cur = _Run_model()(uid="pcur", task_id=t.id, round_no=3, status="running")

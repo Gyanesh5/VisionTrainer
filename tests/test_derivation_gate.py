@@ -1,10 +1,11 @@
-"""开训派生新鲜度门 + Run 冻结标签副本（2026-10-31 用户裁决「派生遵从真源」）。
+"""开训派生刷新门 + Run 冻结标签副本（2026-10-31 用户裁决「派生遵从真源」；票 05 换入口）。
 
-闸口契约：出队即把任务钉住的派生 txt 对齐真源标注 JSON 的当前投影——
+闸口契约（`refresh_derivation(数据集, 切分 uid)`，出队消费点强制新鲜）：
 - 干净 → no-op 放行；
 - 改标未重建派生 → 就地重转（「改完标注直接开训」成为唯一正确用法）；
-- JSON 损坏 / 新增不可转形状（unknown_class 等）→ 拒训，run failed 指路校验页。
-Run 侧：启动即冻结 val 标签副本 labels_frozen——错误分析 GT 永远对启动时点，
+- JSON 损坏 / 新增不可转形状（unknown_class 等）→ 拒训，run failed 指路校验页；
+- 真源已不存在的成员 → 顺手清断链与残留标签（实效集口径归出队门）。
+Run 侧：启动即冻结实效 val 标签副本 labels_frozen——错误分析 GT 永远对启动时点，
 此后数据集改标/重建派生不影响旧 Run 对账。
 """
 
@@ -21,7 +22,7 @@ from fastapi.testclient import TestClient
 from conftest import build_dataset, rect
 
 from visiontrainer.datasets import service as svc
-from visiontrainer.datasets.service import DatasetError, ensure_fresh_derivation
+from visiontrainer.datasets.service import DatasetError, refresh_derivation
 from visiontrainer.main import create_app
 
 STUB = str(Path(__file__).parent / "stub_trainer.py")
@@ -46,18 +47,28 @@ def gate_client(tmp_path: Path, plate_dataset):
         yield c
 
 
+def _split_of(datasets_root: Path) -> dict:
+    """最近切分实体（票 05：无 active 指针，「最近」＝ created_at 最新）。"""
+    return svc.latest_split("plate", root=datasets_root)
+
+
 def _derived(datasets_root: Path) -> Path:
-    uid = json.loads((datasets_root / "plate" / "dataset.json").read_text())["active_manifest"]
-    return datasets_root / "plate" / "derived" / uid
+    return datasets_root / "plate" / "derived" / _split_of(datasets_root)["uid"]
 
 
 def _val_label(datasets_root: Path) -> tuple[str, Path]:
     """val 首图（带标注）→ (图片绝对路径, 真源 JSON 路径)。与 stub 分析的 val[0] 同序。"""
-    manifest = json.loads((_derived(datasets_root) / "split_manifest.json").read_text())
-    val_set = set(manifest["val"])
-    for f in sorted(manifest["files"], key=lambda f: f["image"]):
-        if f["image"] in val_set and f.get("label"):
-            return f["image"], Path(f["label"])
+    from visiontrainer.datasets import split as split_lib
+
+    split = _split_of(datasets_root)
+    ds_dir = datasets_root / "plate"
+    source = ds_dir / "source"
+    val_set = set(split["val"])
+    for name in sorted(set(split["train"]) | set(split["val"])):
+        if name in val_set:
+            label = split_lib.label_json_of(source, source / name)
+            if label is not None:
+                return str(source / name), label
     raise AssertionError("夹具里没有带标注的 val 图")
 
 
@@ -90,7 +101,8 @@ def _create_task(client: TestClient) -> tuple[int, str]:
 # ---------------------------------------------------------------- 闸口纯服务层
 
 def test_gate_noop_when_derivation_fresh(plate_dataset, datasets_root):
-    r = ensure_fresh_derivation(_derived(datasets_root) / "data.yaml")
+    uid = _split_of(datasets_root)["uid"]
+    r = refresh_derivation("plate", uid)
     assert r["refreshed"] == []
     assert r["checked"] == 9  # 8 张带标注 + 1 张负样本
 
@@ -98,23 +110,25 @@ def test_gate_noop_when_derivation_fresh(plate_dataset, datasets_root):
 def test_gate_reconverts_stale_annotation(plate_dataset, datasets_root):
     image, label = _val_label(datasets_root)
     _add_shape(label, rect("car", 300, 200, 400, 300))
-    r = ensure_fresh_derivation(_derived(datasets_root) / "data.yaml")
+    uid = _split_of(datasets_root)["uid"]
+    r = refresh_derivation("plate", uid)
     assert r["refreshed"] == [image]
     txts = list((_derived(datasets_root) / "labels").rglob(f"{label.stem}.txt"))
     assert len(txts) == 1 and len(txts[0].read_text().splitlines()) == 2
     # 幂等：重跑无漂移
-    assert ensure_fresh_derivation(_derived(datasets_root) / "data.yaml")["refreshed"] == []
+    assert refresh_derivation("plate", uid)["refreshed"] == []
 
 
 def test_gate_rejects_relabel_to_unknown_class(plate_dataset, datasets_root):
     """改标成未注册类 → 该 GT 线从派生消失（内容漂移 + 转换丢弃）→ 拒训。"""
     _, label = _val_label(datasets_root)
+    uid = _split_of(datasets_root)["uid"]
     txt_path = next((_derived(datasets_root) / "labels").rglob(f"{label.stem}.txt"))
     data = json.loads(label.read_text())
     data["shapes"][0]["label"] = "bus"  # car → 未注册
     label.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(DatasetError) as ei:
-        ensure_fresh_derivation(_derived(datasets_root) / "data.yaml")
+        refresh_derivation("plate", uid)
     assert ei.value.code == "state_conflict"
     assert "无法进入训练" in ei.value.message and "unknown_class" in ei.value.message
     # 派生 txt 忠实于真源投影：未注册形状不进训练（原线消失）
@@ -126,7 +140,7 @@ def test_gate_ignores_content_neutral_unknown_shape(plate_dataset, datasets_root
     与重校验后的丢弃确认门管辖。"""
     _, label = _val_label(datasets_root)
     _add_shape(label, rect("bus", 300, 200, 400, 300))
-    r = ensure_fresh_derivation(_derived(datasets_root) / "data.yaml")
+    r = refresh_derivation("plate", _split_of(datasets_root)["uid"])
     assert r["refreshed"] == []
 
 
@@ -134,16 +148,38 @@ def test_gate_rejects_corrupt_json(plate_dataset, datasets_root):
     _, label = _val_label(datasets_root)
     label.write_text("{not json", encoding="utf-8")
     with pytest.raises(DatasetError) as ei:
-        ensure_fresh_derivation(_derived(datasets_root) / "data.yaml")
+        refresh_derivation("plate", _split_of(datasets_root)["uid"])
     assert ei.value.code == "state_conflict" and "损坏" in ei.value.message
 
 
-def test_gate_noop_for_external_dataset(tmp_path: Path):
+def test_gate_cleans_dead_links_of_missing_source(plate_dataset, datasets_root):
+    """真源已不存在的成员：清掉派生断链与残留标签（吃不到断链图，实效集另算）。"""
+    split = _split_of(datasets_root)
+    victim = sorted(set(split["train"]) - set(split["val"]))[0]  # train 侧首名（不动 val）
+    stem = Path(victim).stem
+    (datasets_root / "plate" / "source" / victim).unlink()
+    r = refresh_derivation("plate", split["uid"])
+    assert r["refreshed"] == []
+    assert not list((_derived(datasets_root) / "images").rglob(f"{stem}.*"))
+    assert not list((_derived(datasets_root) / "labels").rglob(f"{stem}.txt"))
+
+
+def test_gate_rejects_external_dataset(tmp_path: Path, monkeypatch):
+    """外部数据集平台零写入：refresh_derivation 一律 invalid_args（训练侧外部链路不调它）。"""
     ext = tmp_path / "ext_ds"
     ext.mkdir()
-    (ext / "data.yaml").write_text("train: images/train\n")
-    r = ensure_fresh_derivation(ext / "data.yaml")
-    assert r["checked"] == 0 and r["refreshed"] == []  # 外部目录布局下 dataset 名无意义
+    (ext / "data.yaml").write_text("train: images/train\n", encoding="utf-8")
+    monkeypatch.setattr(svc, "get_datasets_root", lambda: tmp_path)
+    svc.register_external("extgate", "detect", str(ext))
+    with pytest.raises(DatasetError) as ei:
+        refresh_derivation("extgate", "deadbeef")
+    assert ei.value.code == "invalid_args"
+
+
+def test_gate_missing_split_not_found(plate_dataset, datasets_root):
+    with pytest.raises(DatasetError) as ei:
+        refresh_derivation("plate", "deadbeef")
+    assert ei.value.code == "not_found"
 
 
 # ---------------------------------------------------------------- 开训链路端到端

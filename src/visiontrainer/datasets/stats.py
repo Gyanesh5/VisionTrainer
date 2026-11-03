@@ -4,7 +4,6 @@ payload 结构（SQLite dataset_stats 表，按（数据集，切分清单）一
     meta:    task_type / dataset / manifest_uid / classes / computed_at / summary 数字
     per_image: 逐图行（下钻筛图用）：name / image / split / w / h / n / labels / label_counts / centers
     agg:     四图聚合 + 逐切分类别分布
-排除/重切后用 recompose 从既有 per_image 重组（零重扫盘）。
 """
 
 from __future__ import annotations
@@ -62,22 +61,6 @@ def build_stats(entries: list[dict], manifest: dict, task_type: str,
             row["w"], row["h"] = meta.get("w"), meta.get("h")
         per_image.append(row)
     return _compose(dataset, task_type, classes, manifest, per_image)
-
-
-def recompose(prev_payload: dict, manifest: dict) -> dict:
-    """切分清单变化（排除/重切）后从既有逐图行重组；行缺失（旧库数据）返回 prev 原样。"""
-    rows = prev_payload.get("per_image") or []
-    if not rows:
-        return prev_payload
-    kept = []
-    for r in rows:
-        sp = _split_of(r["image"], manifest)
-        if sp is None:
-            continue  # 已被排除/清单移除
-        r["split"] = sp
-        kept.append(r)
-    return _compose(prev_payload["dataset"], prev_payload["task_type"],
-                    prev_payload.get("classes") or [], manifest, kept)
 
 
 def _compose(dataset: str, task_type: str, classes: list[str],

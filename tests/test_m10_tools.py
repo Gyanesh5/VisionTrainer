@@ -30,13 +30,13 @@ def manager(factory, tmp_path: Path):
         training_python="python", trainer_entry="x", runs_dir=tmp_path / "runs"))
 
 
-def _seed_task_run(factory, *, name="t", dataset="/dsm/good", base="stub-model",
+def _seed_task_run(factory, *, name="t", dataset="good", base="stub-model",
                    status="done", primary=None, pruned=False, round_no=1,
                    train_args=None) -> tuple[int, str]:
     with factory() as s:
         t = Task(uid=f"tk{time.time_ns() % 10**8}", name=name, source="manual", status=status,
                  base_model=base, train_args=train_args or {"epochs": 3},
-                 dataset_manifest_path=f"{dataset}/derived/aa/data.yaml")
+                 dataset=dataset, split_uid="aa", format_id="yolo")
         s.add(t)
         s.flush()
         run = Run(uid=f"rn{time.time_ns() % 10**8}", task_id=t.id, round_no=round_no,
@@ -150,8 +150,8 @@ def test_query_error_analysis_unanalyzed(factory):
 
 
 def test_query_history_runs_filter(factory):
-    _seed_task_run(factory, name="a", dataset="/dsm/good", primary=0.5)
-    _seed_task_run(factory, name="b", dataset="/dsm/other", primary=0.3, pruned=True,
+    _seed_task_run(factory, name="a", dataset="good", primary=0.5)
+    _seed_task_run(factory, name="b", dataset="other", primary=0.3, pruned=True,
                    round_no=2, train_args={"epochs": 3, "lr0": 0.05})
     out = build_default_registry(factory).dispatch("query_history_runs", {"dataset": "good"})
     assert out["n"] == 1

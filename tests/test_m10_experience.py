@@ -29,13 +29,13 @@ def factory(tmp_path: Path):
     return init_db(f"sqlite:///{tmp_path / 'db.sqlite'}")
 
 
-def _seed_agent_task(factory, *, name="t", dataset="/dsm/good", base="stub",
+def _seed_agent_task(factory, *, name="t", dataset="good", base="stub",
                      runs=(("done", 0.5), ("done", 0.6)), with_snapshot=True,
                      stop_reason="达到最大轮数", uid_suffix="") -> int:
     with factory() as s:
         t = Task(uid=f"tk{time.time_ns() % 10**8}{uid_suffix}", name=name, source="agent",
                  status="done", base_model=base, train_args={"epochs": 3, "lr0": 0.02},
-                 dataset_manifest_path=f"{dataset}/derived/aa/data.yaml")
+                 dataset=dataset, split_uid="aa", format_id="yolo")
         s.add(t)
         s.flush()
         tid = t.id
@@ -84,7 +84,7 @@ def test_archive_and_retrieve(factory, tmp_path: Path):
 def test_archive_skips_incomplete(factory):
     with factory() as s:
         t = Task(uid="tkx", name="x", source="agent", status="failed", base_model="stub",
-                 train_args={})
+                 train_args={}, dataset="x", format_id="yolo")
         s.add(t)
         s.commit()
         tid = t.id
@@ -93,7 +93,7 @@ def test_archive_skips_incomplete(factory):
         assert s.query(AgentExperience).count() == 0  # 无完成运行不沉淀
     with factory() as s:
         t2 = Task(uid="tkm", name="m", source="manual", status="done", base_model="stub",
-                  train_args={})
+                  train_args={}, dataset="m", format_id="yolo")
         s.add(t2)
         s.commit()
         tid2 = t2.id
@@ -103,8 +103,8 @@ def test_archive_skips_incomplete(factory):
 
 
 def test_retrieve_similarity_and_exclude(factory):
-    a = _seed_agent_task(factory, name="a", dataset="/dsm/good", base="stub", uid_suffix="a")
-    _seed_agent_task(factory, name="b", dataset="/dsm/other", base="other-model",
+    a = _seed_agent_task(factory, name="a", dataset="good", base="stub", uid_suffix="a")
+    _seed_agent_task(factory, name="b", dataset="other", base="other-model",
                      runs=(("done", 0.9),), uid_suffix="b")
     archive_experience(factory, a)
     with factory() as s:
@@ -122,10 +122,10 @@ def test_retrieve_similarity_and_exclude(factory):
 
 def test_dataset_of():
     class T:
-        dataset_manifest_path = "/dsm/good/derived/aa/data.yaml"
+        dataset = "good"  # 票 05 三列引用：Task.dataset 直取，不再从派生路径反查
 
     assert dataset_of(T()) == "good"
-    T.dataset_manifest_path = None
+    T.dataset = None
     assert dataset_of(T()) is None
 
 
@@ -171,7 +171,7 @@ def test_tool_loop_compacts_under_budget(factory):
     uid = None
     with factory() as s:
         t = Task(uid="tkc", name="c", source="manual", status="done", base_model="stub",
-                 train_args={})
+                 train_args={}, dataset="c", format_id="yolo")
         s.add(t)
         s.flush()
         run = Run(uid="rnc", task_id=t.id, round_no=1, status="done", primary_metric=0.4)

@@ -201,8 +201,7 @@ def test_relabel_refresh_incremental(tmp_path, tmp_db):
     _label_file(src / "a.json", [_rect("car", (10, 10, 110, 110))])
     _label_file(src / "b.json", [_rect("car", (10, 10, 110, 110))])
     build_dataset("m9rf", "detect", str(src), root=root)
-    meta = svc.get_dataset("m9rf", root=root)
-    derived = root / "m9rf" / "derived" / meta["active_manifest"] / "labels"
+    derived = root / "m9rf" / "derived" / svc.latest_split("m9rf", root=root)["uid"] / "labels"
 
     def _txt(stem: str) -> str:
         for split in ("train", "val"):

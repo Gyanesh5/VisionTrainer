@@ -23,6 +23,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -30,8 +31,7 @@ from fastapi.testclient import TestClient
 
 from visiontrainer import config as config_module
 from visiontrainer.datasets import service as svc
-from visiontrainer.datasets.split import build_manifest, save_manifest
-from visiontrainer.datasets.stats import build_stats, save_stats
+from visiontrainer.datasets import split as split_lib
 from visiontrainer.main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -196,34 +196,91 @@ def rect(label: str, x0=10, y0=10, x1=110, y1=90) -> dict:
 def build_dataset(name: str, task_type: str, source_dir: Path | str, ratio: float = 0.8,
                   seed: int = 42, stratify: bool = False,
                   classes: list[str] | None = None, root: Path | None = None) -> dict:
-    """票 03 测试侧转换助手（替代已退役的 `svc.import_dataset`）：托管出生 + 首次切分。
+    """测试侧转换助手：托管出生 + 首次切分（票 05 起走真 `svc.create_split`）。
 
-    票 03 唯一出生入口 `create_dataset` 只做校验 + 画像、**不切分**；训练/审计/审查侧
-    既有用例仍需真实切分清单，本助手 = labeled 态 `create_dataset` + `build_manifest` +
-    `_derive` + `save_manifest` + 画像重算，保留旧导入「进来即切分」语义（切分实体归票 05
-    后再由此处统一换轨）。classes 缺省时按 `create_dataset` 的阻断口径探测类别表
-    （全部 shape label + flags 真键），保证转换后的用例不会意外触发外类别 409。
+    labeled 态 `create_dataset`（校验 + 画像、不切分）+ fresh 首切（含派生树与画像行），
+    保留旧导入「进来即切分」语义，供训练/审计/审查侧既有用例消费。classes 缺省时按
+    `create_dataset` 的阻断口径探测类别表（全部 shape label + flags 真键）。
     """
     src = Path(source_dir)
     if classes is None:
         classes = sorted(svc._probe_source_labels(src))
-    created = svc.create_dataset(name, task_type, classes, "labeled", str(src), root=root)
-    base = root or svc.get_datasets_root()
-    ds_dir = base / name
-    source = ds_dir / svc.SOURCE_SUBDIR
-    final_classes = created["classes"]
-    scan = svc.scan_entries(source, task_type, final_classes)
-    entries = [{"image": e["image"], "label": e["label"], "primary_label": e.get("primary_label")}
-               for e in scan["entries"]]
-    manifest = build_manifest(entries, ratio, seed, stratify)
-    save_manifest(ds_dir, manifest)
-    svc._derive(ds_dir, manifest, task_type, final_classes)
-    raw = svc._read_meta(ds_dir / "dataset.json")
-    raw["manifests"] = [svc._manifest_brief(manifest)]
-    raw["active_manifest"] = manifest["uid"]
-    svc._write_meta(ds_dir, raw)
-    save_stats(name, build_stats(scan["entries"], manifest, task_type, final_classes, name))
+    svc.create_dataset(name, task_type, classes, "labeled", str(src), root=root)
+    svc.create_split(name, mode="fresh", seed=seed, ratio=ratio, stratify=stratify,
+                     approved_only=False, root=root)
     return svc.get_dataset(name, root)
+
+
+# ---------------------------------------------------------------- 票 05 测试侧：切分实体 + 派生树
+#
+# `build_dataset` 走真 `svc.create_split`（含派生树与画像行）；`write_split` /
+# `build_split_dataset` 是**手写**变体——切分文件与派生树按票面契约直造，脱离服务层，
+# 可单独验证训练侧的实效集消费。
+
+
+def write_split(ds_dir: Path, train: list[str], val: list[str], *, seed: int = 42,
+                ratio: float = 0.8, stratify: bool = False, approved_only: bool = False,
+                mode: str = "fresh", parent_uid: str | None = None, grouped: str | None = None,
+                memo: str = "", created_at: str | None = None) -> dict:
+    """手写一份切分实体并返回它（uid = train/val 划分内容哈希，参数与分组不进哈希）。"""
+    train, val = sorted(train), sorted(val)
+    split = {
+        "uid": split_lib.split_uid(train, val),
+        "created_at": created_at or datetime.now().isoformat(timespec="seconds"),
+        "train": train,
+        "val": val,
+        "params": {"seed": seed, "ratio": ratio, "stratify": stratify,
+                   "approved_only": approved_only},
+        "lineage": {"mode": mode, "parent_uid": parent_uid},
+        "grouped": grouped,
+        "counts": {"train": len(train), "val": len(val)},
+        "memo": memo,
+    }
+    path = ds_dir / split_lib.SPLIT_SUBDIR / split["uid"] / split_lib.SPLIT_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(split, ensure_ascii=False, indent=2), encoding="utf-8")
+    return split
+
+
+def write_derived_tree(ds_dir: Path, split: dict, classes: list[str]) -> Path:
+    """手搭该切分的派生树 `<ds>/derived/<uid>/{data.yaml,images/labels}`（票 05 保留旧形态，
+    键换成切分 uid；格式池归票 07）。标签内容不参与 stub 训练器，落盘只为 labels_frozen 有据。"""
+    derived = ds_dir / "derived" / split["uid"]
+    names = ", ".join(f"{i}: {c}" for i, c in enumerate(classes)) or "0: x"
+    for side in ("train", "val"):
+        (derived / "images" / side).mkdir(parents=True, exist_ok=True)
+        labels = derived / "labels" / side
+        labels.mkdir(parents=True, exist_ok=True)
+        for name in split[side]:
+            (labels / f"{Path(name).stem}.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+    (derived / "data.yaml").write_text(
+        f"path: {derived}\ntrain: images/train\nval: images/val\nnames: {{{names}}}\n",
+        encoding="utf-8")
+    return derived
+
+
+def build_split_dataset(name: str, task_type: str, source_dir: Path | str, *,
+                        train: list[str] | None = None, val: list[str] | None = None,
+                        classes: list[str] | None = None, root: Path | None = None,
+                        **split_kwargs) -> tuple[Path, dict]:
+    """托管出生（票 03 唯一入口）+ 手写切分实体与派生树，返回 (数据集目录, 切分实体)。
+
+    名单缺省 = `source/` 下盘上文件按名排序后 8:2 分（train 取前 80%，val 取余），
+    与 `write_split` 一样完全脱离服务层，可单独验证训练侧的实效集消费。
+    """
+    src = Path(source_dir)
+    if classes is None:
+        classes = sorted(svc._probe_source_labels(src))
+    svc.create_dataset(name, task_type, classes, "labeled", str(src), root=root)
+    ds_dir = (root or svc.get_datasets_root()) / name
+    if train is None and val is None:
+        names = sorted(p.name for p in (ds_dir / svc.SOURCE_SUBDIR).iterdir()
+                       if p.is_file() and p.suffix.lower() in svc.IMAGE_EXTS)
+        k = int(len(names) * 0.8)
+        train, val = names[:k], names[k:]
+    split = write_split(ds_dir, list(train or []), list(val or []), **split_kwargs)
+    write_derived_tree(ds_dir, split, classes)
+    return ds_dir, split
 
 
 @pytest.fixture()

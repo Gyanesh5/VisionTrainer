@@ -30,7 +30,7 @@ def _seed_run(factory, primary=0.4) -> str:
     with factory() as s:
         t = Task(uid=f"tk{time.time_ns() % 10**8}", name="t", source="manual", status="done",
                  base_model="stub", train_args={"epochs": 2},
-                 dataset_manifest_path="/dsm/good/derived/aa/data.yaml")
+                 dataset="good", split_uid="aa", format_id="yolo")
         s.add(t)
         s.flush()
         run = Run(uid=f"rn{time.time_ns() % 10**8}", task_id=t.id, round_no=1, status="done",

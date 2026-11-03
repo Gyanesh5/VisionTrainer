@@ -7,7 +7,8 @@ def test_init_db_creates_six_tables(tmp_path):
     db = tmp_path / "visiontrainer.db"
     session_factory = init_db(f"sqlite:///{db}")
     with session_factory() as s:
-        t = Task(uid="t1" * 4, name="demo", base_model="yolo11n", train_args={"epochs": 5})
+        t = Task(uid="t1" * 4, name="demo", base_model="yolo11n", train_args={"epochs": 5},
+                 dataset="demo", format_id="yolo")
         s.add(t)
         s.flush()
         r = Run(uid="r1" * 4, task_id=t.id, round_no=1)
