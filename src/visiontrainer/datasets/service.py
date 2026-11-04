@@ -1748,7 +1748,7 @@ def review_queue(name: str, root: Path | None = None) -> dict:
     meta, ds_dir = _managed_dataset(name, root, "标注审查")
     source = _source_dir(ds_dir)
     excluded = load_excluded(ds_dir)
-    susp = rv.compute_suspicion(meta, {"uid": None}, name)
+    susp = rv.compute_suspicion(meta, name)
 
     counts = {"pending": 0, "approved": 0, "rejected": 0, "skipped": 0, "modified": 0}
     items, unlabeled = [], 0

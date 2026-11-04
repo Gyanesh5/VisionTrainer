@@ -26,9 +26,9 @@ REVIEW_STATES = ("pending", "approved", "rejected", "skipped")
 REVIEW_REASONS = ("漏标", "多标", "框不准", "类别错")  # 驳回理由预设（CVAT quick issue 式）
 
 # 可疑度权重（01 号报告「先审最可疑的」）：校验未过 > 审计命中 > 错误分析 FN/FP
+# （泄漏不再入可疑度：票 06 起泄漏由 leak_view 按切分读时计算，审查无切分维度）
 SUSP_VALIDATION = 0.6
 SUSP_AUDIT_DUP = 0.7
-SUSP_AUDIT_LEAK = 0.9
 SUSP_ANALYSIS_PER_ERROR = 0.05
 SUSP_CAP = 1.0
 
@@ -123,9 +123,10 @@ def _atomic_write_json(p: Path, data: dict) -> None:
 
 # ---------------------------------------------------------------- 可疑度聚合
 
-def compute_suspicion(meta: dict, manifest: dict, dataset: str) -> dict[str, dict]:
-    """聚合可疑度来源（0–1）：校验问题 / 审计命中（重复·泄漏·同图重复）/ 训后错误分析
-    FN·FP。返回 {image: {"susp": float, "sources": [str]}}。
+def compute_suspicion(meta: dict, dataset: str) -> dict[str, dict]:
+    """聚合可疑度来源（0–1）：校验问题 / 审计命中（重复·同图重复）/ 训后错误分析
+    FN·FP。返回 {image: {"susp": float, "sources": [str]}}，键为 source/ 全路径
+    （与 review_queue 队列键对齐）。
 
     DB 不可用或某来源无数据时该来源自然缺席。
     """
@@ -147,15 +148,14 @@ def compute_suspicion(meta: dict, manifest: dict, dataset: str) -> dict[str, dic
 
     audit = load_cached(dataset)  # 票 06 一行制：体检缓存 dataset UNIQUE，无清单键
     if audit:
+        src = Path(meta.get("source_dir") or "")
+        # 票 06 起重复组存文件名（切分无关原料）——拼回 source/ 全路径对齐队列键
         for g in audit.get("exact_groups") or []:
-            for it in g:
-                _add(it["image"], "审计·重复", SUSP_AUDIT_DUP)
+            for name in g:
+                _add(str(src / name), "审计·重复", SUSP_AUDIT_DUP)
         for g in audit.get("near_groups") or []:
-            for it in g:
-                _add(it["image"], "审计·重复", SUSP_AUDIT_DUP * 0.9)
-        for leak in audit.get("leaks") or []:
-            for it in leak.get("items") or []:
-                _add(it["image"], "审计·泄漏", SUSP_AUDIT_LEAK)
+            for name in g:
+                _add(str(src / name), "审计·重复", SUSP_AUDIT_DUP * 0.9)
         for d in (audit.get("duplicates_within") or {}).get("items") or []:
             _add(d["image"], "审计·同图重复", SUSP_AUDIT_DUP * 0.8)
 

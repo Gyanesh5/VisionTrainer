@@ -10,7 +10,7 @@ import pytest
 from conftest import build_dataset
 
 from visiontrainer.datasets import service as svc
-from visiontrainer.datasets.review import read_state, write_review
+from visiontrainer.datasets.review import SUSP_AUDIT_DUP, read_state, write_review
 from visiontrainer.datasets.service import DatasetError
 
 
@@ -135,6 +135,37 @@ def test_queue_suspicion_order_and_decide(tmp_path, tmp_db):
     # JSON 里 checked 与 XAL 官方字段同步
     data = json.loads(Path(q["items"][1]["label"]).read_text(encoding="utf-8"))
     assert data["checked"] is True
+
+
+def test_queue_suspicion_audit_cache_new_payload(tmp_path, tmp_db):
+    """回归（票 06 后审查队列 500）：体检缓存改文件名组——可疑度按 source/ 全路径
+    对齐队列键，不再 it["image"] 把 str 当 dict 索引。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    src = tmp_path / "src"
+    src.mkdir()
+    for n in ("a.png", "b.png", "c.png"):
+        _png(src / n)
+        _label(src / (Path(n).stem + ".json"), [_rect()])
+    meta = build_dataset("m9audit", "detect", str(src), root=root)
+
+    from visiontrainer.datasets import audit as aud
+
+    aud.save_cached("m9audit", {
+        "fingerprint": "x",
+        "exact_groups": [["a.png", "b.png"]],      # 票 06 原料：文件名组，非 dict
+        "near_groups": [["b.png", "c.png"]],
+        "duplicates_within": {"items": [
+            {"image": str(Path(meta["source_dir"]) / "c.png"), "name": "c.png",
+             "label": "car", "iou": 0.99, "kind": "exact", "a": 0, "b": 1}], "total": 1},
+    })
+    q = svc.review_queue("m9audit", root=root)     # 修复前：string indices must be integers
+    by_name = {it["name"]: it for it in q["items"]}
+    assert by_name["a.png"]["sources"] == ["审计·重复"]
+    assert by_name["a.png"]["susp"] == SUSP_AUDIT_DUP
+    # b：精确 0.7 + 近似 0.63 → 封顶 1.0；c：近似 0.63 + 同图 0.56 → 封顶 1.0
+    assert by_name["b.png"]["susp"] == by_name["c.png"]["susp"] == 1.0
+    assert by_name["c.png"]["sources"] == ["审计·重复", "审计·同图重复"]
 
 
 def test_decide_rejections_and_negatives(tmp_path, tmp_db):
