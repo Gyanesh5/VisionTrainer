@@ -64,12 +64,23 @@ def _write_json(p: Path, data: dict) -> None:
 # ---------------------------------------------------------------- 发现
 
 def _managed_sets(root: Path) -> list[Path]:
-    """平台根下的旧托管集目录：有 dataset.json 且非外部注册。"""
+    """平台根下的旧托管集目录：有 dataset.json 且非外部注册；孤儿集除外（已单列删除）。"""
     out = []
     for d in sorted(root.iterdir()) if root.is_dir() else []:
-        if d.is_dir() and (d / "dataset.json").is_file() and d.name != ".external":
+        if d.is_dir() and (d / "dataset.json").is_file()                 and d.name != ".external" and d.name not in ORPHAN_SETS:
             out.append(d)
     return out
+
+
+def _is_old_shape(ds_dir: Path, meta: dict) -> bool:
+    """v1.3 旧账判据：有旧派生树/旧 images/，或 dataset.json 带旧字段。
+
+    新代码建的集（splits/ + 瘦身 dataset.json）不该被重写——幂等与误伤双保险。
+    """
+    if (ds_dir / "derived").is_dir() or (ds_dir / "images").is_dir():
+        return True
+    return any(k in meta for k in ("manifests", "active_manifest", "source_dir",
+                                   "last_validation", "excluded"))
 
 
 def _old_source_dir(meta: dict, ds_dir: Path) -> Path | None:
@@ -191,6 +202,7 @@ def migrate_dataset(ds_dir: Path, actions: list[str], apply: bool) -> dict:
     # ④ 切分转制（两遍：先算 new_uid 映射，再写实体；lineage 由事件推断）
     manifests = _manifests_of(ds_dir)
     uid_map: dict[str, str] = {}
+    entities: dict[str, dict] = {}   # uid → 实体（dry-run 也完整，供快照按内容寻址查账）
     for old_uid, m in manifests:
         train = [Path(p).name for p in m.get("train") or []]
         val = [Path(p).name for p in m.get("val") or []]
@@ -225,6 +237,7 @@ def migrate_dataset(ds_dir: Path, actions: list[str], apply: bool) -> dict:
         if new_uid in seen_new:
             continue                          # 同划分去重（首份留痕）
         seen_new[new_uid] = old_uid
+        entities.setdefault(new_uid, entity)
         if apply:
             path = ds_dir / "splits" / new_uid / "split.json"
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,7 +283,8 @@ def migrate_dataset(ds_dir: Path, actions: list[str], apply: bool) -> dict:
     if manifests:
         actions.append(f"[{name}] dataset.json 瘦身 + 旧 derived/ 树删除 + .migrated-v14 标记")
     return {"name": name, "uid_map": uid_map, "skipped": False,
-            "classes": classes, "source": source}
+            "classes": classes, "source": source, "entities": entities,
+            "excluded": entries}
 
 
 # ---------------------------------------------------------------- 库与快照
@@ -336,8 +350,19 @@ def _migrate_db(db: Path, root: Path, uid_maps: dict[str, dict[str, str]],
 
 
 def _migrate_snapshots(runs_root: Path, uid_maps: dict[str, dict[str, str]],
+                       entities_map: dict[str, dict[str, dict]],
+                       excluded_map: dict[str, set],
                        actions: list[str], apply: bool) -> None:
-    """旧 run_manifest.json 就地补写 split/effective/format 三段（幂等：新键已齐即跳过）。"""
+    """旧 run_manifest.json 就地补写 split/effective/format 三段（幂等：新键已齐即跳过）。
+
+    身份判据是**内容寻址优先**（ADR 0010）：快照自带名单的哈希即切分 uid——
+    ①命中该集已转制实体 → 直接用（含标签映射不一致的漂移，名单说了算）；
+    ②名单不落任何转制实体（快照漂移：运行后旧清单被改写）→ **由快照回放建实体**
+    （uid=名单哈希、params 照搬快照、created_at 用快照冻结时间、memo 记回放溯源），
+    该 Run 因此仍可续训/错误分析（结果面保留）；
+    ③连名单都空（外部集/更旧快照）→ 跳过并说明。
+    dry-run 下真源尚未入位（source/ 不存在）：实效按「全员在场 − 排除在册」预览并注明。
+    """
     if not runs_root.is_dir():
         return
     for task_dir in sorted(p for p in runs_root.iterdir() if p.is_dir()):
@@ -351,40 +376,73 @@ def _migrate_snapshots(runs_root: Path, uid_maps: dict[str, dict[str, str]],
             ds_dir = Path(snap.get("dataset_dir") or "")
             ds_name = ds_dir.name
             sm = snap.get("split_manifest") or {}
-            old_uid = sm.get("uid")
-            new_uid = uid_maps.get(ds_name, {}).get(old_uid)
-            if new_uid is None:
-                actions.append(f"[snap {run_dir.name}] 数据集 {ds_name} 无映射（外部集/孤儿）——跳过")
+            train_names = [Path(p).name for p in sm.get("train") or []]
+            val_names = [Path(p).name for p in sm.get("val") or []]
+            if not train_names and not val_names:
+                actions.append(f"[snap {run_dir.name}] 无切分名单（外部集/更旧快照）——跳过")
                 continue
-            split_path = ds_dir / "splits" / new_uid / "split.json"
-            if not split_path.is_file():
-                actions.append(f"[snap {run_dir.name}] 切分实体缺失（{ds_name}/{new_uid}）——跳过")
+            own_uid = split_uid_of(train_names, val_names)
+            split_path = ds_dir / "splits" / own_uid / "split.json"
+            replayed = False
+            known = (entities_map.get(ds_name) or {}).get(own_uid)
+            if known is not None:
+                split = known                  # 命中转制实体（含 apply/dry-run 同口径）
+            elif split_path.is_file():
+                split = _read_json(split_path)  # apply 落盘后的兜底（如重跑补快照）
+            elif not ds_dir.is_dir():
+                actions.append(f"[snap {run_dir.name}] 数据集目录缺失（{ds_name}）——跳过")
                 continue
-            split = _read_json(split_path)
-            members = set(split["train"]) | set(split["val"])
-            excluded = set()
+            else:
+                # 快照漂移：名单不落任何转制实体 → 回放建实体（apply 落盘，dry-run 只预告）
+                meta_new = _read_json(ds_dir / "dataset.json") \
+                    if (ds_dir / "dataset.json").is_file() else {}
+                split = {
+                    "uid": own_uid,
+                    "created_at": snap.get("frozen_at") or datetime.now().isoformat(timespec="seconds"),
+                    "train": sorted(set(train_names)),
+                    "val": sorted(set(val_names)),
+                    "params": {"seed": sm.get("seed", 42), "ratio": sm.get("ratio", 0.8),
+                               "stratify": bool(sm.get("stratify")), "approved_only": False},
+                    "lineage": {"mode": "fresh", "parent_uid": None},
+                    "grouped": "source_image" if (meta_new.get("tiling") or {}).get("groups") else None,
+                    "counts": {"train": len(set(train_names)), "val": len(set(val_names))},
+                    "memo": f"迁移自快照回放（标签 {sm.get('uid')}，{run_dir.name}）",
+                }
+                replayed = True
+                entities_map.setdefault(ds_name, {})[own_uid] = split   # 后续快照复用
+                uid_maps.setdefault(ds_name, {})[sm.get("uid") or ""] = own_uid
+                if apply:
+                    split_path.parent.mkdir(parents=True, exist_ok=True)
+                    if not split_path.is_file():
+                        _write_json(split_path, split)
+
+            # 排除账优先用迁移期内存账（dry-run 下 excluded.json 未落盘也能预览），
+            # 盘上文件作兜底（apply 重跑补快照时）
+            excluded = set(excluded_map.get(ds_name) or set())
             ex_file = ds_dir / "excluded.json"
-            if ex_file.is_file():
+            if not excluded and ex_file.is_file():
                 try:
                     excluded = set(_read_json(ex_file).get("files") or {})
                 except (json.JSONDecodeError, UnicodeDecodeError):
                     excluded = set()
             source = ds_dir / "source"
+            source_in_place = source.is_dir()
             dropped = {"missing": [], "excluded": []}
             eff = {"train": [], "val": []}
             for side in ("train", "val"):
                 for n in split[side]:
-                    if not (source / n).is_file():
-                        dropped["missing"].append(n)
-                    elif n in excluded:
+                    if n in excluded:
                         dropped["excluded"].append(n)
+                    elif not source_in_place or (source / n).is_file():
+                        eff[side].append(n)   # dry-run（源未入位）按在场预览
                     else:
-                        eff[side].append(n)
+                        dropped["missing"].append(n)
             classes = [ln.strip() for ln in (ds_dir / "classes.txt").read_text(
-                encoding="utf-8").splitlines() if ln.strip()]
+                encoding="utf-8").splitlines() if ln.strip()] \
+                if (ds_dir / "classes.txt").is_file() else []
             new_snap = dict(snap)
             new_snap.pop("split_manifest", None)
-            new_snap["split"] = {"uid": new_uid,
+            new_snap["split"] = {"uid": own_uid,
                                  "params": split.get("params") or {},
                                  "memo": split.get("memo") or "",
                                  "grouped": split.get("grouped")}
@@ -396,9 +454,11 @@ def _migrate_snapshots(runs_root: Path, uid_maps: dict[str, dict[str, str]],
                                   "entry_path": str(run_dir / "data")}
             if apply:
                 _write_json(snap_path, new_snap)
+            note = " · 快照漂移回放建实体" if replayed else ""
+            note += "" if source_in_place else " · 真源未入位，实效按在场预览（apply 时按盘上现算）"
             actions.append(f"[snap {run_dir.name}] split/effective/format 三段就地补写"
-                           f"（{old_uid} → {new_uid}，实效 t/v "
-                           f"{len(eff['train'])}/{len(eff['val'])}）")
+                           f"（标签 {sm.get('uid')} → {own_uid}，实效 t/v "
+                           f"{len(eff['train'])}/{len(eff['val'])}{note}）")
 
 
 # ---------------------------------------------------------------- 编排
@@ -433,7 +493,10 @@ def main(argv: list[str] | None = None) -> int:
     db_url = cfg.get("db_url", "sqlite:///data/visiontrainer.db")
     db = Path(args.db or db_url.removeprefix("sqlite:///"))
     if not db.is_absolute():
-        db = Path.cwd() / db
+        # 平台常从仓库根启动（8600 的 cwd 即 <repo>），相对路径指 <repo>/data/…；
+        # 迁移可能从任意 cwd 执行——按包所在仓库根解析，而不是进程 cwd（错库比无库更危险）
+        repo_root = Path(__file__).resolve().parents[2]
+        db = repo_root / db
 
     actions: list[str] = []
     apply = bool(args.apply)
@@ -448,6 +511,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[db] 库不存在（{db}）——只做文件面迁移")
 
     uid_maps: dict[str, dict[str, str]] = {}
+    entities_map: dict[str, dict[str, dict]] = {}
+    excluded_map: dict[str, set] = {}
     classes_map: dict[str, list[str]] = {}
     # ① 孤儿集直接删除（唯一豁免回收区）
     for name in ORPHAN_SETS:
@@ -458,21 +523,22 @@ def main(argv: list[str] | None = None) -> int:
                 shutil.rmtree(d)
     # ② 逐集迁移
     for ds_dir in _managed_sets(root):
-        if not (ds_dir / ".migrated-v14").exists() and \
-                (ds_dir / "derived").is_dir() or (ds_dir / "images").is_dir() or \
-                (ds_dir / "splits").is_dir():
-            info = migrate_dataset(ds_dir, actions, apply)
-            uid_maps[info["name"]] = info.get("uid_map") or {}
-            if info.get("classes"):
-                classes_map[info["name"]] = info["classes"]
-        else:
+        meta = _read_json(ds_dir / "dataset.json")
+        if (ds_dir / ".migrated-v14").exists() or not _is_old_shape(ds_dir, meta):
             actions.append(f"[{ds_dir.name}] 已迁移或无旧账（跳过）")
             uid_maps[ds_dir.name] = {}
+            continue
+        info = migrate_dataset(ds_dir, actions, apply)
+        uid_maps[info["name"]] = info.get("uid_map") or {}
+        entities_map.setdefault(info["name"], {}).update(info.get("entities") or {})
+        excluded_map[info["name"]] = set(info.get("excluded") or {})
+        if info.get("classes"):
+            classes_map[info["name"]] = info["classes"]
 
     # ③ 库与快照
     if db.is_file():
         _migrate_db(db, root, uid_maps, actions, apply)
-    _migrate_snapshots(runs_root, uid_maps, actions, apply)
+    _migrate_snapshots(runs_root, uid_maps, entities_map, excluded_map, actions, apply)
 
     print("\n".join(actions) if actions else "（无事可做）")
     print("\n".join(_rollback_steps(db, root)))

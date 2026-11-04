@@ -257,3 +257,117 @@ def test_backup_created_on_apply(tmp_path):
               "--db", str(db)])
     baks = list(db.parent.glob(db.name + ".bak-*"))
     assert baks and baks[0].stat().st_size > 0             # --apply 前自动备份
+
+
+# ---------------------------------------------------------------- 用户 dry-run 撞到的两处回归
+
+def test_dry_run_skips_orphan_instead_of_aborting(tmp_path):
+    """孤儿集（真源已消失）在 dry-run 下必须只列「将删除」，不得进逐集迁移撞「找不到真源」。"""
+    root, runs_root, db, ds_a, ds_b, rd = _old_root(tmp_path)
+    rc = mig.main(["--dry-run", "--datasets-root", str(root), "--runs-root", str(runs_root),
+                   "--db", str(db)])           # 修复前这里 SystemExit
+    assert rc == 0
+
+
+def test_new_shape_dataset_not_touched(tmp_path):
+    """新代码建的集（splits/ + 瘦身 dataset.json）不被重写——幂等与误伤双保险。"""
+    root = tmp_path / "datasets"
+    root.mkdir()
+    new = root / "fresh-v14"
+    (new / "source").mkdir(parents=True)
+    (new / "source" / "a.png").write_bytes(b"\x89PNG")
+    (new / "splits" / "abcd1234").mkdir(parents=True)
+    (new / "splits" / "abcd1234" / "split.json").write_text("{}", encoding="utf-8")
+    (new / "dataset.json").write_text(json.dumps(
+        {"name": "fresh-v14", "task_type": "detect", "form": "managed",
+         "created_at": "2026-11-04T08:00:00",
+         "origin": {"mode": "empty", "path": None, "at": "x", "transfer": None},
+         "validation_summary": {"ok": True}}), encoding="utf-8")
+    marker_before = list(root.rglob("*"))
+    rc = mig.main(["--apply", "--datasets-root", str(root), "--runs-root", str(tmp_path / "runs"),
+                   "--db", str(tmp_path / "none.db")])
+    assert rc == 0
+    assert not (new / ".migrated-v14").exists()          # 未被当旧账迁移
+    assert json.loads((new / "dataset.json").read_text())["name"] == "fresh-v14"
+    assert not (new / "derived").exists()
+
+
+def test_relative_db_resolves_against_repo_root(tmp_path, monkeypatch):
+    """相对 db_url（data/visiontrainer.db）按包所在仓库根解析，不看进程 cwd。"""
+    root = tmp_path / "datasets"
+    root.mkdir()
+    fake_repo = tmp_path / "repo"
+    (fake_repo / "data").mkdir(parents=True)
+
+    import sqlite3
+
+    con = sqlite3.connect(fake_repo / "data" / "visiontrainer.db")
+    con.executescript("CREATE TABLE schema_version (id INTEGER PRIMARY KEY, version);"
+                      "INSERT INTO schema_version VALUES (1, 5);")
+    con.commit()
+    con.close()
+
+    monkeypatch.chdir(tmp_path)                           # cwd 无 data/——修复前会指错
+    import visiontrainer.config as cfg_mod
+
+    def fake_load(path=None):
+        return {"training": {"db_url": "sqlite:///data/visiontrainer.db",
+                             "datasets_dir": str(root), "runs_dir": str(tmp_path / "runs")}}
+
+    monkeypatch.setattr(cfg_mod, "load_config", fake_load)
+    out = []
+    import contextlib, io
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = mig.main(["--dry-run", "--datasets-root", str(root)])
+    assert rc == 0
+    assert str(fake_repo) not in buf.getvalue()           # 与本断言无关，只保证不炸
+    # 核心判据：打印的 db 路径以仓库根（migrate_v14.py 的 parents[2]）为前缀
+    repo_root = Path(mig.__file__).resolve().parents[2]
+    assert f"db={repo_root / 'data' / 'visiontrainer.db'}" in buf.getvalue()
+
+
+# ---------------------------------------------------------------- 快照漂移回放（真实 0c95b8ce 形态）
+
+def test_snapshot_drift_replays_entity(tmp_path):
+    """快照名单 ≠ 盘上任何旧清单（运行后清单被改写）：按内容寻址回放建实体，Run 仍可解析。"""
+    root, runs_root, db, ds_a, ds_b, rd = _old_root(tmp_path)
+    # 造漂移：快照名单与盘上清单不同（多一名/少一名），标签仍是旧 uid
+    snap_path = rd / "run_manifest.json"
+    snap = json.loads(snap_path.read_text())
+    sm = snap["split_manifest"]
+    ds_source = ds_a / "images"                            # 旧真源（迁移前）
+    sm["train"] = [str(ds_source / n) for n in ["car0.png", "car1.png", "neg0.png", "car2.png"]]
+    sm["val"] = [str(ds_source / n) for n in ["car3.png"]]
+    snap_path.write_text(json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 漂移多出的 car2.png 必须在真源里存在（outside 夹具的真源在根外 annotations/）
+    real_src = tmp_path / "annotations" / "plate-a" / "images"
+    (real_src / "car2.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16) \
+        if not (real_src / "car2.png").exists() else None
+    _ = ds_source
+
+    mig.main(["--apply", "--datasets-root", str(root), "--runs-root", str(runs_root),
+              "--db", str(db)])
+    out = json.loads(snap_path.read_text())
+    replay_uid = mig.split_uid_of(["car0.png", "car1.png", "neg0.png", "car2.png"],
+                                  ["car3.png"])
+    assert out["split"]["uid"] == replay_uid               # 名单说了算
+    assert "回放" in out["split"]["memo"]
+    assert (ds_a / "splits" / replay_uid / "split.json").is_file()   # 实体已回放
+    assert out["effective"]["train"] == ["car0.png", "car2.png", "neg0.png"]  # car1 排除被剔
+
+
+def test_dry_run_effective_preview_notes_source_not_moved(tmp_path):
+    """dry-run（真源未入位）实效按在场预览并注明——不再误导性地全 0/0。"""
+    import contextlib, io
+
+    root, runs_root, db, ds_a, ds_b, rd = _old_root(tmp_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        mig.main(["--dry-run", "--datasets-root", str(root), "--runs-root", str(runs_root),
+                  "--db", str(db)])
+    line = next(l for l in buf.getvalue().splitlines() if "runaaaa" in l)
+    assert "真源未入位" in line
+    # 成员 train{car0,car1,neg} + val{car2,car3}，car1 排除被剔 → 实效 t/v 2/2
+    assert "实效 t/v 2/2" in line
