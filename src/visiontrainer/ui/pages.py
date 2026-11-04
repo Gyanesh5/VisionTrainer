@@ -4178,8 +4178,7 @@ document.addEventListener('scroll', function(e){
                                  "手动触发；结果缓存，真源变更后标记过期")
                 else:
                     sm = audit.get("summary", {})
-                    stale = bool(vs.get("checked_at")) and str(audit.get("checked_at") or "") < str(
-                        vs["checked_at"])
+                    stale = bool(audit.get("stale"))  # 指纹口径（票 06）：与服务层/体检工作区同一判据，不看时间戳
                     _status_card("audit", "health_and_safety", "体检",
                                  "已过期" if stale else "有结果",
                                  "amber" if stale else "green",
@@ -4187,7 +4186,7 @@ document.addEventListener('scroll', function(e){
                                  f"泄漏 {sm.get('leaks', 0)}"
                                  + ("" if sm.get("imbalance_ok", True) else " · 类别失衡")
                                  + f" · {_fmt_ts(audit.get('checked_at'))}"
-                                 + ("（校验后有变更）" if stale else ""))
+                                 + ("（真源已变）" if stale else ""))
 
             def _meta_row(label: str, value: str, open_path: str | None = None) -> None:
                 """详情页一行「标签 + 值（+ 打开目录）」——状态卡工作区共用排版。"""
