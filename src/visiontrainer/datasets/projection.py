@@ -256,14 +256,16 @@ def project_json(data: dict, task_type: str, classes: list[str]) -> dict:
 
 
 def project_file(path: pathlib.Path, task_type: str, classes: list[str]) -> dict:
-    """投影一个标注 JSON 文件；坏 JSON / 缺尺寸归 `broken`（读者各自决定红灯还是拒训）。"""
+    """投影一个标注 JSON 文件；坏 JSON / 非对象 / 缺尺寸归 `broken`（读者各自决定红灯还是拒训）。"""
     empty = {"task_type": task_type, "width": 0.0, "height": 0.0, "negative": True,
              "objects": [], "drops": [], "broken": True}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise TypeError("标注 JSON 顶层不是对象")
         out = project_json(data, task_type, classes)
     except (json.JSONDecodeError, UnicodeDecodeError, KeyError, TypeError, ValueError,
-            IndexError, OSError) as exc:
+            IndexError, OSError, AttributeError) as exc:
         # 读者各自把它变红灯（校验 unprojectable）或拒训（出队门），这里只留痕不重复报错
         logger.debug("投影失败，按无法投影处理：%s（%s）", path, exc)
         return empty

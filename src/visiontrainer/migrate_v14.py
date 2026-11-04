@@ -67,7 +67,8 @@ def _managed_sets(root: Path) -> list[Path]:
     """平台根下的旧托管集目录：有 dataset.json 且非外部注册；孤儿集除外（已单列删除）。"""
     out = []
     for d in sorted(root.iterdir()) if root.is_dir() else []:
-        if d.is_dir() and (d / "dataset.json").is_file()                 and d.name != ".external" and d.name not in ORPHAN_SETS:
+        if (d.is_dir() and (d / "dataset.json").is_file()
+                and d.name != ".external" and d.name not in ORPHAN_SETS):
             out.append(d)
     return out
 
@@ -319,6 +320,18 @@ def _migrate_db(db: Path, root: Path, uid_maps: dict[str, dict[str, str]],
             actions.append(f"[db] {table} 重建为一行制（历史行清零）")
     # tasks：三列回填 + 删旧列
     if "dataset_manifest_path" in cols:
+        # 外部集任务：v1.3 的 dataset_manifest_path 直指 `<外部目录>/data.yaml`，
+        # 按 `.external/<name>.json` 注册表（v1.3 起即有）的 path 反查注册名
+        external_by_dir: dict[str, str] = {}
+        ext_registry = root / ".external"
+        if ext_registry.is_dir():
+            for reg in sorted(ext_registry.glob("*.json")):
+                try:
+                    ext_path = _read_json(reg).get("path") or ""
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if ext_path:
+                    external_by_dir[str(Path(ext_path))] = reg.stem
         rows = con.execute("SELECT id, dataset_manifest_path FROM tasks "
                            "WHERE dataset_manifest_path IS NOT NULL").fetchall()
         if apply:
@@ -327,17 +340,30 @@ def _migrate_db(db: Path, root: Path, uid_maps: dict[str, dict[str, str]],
             con.execute("ALTER TABLE tasks ADD COLUMN format_id VARCHAR(32) NOT NULL DEFAULT 'yolo'")
         for r in rows:
             path = Path(r["dataset_manifest_path"])
-            # <root>/<名>/derived/<uid>/data.yaml
-            ds_name = path.parent.parent.parent.name
-            old_uid = path.parent.name
-            new_uid = uid_maps.get(ds_name, {}).get(old_uid)
-            if apply:
-                if new_uid is None:
+            if path.parent.parent.name == "derived":
+                # 托管（v1.3 形状 <名>/derived/<uid>/data.yaml；路径可能已随真源搬家，只看形状）
+                ds_name = path.parent.parent.parent.name
+                old_uid = path.parent.name
+                new_uid = uid_maps.get(ds_name, {}).get(old_uid)
+                if apply:
+                    if new_uid is None:
+                        con.close()
+                        raise SystemExit(f"[db] task#{r['id']} 的旧清单 uid {old_uid} 无转制映射——中止")
+                    con.execute("UPDATE tasks SET dataset=?, split_uid=?, format_id='yolo' WHERE id=?",
+                                (ds_name, new_uid, r["id"]))
+                actions.append(f"[db] task#{r['id']} → ({ds_name}, {new_uid}, yolo)")
+            else:
+                # 外部：v1.3 直指 `<外部目录>/data.yaml`——按 .external 注册表反查注册名，
+                # split_uid 留空（外部集无切分维度）
+                ds_name = external_by_dir.get(str(path.parent))
+                if ds_name is None:
                     con.close()
-                    raise SystemExit(f"[db] task#{r['id']} 的旧清单 uid {old_uid} 无转制映射——中止")
-                con.execute("UPDATE tasks SET dataset=?, split_uid=?, format_id='yolo' WHERE id=?",
-                            (ds_name, new_uid, r["id"]))
-            actions.append(f"[db] task#{r['id']} → ({ds_name}, {new_uid}, yolo)")
+                    raise SystemExit(f"[db] task#{r['id']} 的清单目录 {path.parent} 不在 "
+                                     f".external 注册表——外部集任务无法落名，中止")
+                if apply:
+                    con.execute("UPDATE tasks SET dataset=?, split_uid=NULL, format_id='yolo' WHERE id=?",
+                                (ds_name, r["id"]))
+                actions.append(f"[db] task#{r['id']} → ({ds_name}, NULL, yolo)（外部集）")
         if apply:
             con.execute("ALTER TABLE tasks DROP COLUMN dataset_manifest_path")
         actions.append("[db] tasks 三列落位 + dataset_manifest_path 删除")

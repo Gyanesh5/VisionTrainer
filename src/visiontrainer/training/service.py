@@ -476,6 +476,19 @@ PRIMARY_BY_TASK = {
 }
 
 
+def _snapshot_classes_of(run) -> list[str]:
+    """Run 实际生效的类别表（票 07：部署组装与类别名回查读快照，不回读当前类别表）。
+
+    优先级：快照 `format.class_map`（本次训练头真实的 id↔名映射，行序敏感）→
+    快照 `classes.list` → 当前类别表（快照缺失的历史 Run 兜底，同旧行为）。
+    """
+    snap = load_snapshot(run.run_dir) if run.run_dir else None
+    class_map = ((snap or {}).get("format") or {}).get("class_map")
+    if class_map:
+        return [n for n, _ in sorted(class_map.items(), key=lambda kv: kv[1])]
+    return ((snap or {}).get("classes") or {}).get("list") or []
+
+
 def _dataset_meta_of_task(task) -> dict:
     """任务的数据集元数据（task_type/classes/source_dir…，读时组合视图）。
 
@@ -1113,7 +1126,10 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
             raise _http_err("invalid_args", "best.pt 不存在，无法导出", 400)
         task = s.get(Task, run.task_id)
         ds_meta = _dataset_meta_of_task(task)
-        classes = ds_meta.get("classes") or []
+        # 类别回查读 Run 快照（票 07/spec：部署组装用当时实际生效的类别映射）——
+        # Run 之后类别表改名/重排，当前 classes.txt 不再是本模型预测头的语义；
+        # 无快照的历史 Run 回退当前类别表（同旧行为）
+        classes = _snapshot_classes_of(run) or ds_meta.get("classes") or []
         task_type = ds_meta.get("task_type", "detect")
         family = parse_model_family(task.base_model)
         dir_name = f"{family}_{task_type}_{run.uid}"

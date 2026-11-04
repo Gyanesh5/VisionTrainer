@@ -1691,7 +1691,7 @@ def export_annotations(name: str, format_id: str, scope: str = "all",
 
     result = exporters.export_dataset(ds_dir, task_type, classes, format_id, members,
                                       images_mode=images, zip_package=zip_package,
-                                      progress=progress)
+                                      progress=progress, dirname_suffix=suffix)
     return {**result, "scope": scope, "format_id": format_id}
 
 
@@ -1726,7 +1726,7 @@ def write_run_entry(name: str, run_dir: Path, effective: dict,
     task_type = meta["task_type"]
     class_map = (pool_info or {}).get("class_map")
     if class_map is None:                      # 池未备（异常路径）：按当前类别表现算
-        class_map = read_classes(ds_dir) and {c: i for i, c in enumerate(read_classes(ds_dir))}
+        class_map = {c: i for i, c in enumerate(read_classes(ds_dir))}
     result = pool_lib.write_run_entry(Path(run_dir), ds_dir, task_type,
                                       read_classes(ds_dir), class_map, effective)
     result["labels_dir_abs"] = result["labels_dir"] or ""

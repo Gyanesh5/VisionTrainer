@@ -89,6 +89,8 @@ def _class_counts(ds_dir: Path) -> dict[str, int]:
             data = json.loads(lbl.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
+        if not isinstance(data, dict):    # 合法但非对象：同坏 JSON 口径跳过
+            continue
         shapes = data.get("shapes") or []
         if shapes:
             for s in shapes:
@@ -184,6 +186,8 @@ def compute_audit(ds_dir: Path, fingerprint: str, prev: dict | None = None,
             data = json.loads(lbl.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError, UnicodeDecodeError):
             continue
+        if not isinstance(data, dict):    # 合法但非对象：同坏 JSON 口径跳过
+            continue
         shapes = [s for s in (data.get("shapes") or []) if s.get("label")]
         boxes = [shape_bbox_px(s) for s in shapes]
         for a in range(len(shapes)):
@@ -243,12 +247,12 @@ def leak_view(payload: dict, split: dict | None, ds_dir: Path) -> list[dict]:
     for kind, groups in (("exact", payload.get("exact_groups") or []),
                          ("near", payload.get("near_groups") or [])):
         for g in groups:
-            members = {sides.get(n): n for n in g if sides.get(n)}
-            if set(members) != {"train", "val"}:
+            present = [(n, sides[n]) for n in g if n in sides]
+            if {s for _, s in present} != {"train", "val"}:
                 continue
-            items = []
-            for side, name in sorted(members.items(), key=lambda kv: kv[1]):
-                items.append({"image": str(source / name), "name": name, "split": side})
+            # 组内成员全列（同侧可多张）——按侧去重会漏掉同侧重复成员，排除直达少目标
+            items = [{"image": str(source / n), "name": n, "split": s}
+                     for n, s in sorted(present)]
             out.append({"kind": kind, "items": items})
     return out
 

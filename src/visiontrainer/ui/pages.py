@@ -5044,7 +5044,8 @@ document.addEventListener('scroll', function(e){
                                     ui.label("可疑 " + "/".join(cur["sources"])
                                              + (f" {cur['susp']:.2f}" if cur["susp"] else "")
                                              ).classes("text-[10px] text-amber-300")
-                                ui.label(f"{cur['split']} · {cur['name']}"
+                                # 票 05 改源后队列无 split 维度（切分语义归训练域），只示文件名
+                                ui.label(cur["name"]
                                          ).classes("text-[10px] opacity-60 truncate max-w-72")
                                 ui.label(f"{rst['i'] + 1}/{len(fl)}").classes("text-[10px] opacity-40")
                             # 本图标注图例（色卡与画布叠加同按类别序着色——检查器行模式）
@@ -5152,7 +5153,6 @@ document.addEventListener('scroll', function(e){
                             _io(ds.list_splits, name),
                             _io(ds.dataset_stats, name, split_uid=hstate["split_uid"],
                                 include_excluded=hstate["include_excluded"]))
-                        print("HEALTH-BUILD gathered", bool(splits), payload is not None, flush=True)
                     except Exception as exc:  # noqa: BLE001
                         body_box.clear()
                         with body_box:

@@ -371,3 +371,30 @@ def test_dry_run_effective_preview_notes_source_not_moved(tmp_path):
     assert "真源未入位" in line
     # 成员 train{car0,car1,neg} + val{car2,car3}，car1 排除被剔 → 实效 t/v 2/2
     assert "实效 t/v 2/2" in line
+
+
+def test_external_task_resolves_via_external_registry(tmp_path):
+    """外部集 Task（v1.3 直指 <外部目录>/data.yaml）：按 .external 注册表反查落名，
+    split_uid 留空——不再误当托管集反推目录名（推错即 SystemExit 中断整个 apply）。"""
+    root, runs_root, db, ds_a, ds_b, rd = _old_root(tmp_path)
+    ext_dir = tmp_path / "ext-annot"
+    ext_dir.mkdir()
+    (ext_dir / "data.yaml").write_text("train: train.txt\n", encoding="utf-8")
+    (root / ".external").mkdir()
+    (root / ".external" / "extd.json").write_text(json.dumps({
+        "name": "extd", "task_type": "detect", "form": "external",
+        "path": str(ext_dir), "has_data_yaml": True}), encoding="utf-8")
+    con = sqlite3.connect(db)
+    con.execute("INSERT INTO tasks (uid, name, status, base_model, train_args, "
+                "dataset_manifest_path) VALUES ('t2', 'ext 任务', 'done', 'yolo11n', '{}', ?)",
+                (str(ext_dir / "data.yaml"),))
+    con.commit()
+    con.close()
+    rc = mig.main(["--apply", "--datasets-root", str(root), "--runs-root", str(runs_root),
+                   "--db", str(db)])
+    assert rc == 0
+    con = sqlite3.connect(db)
+    row = con.execute("SELECT dataset, split_uid, format_id FROM tasks "
+                      "WHERE uid='t2'").fetchone()
+    con.close()
+    assert row == ("extd", None, "yolo")

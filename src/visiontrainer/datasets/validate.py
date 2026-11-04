@@ -239,6 +239,9 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
         try:
             data = json.loads(Path(label_path).read_text(encoding="utf-8"))
         except (json.JSONDecodeError, UnicodeDecodeError):
+            data = None
+        if not isinstance(data, dict):
+            # 坏 JSON / 合法但非对象（数组、标量）：同 bad_json 红灯，不再让 .get 炸整个校验
             entry["problems"].append("bad_json")
             problems.append({"image": str(image), "code": "bad_json"})
             entries.append(entry)

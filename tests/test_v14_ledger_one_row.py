@@ -299,3 +299,13 @@ def test_v5_to_v6_account_tables_rebuild_idempotent(tmp_path):
         con.close()
     finally:
         runtime.set_session_factory(old_factory)
+
+
+def test_leak_view_lists_same_side_members(datasets_root):
+    """同侧多成员的泄漏组逐成员全列（按侧去重会把 2 train + 1 val 显示成 1+1）。"""
+    payload = {"exact_groups": [["a.png", "b.png", "c.png"]], "near_groups": []}
+    split = {"uid": "x", "train": ["a.png", "b.png"], "val": ["c.png"]}
+    leaks = leak_view(payload, split, datasets_root / "any")
+    assert len(leaks) == 1 and leaks[0]["kind"] == "exact"
+    assert [(it["name"], it["split"]) for it in leaks[0]["items"]] == [
+        ("a.png", "train"), ("b.png", "train"), ("c.png", "val")]

@@ -12,6 +12,7 @@ stdlib 实现（X-AnyLabeling 只作几何分支与格式惯例参考，不进�
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import zipfile
 from datetime import datetime
@@ -41,16 +42,19 @@ def unsupported_reason(format_id: str, task_type: str) -> str:
 
 def export_dataset(ds_dir: Path, task_type: str, classes: list[str], format_id: str,
                    members: dict[str, list[str]], images_mode: str = "link",
-                   zip_package: bool = False, progress=None) -> dict:
+                   zip_package: bool = False, progress=None,
+                   dirname_suffix: str = "") -> dict:
     """执行导出并返回 `{path, counts, drops, broken, zip}`。
 
     members：`{side: [相对 source/ 文件名]}`——scope=all 时 `{"": [...]}`，按切分时
-    `{"train": [...], "val": [...]}`（实效口径，剔除排除与缺失由调用方保证）。
+    `{"train": [...], "val": [...]}`（实效口径，剔除排除与缺失由调用方保证）；
+    `dirname_suffix`（如 `-<split_uid>`，spec §2.1/§3.1）拼进落点目录名，同秒同格式
+    按不同切分导出不并目录。
     """
     adapter = adapter_for("yolo") if format_id == "yolo" else None
     class_map = {c: i for i, c in enumerate(classes)}
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    out = ds_dir / "exports" / f"{stamp}-{format_id}"
+    out = ds_dir / "exports" / f"{stamp}-{format_id}{dirname_suffix}"
     out.mkdir(parents=True, exist_ok=True)
     source = ds_dir / "source"
     total_drops = 0
@@ -69,6 +73,8 @@ def export_dataset(ds_dir: Path, task_type: str, classes: list[str], format_id: 
             try:
                 dst.symlink_to(image.resolve())
             except OSError:
+                # symlink 不可用 → 复制降级，留痕便于查导出体积异常
+                logging.getLogger(__name__).debug("symlink 失败，降级复制：%s → %s", image, dst)
                 shutil.copy2(image, dst)
 
     coco_images: dict[str, list[dict]] = {}
@@ -99,6 +105,8 @@ def export_dataset(ds_dir: Path, task_type: str, classes: list[str], format_id: 
                     data = json.loads(lbl.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, UnicodeDecodeError, OSError):
                     data = None
+            if data is not None and not isinstance(data, dict):
+                data = None                    # JSON 合法但不是对象（数组/标量）：同坏 JSON 口径
             projected = None
             drops: list[dict] = []
             if data is not None and (TASK_MODE[task_type] != "classify"):
@@ -106,8 +114,9 @@ def export_dataset(ds_dir: Path, task_type: str, classes: list[str], format_id: 
                     projected = project_json(data, task_type, classes)
                     drops = projected.get("drops") or []
                     total_drops += len(drops)
-                except (KeyError, TypeError, ValueError):
+                except (KeyError, TypeError, ValueError, IndexError):
                     projected = None
+                    broken.append(name)        # 可解析但投不动（缺尺寸/坏几何）：同坏 JSON 记账
             if data is None and TASK_MODE[task_type] != "classify":
                 broken.append(name)            # 坏 JSON：负样本处理，只提示
             if TASK_MODE[task_type] == "classify":

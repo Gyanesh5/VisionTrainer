@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import shutil
 import signal
@@ -229,9 +230,9 @@ def task_inputs(name: str, split_uid: str | None) -> dict:
         try:
             split = split_ent.load_split(ds_dir, split_uid)
         except FileNotFoundError as exc:
-            raise DatasetError("not_found", f"切分实体不存在：{name}/{split_uid}（{exc}）")
+            raise DatasetError("not_found", f"切分实体不存在：{name}/{split_uid}（{exc}）") from exc
         except ValueError as exc:
-            raise DatasetError("state_conflict", f"切分实体不可读：{name}/{split_uid}——{exc}")
+            raise DatasetError("state_conflict", f"切分实体不可读：{name}/{split_uid}——{exc}") from exc
     else:
         split = ds.latest_split(name)
         if not split:
@@ -400,8 +401,7 @@ class TrainingManager:
         try:
             self._launch_inner(run_id)
         except Exception as exc:  # 启动失败（含派生新鲜度门拒训）→ run 转 failed，queued/running 都回收
-            import traceback as _tb
-            _tb.print_exc()
+            logging.getLogger(__name__).exception("Run %s 启动失败：%s", run_id, exc)
             with self.Session() as s:
                 run = s.get(Run, run_id)
                 if run and run.status in ("queued", "running"):

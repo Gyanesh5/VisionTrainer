@@ -52,6 +52,9 @@ def read_state(label_path: Path) -> dict:
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return {"state": "pending", "effective": "pending", "reason": "", "note": "",
                 "decided_at": None, "modified": False, "source": None}
+    if not isinstance(data, dict):    # 合法但非对象的 JSON：同坏账口径，回 pending 不炸队列
+        return {"state": "pending", "effective": "pending", "reason": "", "note": "",
+                "decided_at": None, "modified": False, "source": None}
 
     vt = data.get("vt_review") or {}
     stored = vt.get("state") if vt.get("state") in REVIEW_STATES else None
@@ -90,6 +93,8 @@ def write_review(label_path: Path, state: str, reason: str = "", note: str = "")
         raise ValueError("驳回必附理由")
     p = Path(label_path)
     data = json.loads(p.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"标注 JSON 顶层不是对象，无法写审查状态：{p.name}")
     st = p.stat()
     record = {
         "state": state,

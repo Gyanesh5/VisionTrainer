@@ -164,3 +164,30 @@ def test_drops_do_not_block(datasets_root, tmp_path):
     assert r["broken"] == ["bad.png"]                      # 不可投影图按负样本处理并提示
     bad_txt = Path(r["path"]) / "labels" / "bad.txt"
     assert bad_txt.read_text() == ""                       # 负样本显式空标签
+
+
+def test_unprojectable_json_counts_broken(datasets_root, tmp_path):
+    """可解析但投不动（缺尺寸）与 JSON 合法但非对象：同坏 JSON 记账，不炸导出。"""
+    src = tmp_path / "brksrc"
+    src.mkdir()
+    make_image(src, "ok.png")
+    make_annotation(src, "ok", [rect("car")])
+    make_image(src, "nodim.png")
+    make_annotation(src, "nodim", [rect("car")])
+    (src / "nodim.json").write_text(
+        json.dumps({"shapes": [rect("car")]}), encoding="utf-8")      # 缺 imageWidth/Height
+    make_image(src, "notobj.png")
+    (src / "notobj.json").write_text("[1, 2, 3]", encoding="utf-8")   # JSON 合法但非对象
+    build_dataset("brkx", "detect", str(src), ratio=1.0)
+    r = svc.export_annotations("brkx", "yolo", scope="all")
+    assert r["counts"]["all"] == 3                          # 导出不阻断
+    assert r["broken"] == ["nodim.png", "notobj.png"]       # 两种都进 broken 账（旧版漏前者、炸后者）
+
+
+def test_split_export_dirname_carries_split_uid(dup_ds, datasets_root):
+    """spec §2.1/§3.1：按切分导出落 `<ts>-<fmt>-<split_uid>/`，同秒同格式不并目录。"""
+    split = svc.latest_split(dup_ds)
+    r = svc.export_annotations(dup_ds, "yolo", scope="split", split_uid=split["uid"])
+    assert Path(r["path"]).name.endswith(f"-{split['uid']}")
+    r2 = svc.export_annotations(dup_ds, "yolo", scope="all")   # 全集无 uid 段
+    assert "-" + split["uid"] not in Path(r2["path"]).name

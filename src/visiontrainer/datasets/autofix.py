@@ -194,6 +194,9 @@ def apply_autofix(source_dir: Path, task_type: str, run_dir: Path, progress=None
             skipped.append({"file": str(j), "reason": "bad_json"})
             _logger.warning("自动修复跳过坏 JSON：%s（%s）", j, exc)
             continue
+        if not isinstance(data, dict):
+            skipped.append({"file": str(j), "reason": "not_object"})
+            continue
         file_fixes = fix_annotation(data, task_type)
         if not file_fixes:
             continue

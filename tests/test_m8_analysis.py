@@ -554,3 +554,18 @@ def test_overlay_renders_polygon_when_poly_present(tmp_path: Path):
     ea.render_overlay(str(src), [{**fn, "gt_poly": None}], out2)
     assert greenish(Image.open(out2).convert("RGB").getpixel((90, 90))), \
         "无 poly 应回退画外接矩形"
+
+
+def test_snapshot_classes_priority(tmp_path: Path):
+    """部署类别回查读 Run 快照（票 07）：format.class_map 行序优先，快照缺失回空由调用方兜底。"""
+    from visiontrainer.training import service as tsvc
+
+    (tmp_path / "run_manifest.json").write_text(json.dumps({
+        "format": {"class_map": {"car": 0, "bus": 1}},          # 行序 ≠ 字母序，锁排序键
+        "classes": {"list": ["stale_a", "stale_b"]},
+    }), encoding="utf-8")
+    run = type("R", (), {"run_dir": str(tmp_path)})()
+    assert tsvc._snapshot_classes_of(run) == ["car", "bus"]
+
+    no_snap = type("R", (), {"run_dir": str(tmp_path / "none")})()
+    assert tsvc._snapshot_classes_of(no_snap) == []

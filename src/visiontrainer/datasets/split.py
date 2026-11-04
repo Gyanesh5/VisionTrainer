@@ -238,6 +238,8 @@ def _primary_label_of(label_path: Path | None, classes: list[str]) -> str | None
         data = json.loads(label_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
+    if not isinstance(data, dict):    # 合法但非对象：同无标注口径（负样本）
+        return None
     for s in data.get("shapes") or []:
         if s.get("label") in classes:
             return str(s["label"])
@@ -487,6 +489,3 @@ def effective_set(ds_dir: Path, split: dict) -> dict:
         "dropped": {k: sorted(v) for k, v in dropped.items()},
         "counts": {"train": len(kept["train"]), "val": len(kept["val"])},
     }
-
-
-# ---------------------------------------------------------------- 派生树消费视图

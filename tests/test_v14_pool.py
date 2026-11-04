@@ -164,3 +164,55 @@ def test_task_preview_has_no_data_yaml_before_dequeue(ctx):
     assert not (ctx.ds_dir / "derived").exists()              # 建任务零池写入
     _launch(ctx, brief)
     assert (ctx.ds_dir / "derived" / "yolo" / "derived.json").is_file()
+
+
+# ---------------------------------------------------------------- M9 确认门与出队（未确认拒训、已确认放行）
+
+def _add_drop_shape(ds_dir: Path, stem: str, index: int = 0) -> None:
+    """往一张图的标注里塞一个 detect 不收的 linestrip（→ 投影 task_mismatch 丢弃）。"""
+    p = ds_dir / "source" / f"{stem}.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["shapes"].insert(index, {"label": "car", "shape_type": "linestrip",
+                                  "points": [[0, 0], [50, 50], [100, 0]]})
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_unconfirmed_drops_block_then_ack_trains(ctx):
+    """死路回归：确认丢弃后必须训得动（票 07「未确认才拒训」；旧版凡 drops 一律拒）。"""
+    # ① 真源出现丢弃 → 重校验立账（count>0 未确认）→ M9 建任务门 409
+    _add_drop_shape(ctx.ds_dir, "car0")
+    svc.validate_dataset_by_name("plate")
+    r = ctx.client.post("/api/v1/tasks", json={"name": "t", "base_model": "stub",
+                                               "dataset": "plate", "epochs": 1,
+                                               "split_uid": ctx.split["uid"]})
+    assert r.status_code == 409, r.text
+    # ② 确认丢弃 → 建任务放行、出队跑通（丢弃形状不进训练标签，其余照常编码）
+    svc.ack_drops("plate")
+    run = _launch(ctx, _create(ctx, split_uid=ctx.split["uid"]))
+    assert run["status"] == "done"
+    lbl = (ctx.ds_dir / "derived" / "yolo" / "labels" / "car0.txt").read_text()
+    assert lbl.count("\n") == 1 and lbl.strip()      # 只剩 rectangle 投的 1 个对象
+
+
+def test_new_drops_after_ack_rejected(ctx):
+    """确认后又出现账外新丢弃（未重校验）→ 出队拒训 fail-closed。"""
+    _add_drop_shape(ctx.ds_dir, "car0")
+    svc.validate_dataset_by_name("plate")
+    svc.ack_drops("plate")
+    _add_drop_shape(ctx.ds_dir, "person0")            # 账外新丢弃
+    brief = _create(ctx, split_uid=ctx.split["uid"])
+    run = _launch(ctx, brief, statuses={"failed"})
+    runs = ctx.client.get(f"/api/v1/tasks/{brief['id']}").json()["runs"]
+    err = next(r for r in runs if r["uid"] == run["uid"]).get("error") or ""
+    assert "确认账目之外" in err
+
+
+def test_float_canvas_size_not_broken(ctx):
+    """broken 判据单一口径（票 02）：画布尺寸 float 校验绿灯、出队不再假阳性拒训。"""
+    p = ctx.ds_dir / "source" / "person0.json"
+    data = json.loads(p.read_text(encoding="utf-8"))
+    data["imageWidth"] = 640.0
+    p.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    svc.validate_dataset_by_name("plate")
+    run = _launch(ctx, _create(ctx, split_uid=ctx.split["uid"]))
+    assert run["status"] == "done"

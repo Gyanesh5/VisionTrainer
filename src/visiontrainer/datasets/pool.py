@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -25,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .formats import adapter_for
-from .projection import PROJECTION_VERSION, TASK_MODE, project_json
+from .projection import PROJECTION_VERSION, TASK_MODE, project_file
 from .validate import list_images
 
 DEFAULT_FORMAT_ID = "yolo"   # backend_id → format_id 当前仅 ultralytics → yolo（spec §3.3）
@@ -89,6 +90,8 @@ def _link(src: Path, dst: Path) -> None:
     try:
         os.symlink(src, dst)
     except OSError:
+        # symlink 不可用（Windows/跨盘等）→ 复制降级，留痕便于查池体积异常
+        logging.getLogger(__name__).debug("symlink 失败，降级复制：%s → %s", src, dst)
         shutil.copy2(src, dst)
 
 
@@ -100,12 +103,13 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
     - ② `converter_version / projection_version / classes_sha / task_type` 任一失配即
       整池重建（清空 images/ labels/ 重链接）；一致则池原样复用（换切分零重建）。
     - ③ 只对**本次实效成员**算 `adapter.encode_image(project(JSON))` 与池标签逐字节比对，
-      不一致即重写；`broken`（坏 JSON/缺尺寸/坏坐标）或投影出现丢弃 → ValueError 拒训
-      （宁可拒训，不静默旧账、也不静默脏账）。
+      不一致即重写；`broken`（坏 JSON/缺尺寸/坏坐标）→ ValueError 拒训；投影丢弃按
+      M9 确认门放行——**未确认**（无账目或账外新丢弃）拒训，已确认的丢弃形状不进
+      训练、其余形状照常编码（宁可拒训，不静默旧账、也不静默脏账）。
     - ④ 遍历池内图片链接，真源已不存在者连同标签一起移除（XAL 删图/手工清理的池内回声）。
 
     Returns: {"class_map", "rebuilt", "refreshed"（本次重写的文件名）, "pool", "stamps"}。
-    Raises: ValueError——词干冲突、标注损坏、投影丢弃、未注册格式。
+    Raises: ValueError——词干冲突、标注损坏、未确认投影丢弃、未注册格式。
     """
     adapter = adapter_for(format_id)          # 未注册格式 KeyError → 调用方转译
     pool = pool_dir(ds_dir, format_id)
@@ -131,6 +135,7 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
     images.mkdir(parents=True, exist_ok=True)
 
     effective = {Path(n).name for n in effective_names or []}
+    acked_drops = _confirmed_drop_set(ds_dir)   # 一次读账：本队全程共用（无账 = 未确认）
     all_images = sorted(p for p in list_images(source) if p.is_file()) if source.is_dir() else []
     refreshed: list[str] = []
     for i, image in enumerate(all_images):
@@ -144,12 +149,19 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
             raise ValueError(f"{image.name} 的标注无法投影（坏 JSON / 缺画布尺寸 / 坏坐标）——"
                              "先处理校验页红灯再训")
         if drops:
+            fresh = {(str(image), str(d.get("index")), str(d.get("reason"))) for d in drops}
             reasons: dict[str, int] = {}
             for d in drops:
                 reasons[d["reason"]] = reasons.get(d["reason"], 0) + 1
             detail = "、".join(f"{k}×{v}" for k, v in sorted(reasons.items()))
-            raise ValueError(f"标注存在无法进入训练的形状（{image.name}：{detail}）——"
-                             "请到数据集页「重新校验」查看问题清单，修复标注或确认丢弃后再训")
+            if acked_drops is None:
+                raise ValueError(f"标注存在无法进入训练的形状（{image.name}：{detail}）——"
+                                 "请到数据集页「重新校验」查看问题清单：修复标注，"
+                                 "或确认有意丢弃后再训")
+            if not fresh <= acked_drops:      # 账外新丢弃 = 确认账已过期，fail-closed
+                raise ValueError(f"{image.name} 出现确认账目之外的丢弃（{detail}）——"
+                                 "标注在上次确认后已变化，请先「重新校验」建立新账，"
+                                 "修复或确认后再训")
         txt = labels / f"{image.stem}.txt"
         if not txt.is_file() or txt.read_text(encoding="utf-8") != expected:
             _atomic_text(txt, expected)
@@ -172,29 +184,51 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
             "pool": str(pool), "stamps": stamps}
 
 
+def _confirmed_drop_set(ds_dir: Path) -> set[tuple[str, str, str]] | None:
+    """已确认丢弃的 `(image, index, reason)` 三元组集；无确认账目返回 None。
+
+    账目两件（票 06 一行制）：`dataset.json` 的 `validation_summary.drops` 判「已确认」
+    （count>0 ∧ signature==acked，与 `service._drops_pending` 同判据、反义），
+    `validation_report.json` 的 drop problems 提供三元组明细——出队门据此放行
+    「确认过丢弃」的实效成员（票 07：只有**未确认**丢弃才拒训）。两件都是数据集
+    文件面，不碰 DB，与本模块纯文件层一致。
+    """
+    try:
+        summary = (json.loads((ds_dir / "dataset.json").read_text(encoding="utf-8"))
+                   .get("validation_summary") or {})
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return None
+    acc = summary.get("drops") or {}
+    if not (acc.get("count") and acc.get("signature")
+            and acc.get("signature") == acc.get("acked")):
+        return None
+    try:
+        report = json.loads((ds_dir / "validation_report.json").read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return None
+    return {(p.get("image") or "", str((p.get("detail") or {}).get("index")),
+             str((p.get("detail") or {}).get("reason")))
+            for p in report.get("problems") or [] if p.get("code") == "drop"}
+
+
 def _encode_member(source: Path, image: Path, task_type: str, classes: list[str],
                    class_map: dict[str, int]) -> tuple[str, list[dict], bool]:
-    """真源 JSON → 期望的池标签文本。返回 (expected, drops, broken)；负样本 = 空文本。"""
+    """真源 JSON → 期望的池标签文本。返回 (expected, drops, broken)；负样本 = 空文本。
+
+    判据单一口径（票 02）：投影只走 `project_file`——坏 JSON / 缺尺寸 / 坏坐标
+    全在它的 broken 里，池不自设判据（旧版 imageWidth 必须 int，与校验层收 float
+    分叉，校验绿灯却拒训）。
+    """
     adapter = adapter_for("yolo")
     lbl = image.with_suffix(".json")
     if not lbl.is_file():
         lbl = next(iter(sorted(source.glob(f"{image.stem}.json"))), None)
     if lbl is None:
         return "", [], False               # 负样本：显式空 txt（negatives = empty_file）
-    try:
-        data = json.loads(lbl.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return "", [], True
-    if not isinstance(data.get("imageWidth"), int) or not isinstance(data.get("imageHeight"), int):
-        return "", [], True
-    try:
-        projected = project_json(data, task_type, classes)
-    except (KeyError, TypeError, ValueError):
-        return "", [], True
+    projected = project_file(lbl, task_type, classes)
     if projected.get("broken"):
         return "", projected.get("drops") or [], True
-    lines = adapter.encode_image(projected, class_map)
-    return "".join(lines), projected.get("drops") or [], False
+    return "".join(adapter.encode_image(projected, class_map)), projected.get("drops") or [], False
 
 
 def _atomic_text(path: Path, text: str) -> None:

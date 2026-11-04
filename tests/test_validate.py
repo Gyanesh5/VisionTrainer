@@ -30,6 +30,15 @@ def test_bad_json_counted(tmp_path):
     assert report["counts"]["bad_json"] == 1 and not report["ok"]
 
 
+def test_non_object_json_counted_as_bad(tmp_path):
+    """JSON 合法但顶层不是对象（数组/标量）：同 bad_json 红灯，不再炸整个校验。"""
+    src = _src(tmp_path)
+    make_image(src, "x.png")
+    (src / "x.json").write_text("[1, 2, 3]", encoding="utf-8")
+    report = validate_dataset(src, "detect", ["car"])
+    assert report["counts"]["bad_json"] == 1 and not report["ok"]
+
+
 def test_unreadable_image_detected(tmp_path):
     src = _src(tmp_path)
     (src / "fake.jpg").write_bytes(b"not a jpeg at all....")
