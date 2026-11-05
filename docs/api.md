@@ -23,7 +23,7 @@
 | GET | `/api/v1/datasets` | 列表：task_type、managed/external、类别数、样本数、校验摘要、source_fingerprint 与「可能有变更」粗判；不再返回 active_manifest |
 | POST | `/api/v1/datasets` | 新建托管数据集（长操作：入图 + 校验 + 画像，不切分）。body: `{name, task_type, classes:[...], source:{mode:empty\|images_dir\|annotated_dir, path?, transfer:copy\|move}}`；annotated_dir 的 classes 为探测预填后确认值，表外类别 409 并列清单；响应可带 drops `needs_confirm` |
 | POST | `/api/v1/datasets/external` | 注册外部标准 YOLO 目录（只读）。body: `{name, task_type, path}` |
-| GET | `/api/v1/datasets/{id}` | 详情：瘦身 metadata、validation_summary、classes、tiling、排除计数与审查进度；切分另走 `/splits` |
+| GET | `/api/v1/datasets/{id}` | 详情：瘦身 metadata、validation_summary、classes、tiling、排除条目、审查进度与 `fingerprint_stale`（真源指纹对账，读时组合视图现算）；切分另走 `/splits` |
 | POST | `/api/v1/datasets/{id}/validate` | 重跑校验并在同一次遍历里聚合画像；报告含投影 drops、stem_conflict 与跨任务信息级 lint，不含漂移比对 |
 | POST | `/api/v1/datasets/{id}/images` | 加图（长操作）。body: `{paths:[目录或文件], transfer:copy\|move, append_classes?:[...]}`；同名冲突或未登记类别 409，后者返回可一键追加的类别清单，带 `append_classes` 重发即先登记再入图；完成后校验+画像，存活 XAL 推 rescan |
 | PUT | `/api/v1/datasets/{id}/classes` | 类别表四动作。body: `{action:append\|rename\|reorder\|delete, classes?, class_name?, confirm?}`；rename 原子改写类别表与真源 JSON 并继承审查，reorder 需确认（未确认 409 复述逐项位移），delete 仅零实例；成功后即时重校验+画像，存活 XAL 推 load_labels |
