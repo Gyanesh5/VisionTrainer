@@ -1702,7 +1702,7 @@ def write_run_entry(name: str, run_dir: Path, effective: dict,
     result = pool_lib.write_run_entry(Path(run_dir), ds_dir, task_type,
                                       read_classes(ds_dir), class_map, effective)
     result["labels_dir_abs"] = result["labels_dir"] or ""
-    return result
+    return result   # val_labels 随池返回：labels_frozen 冻结取数清单，池布局不出 datasets 域
 
 
 # ---------------------------------------------------------------- 标注审查（M9 02 号票）

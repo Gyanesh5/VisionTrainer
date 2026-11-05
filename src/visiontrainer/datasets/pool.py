@@ -224,7 +224,7 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
                     _link(src.resolve(), entry / side / f"{class_map[flag]:02d}_{flag}" / Path(name).name)
         _atomic_text(entry / "data.yaml", _yaml_text(meta, path=entry, train="train", val="val"))
         return {"data_yaml": str(entry / "data.yaml"), "train_txt": None, "val_txt": None,
-                "labels_dir": None,
+                "labels_dir": None, "val_labels": [],
                 "format": _format_segment(format_id, adapter, class_map, str(entry / "data.yaml"))}
 
     train_txt = entry / "train.txt"
@@ -235,8 +235,14 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
                                   for n in sorted(effective.get("val") or [])))
     _atomic_text(entry / "data.yaml", _yaml_text(meta, path=pool,
                                                  train=str(train_txt), val=str(val_txt)))
+    # 本次实效 val 的池标签绝对路径：labels_frozen 冻结副本的取数清单（票 07）——
+    # 池平铺布局知识到此为止，manager 只照单复制不摸池路径（架构复审候选 5）
+    val_labels = [str(p) for p in (pool / "labels" / f"{Path(n).stem}.txt"
+                                   for n in sorted(effective.get("val") or []))
+                  if p.is_file()]
     return {"data_yaml": str(entry / "data.yaml"), "train_txt": str(train_txt),
             "val_txt": str(val_txt), "labels_dir": str(pool / "labels"),
+            "val_labels": val_labels,
             "format": _format_segment(format_id, adapter, class_map, str(entry / "data.yaml"))}
 
 

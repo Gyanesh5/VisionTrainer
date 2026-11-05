@@ -222,8 +222,12 @@ def task_inputs(name: str, split_uid: str | None) -> dict:
         entry = _entry_yaml_of(ds_dir, form or "", None)
         if not entry.is_file():
             raise DatasetError("invalid_args", f"外部数据集缺 data.yaml：{entry}（平台不代写，只读承诺）")
+        labels_val = entry.parent / "labels" / "val"   # 外部目录自带布局（v1.3 起不变量）
+        val_labels = ([str(p) for p in sorted(labels_val.iterdir()) if p.is_file()]
+                      if labels_val.is_dir() else [])
         return {"form": "external", "dataset": name, "split_uid": None, "split": None,
-                "effective": None, "data_yaml": str(entry), "dataset_dir": str(ds_dir)}
+                "effective": None, "data_yaml": str(entry), "dataset_dir": str(ds_dir),
+                "val_labels": val_labels}
 
     if split_uid:
         try:
@@ -247,25 +251,6 @@ def task_inputs(name: str, split_uid: str | None) -> dict:
                           "dropped": {"missing": list((eff.get("dropped") or {}).get("missing") or []),
                                       "excluded": list((eff.get("dropped") or {}).get("excluded") or [])}},
             "data_yaml": None, "dataset_dir": str(ds_dir)}
-
-
-def effective_val_labels(ds_dir: Path, data_yaml: Path, effective: dict | None,
-                         pool_labels_dir: str | None = None) -> list[Path]:
-    """本次实效 val 的池标签文件（冻结副本 `labels_frozen/val` 的取数口径，票 07）。
-
-    托管集从格式池平铺标签取（`<ds>/derived/<format_id>/labels/<stem>.txt`）；`effective`
-    为 null（外部集）时整目录沿用其自带 val 标签目录。
-    """
-    if effective is None:
-        labels_val = data_yaml.parent / "labels" / "val"
-        return [p for p in labels_val.iterdir() if p.is_file()] if labels_val.is_dir() else []
-    labels_dir = Path(pool_labels_dir) if pool_labels_dir else data_yaml.parent / "labels" / "val"
-    out = []
-    for name in effective.get("val") or []:
-        p = labels_dir / f"{Path(name).stem}.txt"
-        if p.is_file():
-            out.append(p)
-    return out
 
 
 class TrainingManager:
@@ -465,13 +450,15 @@ class TrainingManager:
             dataset_dir=str(ds_dir), split=split, effective=effective,
             fmt=(entry or {}).get("format"), labels_dir=(entry or {}).get("labels_dir")))
 
-        # 冻结 val 标签副本：错误分析逐框对账永远对启动时点——只冻本次实效 val
-        #（托管集从池取标签；外部集沿用其自带目录），池此后重建不影响旧 Run 口径
+        # 冻结 val 标签副本：错误分析逐框对账永远对启动时点——只冻本次实效 val；
+        # 取数清单由 datasets 侧给齐（托管=池标签，外部=自带目录，见 task_inputs），
+        # manager 照单复制不摸池路径，池此后重建不影响旧 Run 口径（架构复审候选 5）
         frozen_val = run_dir / "labels_frozen" / "val"
-        for lbl in effective_val_labels(ds_dir, data_yaml, effective,
-                                        pool_labels_dir=(entry or {}).get("labels_dir")):
+        frozen_srcs = ((entry or {}).get("val_labels") if inputs["form"] == "managed"
+                       else inputs.get("val_labels")) or []
+        for lbl in frozen_srcs:
             frozen_val.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(lbl, frozen_val / lbl.name)
+            shutil.copy2(lbl, frozen_val / Path(lbl).name)
 
         log_f = (run_dir / "training.log").open("wb")
         proc = SubprocessHandle([self.s.training_python, self.s.trainer_entry, str(payload_path)], log_f)
