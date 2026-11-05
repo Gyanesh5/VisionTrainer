@@ -36,6 +36,7 @@ from pathlib import Path
 from PIL import Image
 
 from . import classops
+from . import drops as drops_lib
 from . import pool as pool_lib
 from . import split as split_lib
 from .audit import compute_audit, leak_view, load_cached, save_cached
@@ -198,7 +199,7 @@ def _compose_managed(meta: dict, ds_dir: Path) -> dict:
                        for name, rec in load_excluded(ds_dir).items()]
     report_path = ds_dir / "validation_report.json"
     out["last_validation"] = _read_meta(report_path) if report_path.is_file() else None
-    out["drops_pending_ack"] = _drops_pending(meta.get("validation_summary") or {})
+    out["drops_pending_ack"] = drops_lib.pending(meta.get("validation_summary") or {})
     return out
 
 
@@ -207,40 +208,6 @@ def _write_meta(ds_dir: Path, meta: dict) -> None:
     disk = {k: meta[k] for k in _META_KEYS if k in meta}
     (ds_dir / "dataset.json").write_text(json.dumps(disk, ensure_ascii=False, indent=2),
                                          encoding="utf-8")
-
-
-def _drops_signature(report: dict) -> str:
-    """丢弃集合签名（M9 确认门）：同一批丢弃确认一次即粘住，重校验同签名不再要求确认。"""
-    drops = sorted((p.get("image"), str(p.get("detail", {}).get("index")),
-                    str(p.get("detail", {}).get("reason")))
-                   for p in report.get("problems", []) if p.get("code") == "drop")
-    return hashlib.sha256(json.dumps(drops, ensure_ascii=False).encode()).hexdigest()
-
-
-def _drops_pending(summary: dict) -> bool:
-    """未确认丢弃现算：count > 0 ∧ signature ≠ acked（不落独立布尔字段）。"""
-    drops = summary.get("drops") or {}
-    return bool(drops.get("count")) and drops.get("signature") != drops.get("acked")
-
-
-def _new_validation_summary(report: dict, fingerprint: str, prev: dict | None) -> dict:
-    """validation_report → dataset.json 摘要；prev 同签名时继承已确认账目（确认粘住）。"""
-    prev_drops = (prev or {}).get("drops") or {}
-    sig = _drops_signature(report)
-    count = int(report.get("drops") or 0)
-    acked = prev_drops.get("acked") or ""
-    if prev_drops.get("signature") != sig:
-        acked = ""  # 新丢弃集合 → 重新要求确认
-    if count == 0:
-        acked = ""
-    return {
-        "ok": bool(report.get("ok")),
-        "total_images": int(report.get("total_images") or 0),
-        "negatives": int(report.get("background") or 0),
-        "checked_at": report.get("checked_at"),
-        "source_fingerprint": fingerprint,
-        "drops": {"count": count, "signature": sig, "acked": acked},
-    }
 
 
 def _latest_split(name: str, root: Path | None = None) -> dict | None:
@@ -383,7 +350,7 @@ def create_dataset(
             "created_at": now,
             "origin": {"mode": source_mode, "path": str(src) if src else None,
                        "at": now, "transfer": transfer if src else None},
-            "validation_summary": _new_validation_summary(
+            "validation_summary": drops_lib.new_summary(
                 report, source_fingerprint(source_dir), None),
         }
         _write_meta(ds_dir, meta)
@@ -562,7 +529,7 @@ def validate_dataset_by_name(name: str, root: Path | None = None,
     (ds_dir / "validation_report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     raw = _read_meta(ds_dir / "dataset.json")
-    raw["validation_summary"] = _new_validation_summary(
+    raw["validation_summary"] = drops_lib.new_summary(
         report, source_fingerprint(src), raw.get("validation_summary"))
     _write_meta(ds_dir, raw)
     _prune_excluded(ds_dir)
@@ -1421,7 +1388,7 @@ def tile_dataset(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
             "created_at": now,
             "origin": {"mode": "labeled", "path": str(_source_dir(_ds_dir(name, root))),
                        "at": now, "transfer": "copy"},
-            "validation_summary": _new_validation_summary(
+            "validation_summary": drops_lib.new_summary(
                 report, source_fingerprint(src_dir), None),
             # spec §3.1：tiling{source,rows,cols,overlap,keep_empty,groups}——groups 持久化瓦片→源图组键
             "tiling": {"source": name, "rows": rows, "cols": cols, "overlap": overlap,
@@ -1615,13 +1582,10 @@ def ack_drops(name: str, root: Path | None = None) -> dict:
     ds_dir = _ds_dir(name, root)
     raw = _read_meta(ds_dir / "dataset.json")
     summary = raw.get("validation_summary") or {}
-    drops = summary.get("drops") or {}
-    if drops.get("signature"):
-        drops["acked"] = drops["signature"]
-        summary["drops"] = drops
-        raw["validation_summary"] = summary
-        _write_meta(ds_dir, raw)
-    return {"name": name, "drops_acked": True, "pending": _drops_pending(summary)}
+    raw["validation_summary"] = {**summary, "drops": drops_lib.acked(summary)}
+    _write_meta(ds_dir, raw)
+    return {"name": name, "drops_acked": True,
+            "pending": drops_lib.pending(raw["validation_summary"])}
 
 
 def auto_fix_dataset(name: str, root: Path | None = None, progress_cb=None) -> dict:

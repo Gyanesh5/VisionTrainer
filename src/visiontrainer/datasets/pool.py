@@ -25,6 +25,7 @@ import tempfile
 from datetime import datetime
 from pathlib import Path
 
+from . import drops as drops_lib
 from .formats import adapter_for
 from .projection import PROJECTION_VERSION, TASK_MODE, project_file
 from .validate import list_images
@@ -135,7 +136,7 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
     images.mkdir(parents=True, exist_ok=True)
 
     effective = {Path(n).name for n in effective_names or []}
-    acked_drops = _confirmed_drop_set(ds_dir)   # 一次读账：本队全程共用（无账 = 未确认）
+    acked_drops = drops_lib.confirmed_set(ds_dir)   # 一次读账：本队全程共用（无账 = 未确认）
     all_images = sorted(p for p in list_images(source) if p.is_file()) if source.is_dir() else []
     refreshed: list[str] = []
     for i, image in enumerate(all_images):
@@ -182,33 +183,6 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
     })
     return {"class_map": class_map, "rebuilt": rebuilt, "refreshed": sorted(refreshed),
             "pool": str(pool), "stamps": stamps}
-
-
-def _confirmed_drop_set(ds_dir: Path) -> set[tuple[str, str, str]] | None:
-    """已确认丢弃的 `(image, index, reason)` 三元组集；无确认账目返回 None。
-
-    账目两件（票 06 一行制）：`dataset.json` 的 `validation_summary.drops` 判「已确认」
-    （count>0 ∧ signature==acked，与 `service._drops_pending` 同判据、反义），
-    `validation_report.json` 的 drop problems 提供三元组明细——出队门据此放行
-    「确认过丢弃」的实效成员（票 07：只有**未确认**丢弃才拒训）。两件都是数据集
-    文件面，不碰 DB，与本模块纯文件层一致。
-    """
-    try:
-        summary = (json.loads((ds_dir / "dataset.json").read_text(encoding="utf-8"))
-                   .get("validation_summary") or {})
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return None
-    acc = summary.get("drops") or {}
-    if not (acc.get("count") and acc.get("signature")
-            and acc.get("signature") == acc.get("acked")):
-        return None
-    try:
-        report = json.loads((ds_dir / "validation_report.json").read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        return None
-    return {(p.get("image") or "", str((p.get("detail") or {}).get("index")),
-             str((p.get("detail") or {}).get("reason")))
-            for p in report.get("problems") or [] if p.get("code") == "drop"}
 
 
 def _encode_member(source: Path, image: Path, task_type: str, classes: list[str],
