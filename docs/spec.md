@@ -70,7 +70,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **生命周期**：训练子进程 `start_new_session` 脱离；平台重启**孤儿收养**（pid + csv 恢复监控）；停止链 SIGTERM → `trainer.stop` → 超时 killpg SIGKILL。
 - **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态）。
 - **派生新鲜度门与出队六步** [v1.4-03/04，ADR 0011/0012]：①成员段计算实效集；②检查格式池 `converter_version / projection_version / classes_sha`，任一失配整池重建；③逐实效成员计算 `adapter.encode_image(project(JSON))` 并与池文件**逐字节比对**、不一致即重写并补齐图片链接，`broken` 拒训，投影 drops 按 M9 确认门放行（未确认/账外新丢弃拒训，已确认的丢弃形状不进训练）；④移除真源已不存在者的池链接与标签；⑤写逐 Run 训练入口与 `labels_frozen/`；⑥快照冻结 `format{format_id, converter_version, projection_version, class_map, entry_path}`。改完标注直接开训是唯一正确用法，导出标注不再承重；外部数据集不走平台格式池。
-- **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**。v1.4 迁移会改写既有 Run 快照，并为无冻结副本的旧 Run（特性 2026-10-31 前创建）在删旧派生树前从旧树 `labels/val` 补冻结（溯源记 `labels_frozen/source.json`）；旧树也不在的，首次错误分析时按当前真源现投影回放冻结（真源自 Run 后未改时严格等价，同记 source.json）。新代码不保留旧派生目录回退分支。
+- **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**，缺副本的 Run 直接 409（重跑训练后再分析），不设任何旧派生目录回退分支。
 - **训练记录列表**（2026-10-30 重构）：训练页按数据集分组、每 Run 一行；组头折叠状态记忆、单表渲染、取消轮保留、终态显示实际 epoch、任务新在前且轮次升序、点行查看该次运行等既有口径不变。
 - **删除粒度**：单条终态 Run 可独立删除，其余轮次不受影响；queued/running/stopping 409；任务删空连任务移除，存余轮次时聚合状态回落。Run 子表随轮清理，磁盘产物默认保留，勾选后删对应 run_dir；「删除任务」仍整任务删。
 - **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供「续训」新 Run；重开与续训钉原 split_uid，实效集按当时真相重算。
@@ -90,7 +90,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 - Run 归档：全量 args、逐 epoch 指标（**入库，单一数据源**）、results.csv、training.log、ultralytics 全套产物图（混淆矩阵/PR/F1/P/R 曲线不自绘）、best/last.pt、Agent 轮 LLM 决策记录（输入摘要/输出/clamp）。
 - 复盘报告：一键生成 markdown（复用 Agent 多模态管线）存 Run 目录；PDF 不做。
-- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标与格式池懒刷新不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；v1.4 迁移保持既有冻结副本不动、为无副本旧 Run 从旧树补冻结，两路都不可得时首次分析从真源回放冻结（§2.2 val 标签冻结副本条），新代码不增加旧派生目录回退分支。
+- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标与格式池懒刷新不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；缺副本直接 409，不设旧派生目录回退分支。
 - **复盘升级** [M8]：结构化错误统计（Top 混淆类对/缺数据类/FP-FN 失衡/小目标占比）作 LLM 输入 schema；报告固定加「**下一步实验推荐**」章节（超参改动+理由+预期收益，与审批门共享输出结构）。
 - **对比页六件套** [M8；v1.4-03]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键；Run 按 split_uid 分组并标注各轮实效 val 张数，不同切分不暗示直接可比。
 
@@ -207,21 +207,11 @@ ProjectedImage {
 ### 3.4 SQLite 与运行归档 [v1.4-05/08]
 
 - `schema_version` **5→6**；`tasks` 增加 `dataset / split_uid / format_id` 并删除 `dataset_manifest_path`，`runs` 的 run_dir 不变。
-- `dataset_stats` 改为 `dataset UNIQUE + source_fingerprint + task_type + computed_at + payload`；`dataset_audits` 改为 `dataset UNIQUE + source_fingerprint + created_at + payload`。两表在迁移时重建弃档，旧画像与体检不转换；画像预热，体检按需重跑。
+- `dataset_stats` 为 `dataset UNIQUE + source_fingerprint + task_type + computed_at + payload`；`dataset_audits` 为 `dataset UNIQUE + source_fingerprint + created_at + payload`，一数据集一行。
 - Run 快照含 `split / effective / format` 三段及既有训练输入；删除 Task 级联删行、磁盘默认保留的口径不变。
 - 审查寄生键仍为 `checked + vt_review`，不新增审查 DB 表；三条平台写路径分别受 ADR 0003/0005/0009 约束，均须原子写，审查与改名/自动修复按各自规则继承判定。
 
-### 3.5 v1.4 一次性迁移 [v1.4-08]
-
-**硬切换**：允许直接删除全部旧代码路径，不留兼容读层、过渡开关、双写或旧→新 uid 映射表；旧 Run 可续训/错误分析与旧划分可在历史列表选用的**结果**保留，机制由迁移时改写数据达成。schema 6 新代码与迁移脚本必须同批落地，不得先于迁移上线。
-
-- **CLI**：`python -m visiontrainer.migrate_v14 {--dry-run|--apply}`，平台 venv 手动执行，不随启动自动跑；`--apply` 前自动备份 DB，`<ds>/.migrated-v14` 支持中断续跑。dry-run 输出手工回退步骤（恢复 DB 备份 + 反向 rename）。
-- **真源入位**：8 个有真源的数据集以同分区 `mv images → source/` 入位，不留反向链接；`classes.txt` 逐字节保留，dataset.json 重写为 §3.1。孤儿集 circle-mix-800 直接删除且仅此一集豁免回收区；其他杂项目录不动。
-- **切分与旧 Run**：每个旧 split_manifest 转为划分内容寻址的 split.json，同划分去重，memo 记旧 uid 溯源；原 active 对应实体成为最近切分。4 个 Task 重钉三列，5 个 run_manifest.json 就地补写新 split/effective/format；旧 derived/<uid>/ 树转制后直删，格式池按需重建。tile2x2 回填 tiling.groups，任一瓦片无法映射即中止。
-- **停机窗**：8600 停止 → 迁移 + 8 集校验/画像预热 → schema 6 新代码重启。测试写生产库的隔离根因必须先于迁移在独立实现票修复，不混入迁移脚本。
-- **验收八条**：①8 集 source 图/JSON 数与旧账对账、classes.txt 不变；②每实体 train+val 与旧 manifest 逐名一致；③4 Task 三列可解析；④transfer-material-seg 真训 1 epoch 走完出队六步，其余 3 Task 重开 dry 到出队前；⑤2e85f2bf 错误分析实开对账；⑥8 集详情页画像立即可见；⑦XAL 改标保存后详情页自动对账；⑧tile2x2 groups 556/556 命中。
-
-### 3.6 接口与词汇
+### 3.5 接口与词汇
 
 全部端点与消息 schema 见 [docs/api.md](./api.md)，Pydantic 硬契约位于 `src/visiontrainer/api/schemas.py`；未来常规迁移仍走 create_all + schema_version 幂等函数，不上 Alembic。根目录 [CONTEXT.md](../CONTEXT.md) 是 Task/Run/切分/格式池/审批门等领域词汇的唯一事实源。
 
@@ -245,7 +235,7 @@ ProjectedImage {
 | **M8 病根与价值可见** [v1.1] | 错误分析 / 复盘升级 / 阈值探索器 / Test 页 / 对比六件套 / 部署管理 / 实验模板 | ① Run 后最差样本榜+叠加大图+矩阵点格下钻可用；② FN/FP 清单可导出回 X-AnyLabeling；③ 复盘含「下一步实验推荐」且引用错误统计；④ 部署时建议置信度写入模型配置；⑤ 试跑页 ONNX 叠框正确；⑥ 对比页 diff 三件套+「与当前部署版对比」；⑦ 模板一键生成多 Task |
 | **M9 标注质量审查** [v1.2] | 校验规则扩充 / 审计与健康报告扩充 / 标注审查页签+键盘流 / 只训已审开关 / 单图重转换联动 / 驳回清单导出 | ① 导入含非法 shape 的目录 → 丢弃清单+确认门，零静默（plate-circle 试金石）；退化框/越界/孤儿/同图重复均有报告；② 审查页签键盘判定写回 JSON，X-AnyLabeling 文件列表图标同步绿标；XAL 内改标注后平台自动回「已修改」待审；③ 单图改标后派生 txt 即时刷新、审计缓存正确失效；④ 「只训已审」开启重切后清单只含通过图、旧清单保留可切回；⑤ 驳回清单可导出 markdown；⑥ 训练提交显示审查完成度提示 |
 | **M10 Agent 域底座化** [v1.3] | 工具面三级契约 / 多步工具循环 + 决策提供方 / 审批门 human-on-the-loop（四态+档位+策略文件+预算熔断+批量预审）/ 错误分析证据接入 / 经验库 + compaction / MCP 接入（fastmcp） / Agent 页升级 | ① 只读工具查询进决策且工具调用轨迹归档可回溯；② autonomous 档整夜自跑：熔断/通知/审计齐全，supervised 每轮审批；③ 审批四态含「改后放行」；④ 决策引用错误分析证据；⑤ 经验库跨任务注入新任务首轮；⑥ 外部 agent 经 `/mcp` 开任务/查曲线/提交超参，走同一审批门；⑦ 重设计前后同组固定任务对比 |
-| **M11 数据集↔训练域换位** [v1.4] | 平台内新建/加图/类别表 master / XAL open-rescan / 切分训练侧实体与实效集 / 投影+格式适配器 / 格式池+逐 Run 入口 / 账目一行制与读时视图 / 三维导出 / 07 四块 UI / schema 6 一次性迁移 | ① 两栏新建三态来源、四类别动作、加图 rescan 与改标自动对账全闭环；② 三态切分选择器可创建/复用，同 uid val 一致，缺图/排除/空实效集行为符合契约；③ 改标后直接开训完成六步出队，快照 effective/format 完整，COCO/VOC 导出可消费；④ 画像与体检按切分即时组成，排除恢复零重算；⑤ 数据集页单列状态流与页头 XAL 工具条落地；⑥ §3.5 迁移验收八条全过，8600 无兼容层运行 |
+| **M11 数据集↔训练域换位** [v1.4] | 平台内新建/加图/类别表 master / XAL open-rescan / 切分训练侧实体与实效集 / 投影+格式适配器 / 格式池+逐 Run 入口 / 账目一行制与读时视图 / 三维导出 / 07 四块 UI / schema 6 | ① 两栏新建三态来源、四类别动作、加图 rescan 与改标自动对账全闭环；② 三态切分选择器可创建/复用，同 uid val 一致，缺图/排除/空实效集行为符合契约；③ 改标后直接开训完成六步出队，快照 effective/format 完整，COCO/VOC 导出可消费；④ 画像与体检按切分即时组成，排除恢复零重算；⑤ 数据集页单列状态流与页头 XAL 工具条落地；⑥ 8600 无兼容层运行 |
 
 依赖（v1.0）：M2 依赖 M1（数据集就绪）→ M3 依赖 M2 → M4 依赖 M2+M3 → M5 依赖 M2。依赖（v1.1 滚动三波）：M6 → M7 → M8 串行推进（每波落地一波验收一波）；M8 内复盘升级与阈值探索器依赖错误分析先落地。依赖（v1.2）：M9 独立成波、无跨波硬依赖（基于既有数据集管线与错误分析回路扩展），随时可开工；波内建议序：规则扩充与联动底座 → 审查页签 → 只训已审。依赖（v1.3）：M10 基于 M4/M7（循环内核与 Agent 页）/M8（错误分析）既有资产；波内序：工具面 → 循环引擎 → 审批门主干，错误分析接入与经验库并行，MCP 接入最后，Agent 页随行。
-依赖（v1.4）：M11 基于既有 M1/M6/M9 数据集与审查资产及 M2 训练链路。实现票顺序先修**测试库隔离**（独立无前置），再依次落地真源/类别表与投影底座 → 切分实体与账目换源 → 格式池/逐 Run 训练链 → UI、XAL 协同与外部导出；迁移脚本和 schema 6 新代码同批交付，最后执行 8600 停机迁移与八条验收。每波可直接删除对应退役路径，不增加兼容开关。
+依赖（v1.4）：M11 基于既有 M1/M6/M9 数据集与审查资产及 M2 训练链路。实现票顺序先修**测试库隔离**（独立无前置），再依次落地真源/类别表与投影底座 → 切分实体与账目换源 → 格式池/逐 Run 训练链 → UI、XAL 协同与外部导出。每波可直接删除对应退役路径，不增加兼容开关。

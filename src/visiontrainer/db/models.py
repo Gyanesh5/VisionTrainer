@@ -200,10 +200,9 @@ def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
     # 并发写串行化在调用侧（agent_config 走 tuner._mutate_agent_config 的进程内互斥）：
     # 引擎级 BEGIN IMMEDIATE 会让每个只读事务也占住 SQLite 写锁，同线程嵌套会话即自锁。
     engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    # 票 06 幂等迁移（v5→v6）：两本账表从「(dataset, manifest_uid) 一行」重建为
-    # 「dataset UNIQUE 一行」，旧画像/体检弃档不转换（spec §3.4）。旧形状判据 =
-    # manifest_uid 列还在；重建后的新形状不含该列，重复执行自然 no-op。
-    # 生产库存量库的整库迁移（tasks 三列回填等）属票 10 的 migrate_v14，不在此处。
+    # 票 06 幂等重建（v5→v6）：两本账表从「(dataset, manifest_uid) 一行」重建为
+    # 「dataset UNIQUE 一行」（spec §3.4）。旧形状判据 = manifest_uid 列还在；
+    # 重建后的新形状不含该列，重复执行自然 no-op。
     with engine.begin() as conn:
         for table in ("dataset_stats", "dataset_audits"):
             cols = [r[1] for r in conn.exec_driver_sql(f"PRAGMA table_info({table})")]
@@ -214,12 +213,11 @@ def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
         conn.exec_driver_sql(
             "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY, version INTEGER)"
         )
-        # 幂等迁移（10 号票约定）：v2 = stats/audits 两表；v3 = gpu_samples 表 + runs.pruned 列；
+        # 幂等迁移：v2 = stats/audits 两表；v3 = gpu_samples 表 + runs.pruned 列；
         # v4 = run_sample_errors 表（create_all 已建）；v5 = agent_experiences 表（create_all 已建）；
         # v6 = tasks 三列（dataset/split_uid/format_id）+ 两本账表 dataset UNIQUE 一行制
-        # （旧形状表在上面的 v5→v6 重建中弃档）。存量库的 ALTER 与旧行数据回填属
-        # v1.4 一次性迁移（票 10 的 migrate_v14，spec §3.5），本函数只保证新库/测试库
-        # 结构正确并按当前值刷版本号。
+        # （旧形状表在上面的 v5→v6 重建中弃档）。本函数只保证新库/测试库结构正确
+        # 并按当前值刷版本号。
         conn.exec_driver_sql("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
         if engine.dialect.name == "sqlite":
             cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(runs)")]
