@@ -22,8 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from .autofix import _inherit_review_fingerprint
-from .review import _atomic_write_json
+from .fileops import commit_annotation
 from .validate import IMAGE_EXTS
 
 _logger = logging.getLogger(__name__)
@@ -227,12 +226,8 @@ def rewrite_labels(source_dir: Path, mapping: dict[str, str], backup_dir: Path,
         hit = _apply_label_mapping(data, mapping)
         if not hit:
             continue
-        backup = backup_dir / j.relative_to(source_dir)
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(j, backup)
-        # 确定性改写不改变标注意图：shapes_hash 按改写后内容重算，状态/理由/判定时间不动
-        _inherit_review_fingerprint(data)
-        _atomic_write_json(j, data)
+        # 确定性改写不改变标注意图：备份→shapes_hash 按改写后内容重算→原子写，协议一处守卫
+        commit_annotation(j, data, source_dir=source_dir, backup_dir=backup_dir)
         rewritten.append(j.name)
         shapes += hit
     return {"rewritten": rewritten, "shapes": shapes, "skipped": skipped}

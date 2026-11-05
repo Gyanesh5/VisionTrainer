@@ -18,14 +18,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import os
 import shutil
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from . import drops as drops_lib
+from .fileops import atomic_write_json as _atomic_json
+from .fileops import atomic_write_text as _atomic_text
+from .fileops import link_or_copy
 from .formats import adapter_for
 from .projection import PROJECTION_VERSION, TASK_MODE, project_file
 from .validate import list_images
@@ -68,32 +69,13 @@ def _read_stamp(pool: Path) -> dict | None:
         return None
 
 
-def _atomic_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".stamp-", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(json.dumps(data, ensure_ascii=False, indent=2))
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
 def _link(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    """池内平铺链接：陈旧链接清理后走 link_or_copy（symlink 优先、降级复制留痕）。"""
     if dst.is_symlink() and os.readlink(dst) == str(src):
         return
     if dst.exists() or dst.is_symlink():
         dst.unlink()
-    try:
-        os.symlink(src, dst)
-    except OSError:
-        # symlink 不可用（Windows/跨盘等）→ 复制降级，留痕便于查池体积异常
-        logging.getLogger(__name__).debug("symlink 失败，降级复制：%s → %s", src, dst)
-        shutil.copy2(src, dst)
+    link_or_copy(src, dst)
 
 
 def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
@@ -203,20 +185,6 @@ def _encode_member(source: Path, image: Path, task_type: str, classes: list[str]
     if projected.get("broken"):
         return "", projected.get("drops") or [], True
     return "".join(adapter.encode_image(projected, class_map)), projected.get("drops") or [], False
-
-
-def _atomic_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".lbl-", suffix=".tmp", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
 
 
 def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[str],

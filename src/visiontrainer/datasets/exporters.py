@@ -12,12 +12,12 @@ stdlib 实现（X-AnyLabeling 只作几何分支与格式惯例参考，不进�
 from __future__ import annotations
 
 import json
-import logging
 import shutil
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
+from .fileops import atomic_write_json, atomic_write_text, link_or_copy
 from .formats import adapter_for
 from .projection import TASK_MODE, project_json
 
@@ -70,12 +70,7 @@ def export_dataset(ds_dir: Path, task_type: str, classes: list[str], format_id: 
         if images_mode == "copy":
             shutil.copy2(image, dst)
         else:
-            try:
-                dst.symlink_to(image.resolve())
-            except OSError:
-                # symlink 不可用 → 复制降级，留痕便于查导出体积异常
-                logging.getLogger(__name__).debug("symlink 失败，降级复制：%s → %s", image, dst)
-                shutil.copy2(image, dst)
+            link_or_copy(image.resolve(), dst)
 
     coco_images: dict[str, list[dict]] = {}
     coco_annotations: dict[str, list[dict]] = {}
@@ -225,10 +220,8 @@ def _voc_xml(projected: dict, class_map: dict[str, int], filename: str,
 
 
 def _write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text)          # 导出物同样不半写（复用唯一原子写实现）
 
 
 def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    atomic_write_json(path, data)

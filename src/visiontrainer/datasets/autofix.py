@@ -26,7 +26,8 @@ import shutil
 from pathlib import Path
 
 from .projection import clamp_points
-from .review import _atomic_write_json, shapes_hash
+from .fileops import atomic_write_json, commit_annotation
+from .review_state import shapes_hash
 from .validate import _obb_shape_ok, linestrip_closable, list_images, obb_hull_reorderable
 
 _logger = logging.getLogger(__name__)
@@ -146,23 +147,6 @@ def fix_annotation(data: dict, task_type: str) -> dict[str, int]:
     return fixes
 
 
-def _inherit_review_fingerprint(data: dict) -> None:
-    """审查判定继承：shapes 变了 → vt_review.shapes_hash 按修复后内容重算。
-
-    mtime_ns/size 存写前 stat 本就陈旧无害（ADR 0003 哈希裁决路径）；无 vt_review
-    （未在平台审过）与仅 checked=true（XAL 内标记）都无需动作——后者无指纹概念恒有效。
-    """
-    vt = data.get("vt_review")
-    if vt:
-        vt["shapes_hash"] = shapes_hash(data)
-
-
-def _backup_file(j: Path, source_dir: Path, backup_dir: Path) -> None:
-    dest = backup_dir / j.relative_to(source_dir)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(j, dest)
-
-
 def apply_autofix(source_dir: Path, task_type: str, run_dir: Path, progress=None) -> dict:
     """扫描源目录执行全部可自动修复项（以源目录现状为准，不信任旧报告快照）。
 
@@ -200,9 +184,7 @@ def apply_autofix(source_dir: Path, task_type: str, run_dir: Path, progress=None
         file_fixes = fix_annotation(data, task_type)
         if not file_fixes:
             continue
-        _backup_file(j, source_dir, backup_dir)
-        _inherit_review_fingerprint(data)
-        _atomic_write_json(j, data)
+        commit_annotation(j, data, source_dir=source_dir, backup_dir=backup_dir)
         fixed_files += 1
         for code, n in file_fixes.items():
             fixes[code] = fixes.get(code, 0) + n

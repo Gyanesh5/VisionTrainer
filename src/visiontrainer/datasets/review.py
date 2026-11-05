@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
-import tempfile
 from datetime import datetime
 from pathlib import Path
+
+from .fileops import atomic_write_json
+from .review_state import shapes_hash  # noqa: F401  （再出口：既有消费者不动）
 
 REVIEW_STATES = ("pending", "approved", "rejected", "skipped")
 REVIEW_REASONS = ("漏标", "多标", "框不准", "类别错")  # 驳回理由预设（CVAT quick issue 式）
@@ -31,13 +32,6 @@ SUSP_VALIDATION = 0.6
 SUSP_AUDIT_DUP = 0.7
 SUSP_ANALYSIS_PER_ERROR = 0.05
 SUSP_CAP = 1.0
-
-
-def shapes_hash(data: dict) -> str:
-    """shapes 序列化哈希——权威指纹：只动 checked/vt_review 等元数据不改变它。"""
-    return hashlib.sha256(
-        json.dumps(data.get("shapes") or [], ensure_ascii=False, sort_keys=True).encode()
-    ).hexdigest()
 
 
 def read_state(label_path: Path) -> dict:
@@ -107,23 +101,8 @@ def write_review(label_path: Path, state: str, reason: str = "", note: str = "")
     }
     data["checked"] = state == "approved"  # XAL 官方字段：通过 ⇔ 绿标
     data["vt_review"] = record
-    _atomic_write_json(p, data)
+    atomic_write_json(p, data)
     return record
-
-
-def _atomic_write_json(p: Path, data: dict) -> None:
-    """tempfile+fsync+os.replace（对齐 XAL 保存行为：外部按 mtime 感知可靠，无半截文件）。"""
-    text = json.dumps(data, ensure_ascii=False, indent=2)
-    fd, tmp = tempfile.mkstemp(prefix=".vt_", dir=str(p.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, p)
-    finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
 
 
 # ---------------------------------------------------------------- 可疑度聚合
