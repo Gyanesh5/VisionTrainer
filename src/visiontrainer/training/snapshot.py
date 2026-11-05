@@ -26,6 +26,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from ..datasets.pool import classes_sha
+
 SNAPSHOT_NAME = "run_manifest.json"
 
 
@@ -109,8 +111,7 @@ def build_snapshot(*, run_uid: str, round_no: int, base_model: str, train_args: 
         "split": _split_segment(split),
         "effective": _effective_segment(effective),
         "format": dict(fmt) if fmt else None,
-        "classes": {"list": classes,
-                    "sha256": hashlib.sha256("\n".join(classes).encode("utf-8")).hexdigest()},
+        "classes": {"list": classes, "sha256": classes_sha(classes)},
         "labels": {"sha256": labels_sha, "n_files": len(labels_files)},
     }
 

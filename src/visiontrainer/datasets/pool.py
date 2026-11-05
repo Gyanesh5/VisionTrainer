@@ -34,7 +34,7 @@ _STEM_CONFLICT_HINT = ("同词干的图片只保留一张，再「重新校验�
 
 
 def classes_sha(classes: list[str]) -> str:
-    """类别表哈希（行序敏感）：池版本戳三件之一。"""
+    """类别表哈希（行序敏感）：唯一算法 owner——池版本戳三件之一，运行快照 classes 段同源。"""
     return hashlib.sha256("\n".join(classes).encode("utf-8")).hexdigest()
 
 
