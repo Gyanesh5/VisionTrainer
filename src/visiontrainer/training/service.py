@@ -9,7 +9,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .manager import (DEFAULT_FORMAT_ID, SubprocessHandle, task_inputs)
+from ..datasets.formats import DEFAULT_FORMAT_ID
+from .manager import SubprocessHandle, task_inputs
 from .snapshot import load_snapshot
 from ..datasets import service as ds
 from ..datasets.service import DatasetError

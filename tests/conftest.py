@@ -356,3 +356,14 @@ def _thread_excepthook(args):
 
 
 threading.excepthook = _thread_excepthook
+
+
+def yolo_lines(data: dict, task_type: str, classes: list[str]) -> tuple[list[str], list[dict]]:
+    """测试侧 YOLO 编码组合：project_json → encode_image（生产读者各自组合投影+编码，
+    formats 不再有全局唯一入口函数——架构复审候选 4 死面出清后的测试等价锚）。"""
+    from visiontrainer.datasets.formats import YoloAdapter
+    from visiontrainer.datasets.projection import project_json
+
+    adapter = YoloAdapter()
+    projected = project_json(data, task_type, classes)
+    return adapter.encode_image(projected, adapter.class_encoding(classes)), projected["drops"]

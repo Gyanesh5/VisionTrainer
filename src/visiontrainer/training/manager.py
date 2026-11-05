@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..datasets import service as ds
+from ..datasets.formats import DEFAULT_FORMAT_ID
 from ..datasets import split as split_ent
 from ..datasets.service import DatasetError
 from ..ws import publish_threadsafe
@@ -154,8 +155,6 @@ class CurrentRun:
 
 
 # ---------------------------------------------------------------- 任务输入解析（票 05：三列 → 切分实体 → 实效集）
-
-DEFAULT_FORMAT_ID = "yolo"   # 本票恒 yolo（数据格式绑定训练后端）；格式池与 backend→format 注册表归票 07
 
 
 def dataset_dir_of(name: str) -> tuple[dict, Path]:

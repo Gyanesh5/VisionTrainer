@@ -4,7 +4,8 @@
 同一份投影在适配器手里落成什么字节。
 """
 
-from visiontrainer.datasets.formats import YoloAdapter, write_label, yolo_lines
+from conftest import yolo_lines
+from visiontrainer.datasets.formats import YoloAdapter
 from visiontrainer.datasets.projection import CIRCLE_POLY_POINTS
 
 
@@ -132,5 +133,6 @@ def test_degenerate_circle_dropped():
 def test_negative_writes_empty_file(tmp_path):
     """负样本显式落盘为空 txt（后端按背景图消费），不是不落盘。"""
     path = tmp_path / "labels" / "train" / "a.txt"
-    write_label(path, [])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("", encoding="utf-8")
     assert path.read_text(encoding="utf-8") == ""

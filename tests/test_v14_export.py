@@ -142,10 +142,13 @@ def test_all_scope_skips_excluded(dup_ds, datasets_root):
 # ---------------------------------------------------------------- 支持矩阵 / zip / 丢弃（验收④⑤⑥）
 
 def test_matrix_and_zip(dup_ds, datasets_root):
-    from visiontrainer.datasets import exporters
+    from visiontrainer.datasets import formats
 
-    assert exporters.supports("voc", "detect") and not exporters.supports("voc", "segment")
-    assert exporters.supports("coco", "pose") and exporters.supports("yolo", "classify")
+    assert formats.supports("voc", "detect") and not formats.supports("voc", "segment")
+    assert formats.supports("coco", "pose") and formats.supports("yolo", "classify")
+    # 支持矩阵单源（架构复审候选 4）：注册表推导，UI 置灰与导出校验同吃一份
+    assert formats.SUPPORTED == {"yolo": None, "coco": {"detect", "segment", "obb", "pose"},
+                                 "voc": {"detect"}}
     # detect 数据集导 VOC 合法；组合校验的反例在 test_voc_export_roundtrip_detect_only 尾部
     r = svc.export_annotations(dup_ds, "yolo", scope="all", zip_package=True)
     assert Path(r["zip"]).is_file() and Path(r["path"]).is_dir()  # zip 与原目录并存
@@ -191,3 +194,22 @@ def test_split_export_dirname_carries_split_uid(dup_ds, datasets_root):
     assert Path(r["path"]).name.endswith(f"-{split['uid']}")
     r2 = svc.export_annotations(dup_ds, "yolo", scope="all")   # 全集无 uid 段
     assert "-" + split["uid"] not in Path(r2["path"]).name
+
+
+def test_export_adapter_image_dirs_and_split_labels(dup_ds, datasets_root):
+    """导出协议落位锁：voc 恒 JPEGImages（全集/切分归一，原全集落 images/ 是怪癖）；
+    yolo 按切分 labels/<side>/<stem>.txt。"""
+    from visiontrainer.datasets.formats import adapter_for
+
+    assert adapter_for("voc").image_dir("") == "JPEGImages"
+    assert adapter_for("voc").image_dir("train") == "JPEGImages"
+    assert adapter_for("yolo").image_dir("") == "images"
+    assert adapter_for("yolo").image_dir("val") == "images/val"
+
+    split = svc.latest_split(dup_ds)
+    r = svc.export_annotations(dup_ds, "yolo", scope="split", split_uid=split["uid"])
+    out = Path(r["path"])
+    assert (out / "labels" / "train").is_dir() and (out / "labels" / "val").is_dir()
+    assert (out / "classes.txt").read_text().splitlines() == ["car", "person"]
+    rv = svc.export_annotations(dup_ds, "voc", scope="all")
+    assert (Path(rv["path"]) / "JPEGImages").is_dir()

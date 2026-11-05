@@ -22,6 +22,7 @@ from nicegui import app, ui
 
 from .. import thumbs
 from .. import ws
+from ..datasets import formats as ds_formats
 from .. import progress as ops
 from ..config import load_config, update_config
 from ..datasets import service as ds
@@ -83,11 +84,10 @@ SOURCE_MODE_HINT = {
 }
 TRANSFER_ZH = {"copy": "拷贝", "move": "移动"}
 # 导出标注对话框的三维（spec §2.1：格式 × 范围 × 图片；按 supports × task_type 置灰）
+# 支持矩阵与文案由 formats 单源（架构复审候选 4），UI 只消费
 EXPORT_FORMATS: dict[str, tuple[str, set[str] | None]] = {
-    "yolo": ("YOLO", None),                 # None = 全任务类型可选
-    "coco": ("COCO JSON", {"detect", "segment", "obb", "pose"}),
-    "voc": ("Pascal VOC XML", {"detect"}),
-}
+    fid: (ds_formats.FORMAT_LABELS[fid], ds_formats.SUPPORTED[fid])
+    for fid in ds_formats.FORMAT_LABELS}
 EXPORT_SCOPES = {"all": "全集", "split": "按切分（train/val 分目录）"}
 EXPORT_IMAGES = {"link": "符号链接（省盘）", "copy": "复制（可移机）"}
 

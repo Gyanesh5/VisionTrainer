@@ -6,7 +6,7 @@ v1.4 票 04：加图 `add_images`、类别表四动作（追加/改名/重排/�
 `reconcile_on_open` 落地；改名是平台第三条标注写路径（ADR 0009，备份 + 原子写 + 审查继承）。
 """
 
-from .formats import YoloAdapter, adapter_for, yolo_lines
+from .formats import YoloAdapter, adapter_for
 from .projection import conserved, project_file, project_json, shape_matches_task
 from .service import (
     DatasetError,
@@ -48,5 +48,4 @@ __all__ = [
     "rollback_classes",
     "shape_matches_task",
     "validate_dataset",
-    "yolo_lines",
 ]

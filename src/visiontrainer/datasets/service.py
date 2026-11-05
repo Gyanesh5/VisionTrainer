@@ -1635,15 +1635,17 @@ def export_annotations(name: str, format_id: str, scope: str = "all",
     - scope="split"：所选切分（split_uid 缺省取最近）的**实效口径**——排除与缺失被剔，
       输出 train/val 两套；split_uid="" 同全集；
     - images="link"|"copy"；zip=True 原目录之外再落一份压缩包。
-    支持矩阵按 exporters.SUPPORTED 置灰口径校验（VOC 仅 detect）。丢弃只提示不阻断。
+    支持矩阵按 formats.SUPPORTED 置灰口径校验（VOC 仅 detect）。丢弃只提示不阻断。
     """
     from . import exporters
 
     meta, ds_dir = _managed_dataset(name, root, "导出标注")
     task_type = meta["task_type"]
     classes = read_classes(ds_dir)
-    if not exporters.supports(format_id, task_type):
-        raise DatasetError("invalid_args", exporters.unsupported_reason(format_id, task_type))
+    from .formats import supports, unsupported_reason
+
+    if not supports(format_id, task_type):
+        raise DatasetError("invalid_args", unsupported_reason(format_id, task_type))
     if images not in ("link", "copy"):
         raise DatasetError("invalid_args", f"images 只支持 link|copy：{images}")
 

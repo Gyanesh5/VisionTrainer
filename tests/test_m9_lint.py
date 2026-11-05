@@ -13,7 +13,7 @@ from conftest import build_dataset
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.datasets.audit import compute_audit
-from visiontrainer.datasets.formats import yolo_lines
+from conftest import yolo_lines
 from visiontrainer.datasets.stats import build_stats
 from visiontrainer.datasets.validate import scan_entries, validate_dataset
 from visiontrainer.datasets.service import DatasetError

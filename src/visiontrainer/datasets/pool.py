@@ -27,11 +27,10 @@ from . import drops as drops_lib
 from .fileops import atomic_write_json as _atomic_json
 from .fileops import atomic_write_text as _atomic_text
 from .fileops import link_or_copy
-from .formats import adapter_for
+from .formats import DEFAULT_FORMAT_ID, adapter_for
 from .projection import PROJECTION_VERSION, TASK_MODE, project_file
 from .validate import list_images
 
-DEFAULT_FORMAT_ID = "yolo"   # backend_id → format_id 当前仅 ultralytics → yolo（spec §3.3）
 _STEM_CONFLICT_HINT = ("同词干的图片只保留一张，再「重新校验」")
 
 
@@ -95,6 +94,8 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
     Raises: ValueError——词干冲突、标注损坏、未确认投影丢弃、未注册格式。
     """
     adapter = adapter_for(format_id)          # 未注册格式 KeyError → 调用方转译
+    if not hasattr(adapter, "encode_image"):
+        raise ValueError(f"{format_id} 不是训练入口格式（无 encode_image 协议）")
     pool = pool_dir(ds_dir, format_id)
     stamps = {"format_id": format_id, "converter_version": adapter.converter_version,
               "projection_version": PROJECTION_VERSION, "classes_sha": classes_sha(classes),
@@ -127,7 +128,8 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
         _link(image, images / image.name)     # 平铺链接：重建补齐、未变复用（幂等）
         if image.name not in effective:
             continue                          # ③只对实效成员做内容比对（池与切分解耦）
-        expected, drops, broken = _encode_member(source, image, task_type, classes, class_map)
+        expected, drops, broken = _encode_member(source, image, task_type, classes,
+                                                 class_map, adapter)
         if broken:
             raise ValueError(f"{image.name} 的标注无法投影（坏 JSON / 缺画布尺寸 / 坏坐标）——"
                              "先处理校验页红灯再训")
@@ -168,14 +170,13 @@ def prepare_pool(ds_dir: Path, task_type: str, classes: list[str],
 
 
 def _encode_member(source: Path, image: Path, task_type: str, classes: list[str],
-                   class_map: dict[str, int]) -> tuple[str, list[dict], bool]:
+                   class_map: dict[str, int], adapter) -> tuple[str, list[dict], bool]:
     """真源 JSON → 期望的池标签文本。返回 (expected, drops, broken)；负样本 = 空文本。
 
     判据单一口径（票 02）：投影只走 `project_file`——坏 JSON / 缺尺寸 / 坏坐标
     全在它的 broken 里，池不自设判据（旧版 imageWidth 必须 int，与校验层收 float
-    分叉，校验绿灯却拒训）。
+    分叉，校验绿灯却拒训）。适配器由 prepare_pool 按 format_id 注入，不再硬编码 yolo。
     """
-    adapter = adapter_for("yolo")
     lbl = image.with_suffix(".json")
     if not lbl.is_file():
         lbl = next(iter(sorted(source.glob(f"{image.stem}.json"))), None)

@@ -41,7 +41,7 @@ from pathlib import Path
 
 import pytest
 
-from visiontrainer.datasets.formats import yolo_lines
+from conftest import yolo_lines
 from visiontrainer.datasets.projection import CIRCLE_POLY_POINTS, EQUIV, conserved, project_json
 
 # 参照侧（同目录的冻结副本）按路径加载：不依赖包的 import 形态，也不给 pytest 收集面添模块
