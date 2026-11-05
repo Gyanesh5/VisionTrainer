@@ -99,63 +99,6 @@ def _split_fixable(problems: list[dict]) -> tuple[list[dict], list[dict]]:
     return fix, manual
 
 
-def _validation_of(entry: dict) -> dict:
-    """校验摘要：v1.4 读 dataset.json 的 validation_summary，未迁移账本回退 last_validation。"""
-    return entry.get("validation_summary") or entry.get("last_validation") or {}
-
-
-def _drop_count(vs: dict) -> int:
-    """投影/转换丢弃条数：v1.4 摘要里 drops 是 {count, signature, acked}，旧账本是列表或整数。"""
-    drops = vs.get("drops")
-    if isinstance(drops, dict):
-        return int(drops.get("count", 0) or 0)
-    if isinstance(drops, (list, tuple)):
-        return len(drops)
-    return drops if isinstance(drops, int) and not isinstance(drops, bool) else 0
-
-
-def _drops_pending_ack(meta: dict) -> bool:
-    """丢弃确认门是否待确认（spec §3.1：count>0 ∧ signature≠acked 现算，不再持久化字段）。"""
-    vs = _validation_of(meta)
-    drops = vs.get("drops")
-    if isinstance(drops, dict):
-        return _drop_count(vs) > 0 and drops.get("signature") != drops.get("acked")
-    if drops is not None:
-        return _drop_count(vs) > 0
-    return bool(meta.get("drops_pending_ack"))
-
-
-def _excluded_entries(meta: dict) -> list[dict]:
-    """排除在册条目归一：v1.4 的 excluded.json 是文件名键字典，旧账本是条目列表。"""
-    raw = meta.get("excluded")
-    if isinstance(raw, dict):
-        files = raw.get("files") if isinstance(raw.get("files"), dict) else raw
-        return [{"file": f, "at": (v or {}).get("at"), "reason": (v or {}).get("reason", "")}
-                for f, v in sorted(files.items())]
-    return list(raw or [])
-
-
-def _source_dir_of(meta: dict) -> Path | None:
-    """托管数据集真源目录（spec §3.1 布局 `<数据集根>/<名>/source`）；外部数据集无真源。"""
-    if meta.get("form") != "managed":
-        return None
-    return Path(ds.get_datasets_root()) / meta["name"] / "source"
-
-
-def _source_fingerprint_state(meta: dict) -> tuple[bool | None, str]:
-    """真源指纹对账状态（票 04 唯一新旧判据）：返回 (账本是否落后, 账本指纹)。
-
-    账本落后＝`source/` 当前 `source_fingerprint` ≠ `validation_summary.source_fingerprint`
-    （改标/加图/删图都算）。未建账（无真源、无指纹）返回 None——不承重的账不猜，
-    列表页的「可能有变更」是目录 mtime 粗判，与此处无关（spec §2.1）。
-    """
-    src = _source_dir_of(meta)
-    stored = str(_validation_of(meta).get("source_fingerprint") or "")
-    if src is None or not src.is_dir() or not stored:
-        return None, stored
-    return ds.source_fingerprint(src) != stored, stored
-
-
 def _error_payload(exc: ds.DatasetError) -> object:
     """取 DatasetError 的结构化载荷（表外类别清单 / Run 引用数）；服务层未带载荷时为 None。"""
     return getattr(exc, "payload", None) or getattr(exc, "detail", None)
@@ -4003,8 +3946,8 @@ document.addEventListener('scroll', function(e){
                 state["audit_sel"] = set()
                 state["ws"] = {}  # 折叠工作区注册表：key → {exp, box, built, meta}
                 task_zh = TASK_TYPE_ZH.get(meta["task_type"], meta["task_type"])
-                ok = _validation_of(meta).get("ok")
-                fp_changed = _source_fingerprint_state(meta)[0]
+                ok = (meta.get("validation_summary") or {}).get("ok")
+                fp_changed = meta.get("fingerprint_stale")
                 if meta["form"] == "managed" and fp_changed:
                     # 琥珀徽章只是显示，对账才是动作：不等用户点任何同步按钮（票 04 契约 3）
                     asyncio.get_running_loop().create_task(_auto_reconcile(name))
@@ -4019,7 +3962,7 @@ document.addEventListener('scroll', function(e){
                             if ok is not None:
                                 ui.badge("通过" if ok else "有问题").props(
                                     f"color={'green' if ok else 'red'} outline").style("font-size:10px")
-                            if _source_fingerprint_state(meta)[0]:
+                            if meta.get("fingerprint_stale"):
                                 ui.badge("账本落后真源").props("color=amber outline").style(
                                     "font-size:10px").tooltip(
                                     "source/ 当前指纹与上次校验记录的指纹不一致——"
@@ -4118,7 +4061,7 @@ document.addEventListener('scroll', function(e){
                     _workspace("audit", "health_and_safety", "体检", meta)
                     _workspace("review", "new_label", "标注审查", meta)
                     _workspace("exclude", "visibility_off",
-                               f"排除与恢复（{len(_excluded_entries(meta))}）", meta)
+                               f"排除与恢复（{len(meta.get('excluded') or [])}）", meta)
                     _workspace("tiling", "grid_view", "切片", meta)
                 if state.get("ws_open"):
                     _ensure_ws(state["ws_open"])
@@ -4144,7 +4087,7 @@ document.addEventListener('scroll', function(e){
 
             def _status_cards(meta: dict) -> None:
                 """来源 / 类别表 / 校验·画像 / 体检四张状态卡。"""
-                vs = _validation_of(meta)
+                vs = meta.get("validation_summary") or {}
                 origin = meta.get("origin") or {}
                 n_img = vs.get("total_images")
                 mode_zh = SOURCE_MODE_ZH.get(origin.get("mode"), origin.get("mode") or "未记录")
@@ -4166,7 +4109,7 @@ document.addEventListener('scroll', function(e){
                                if vs.get("negatives", vs.get("background")) is not None else "")
                             + (f" · {n_prob} 项问题" if n_prob else "")
                             + (f" · 丢弃 {(vs.get('drops') or {}).get('count', 0)} 待确认"
-                               if _drops_pending_ack(meta) else ""))
+                               if meta.get("drops_pending_ack") else ""))
                 if vs.get("checked_at"):
                     val_line += f" · {_fmt_ts(vs['checked_at'])}"
                 _status_card("validation", "fact_check", "校验·画像",
@@ -4199,7 +4142,7 @@ document.addEventListener('scroll', function(e){
             def _render_ws_source(meta: dict) -> None:
                 """来源工作区：出生来源与平台拥有的真源目录落点（spec §3.1）。"""
                 origin = meta.get("origin") or {}
-                src = _source_dir_of(meta)
+                src = Path(meta["source_dir"]) if meta.get("source_dir") else None
                 _meta_row("来源", SOURCE_MODE_ZH.get(origin.get("mode"),
                                                      origin.get("mode") or "未记录"))
                 if origin.get("mode") != "empty":
@@ -4210,7 +4153,8 @@ document.addEventListener('scroll', function(e){
                 if origin.get("at"):
                     _meta_row("出生时间", _fmt_ts(origin["at"]))
                 if src is not None:
-                    changed, stored = _source_fingerprint_state(meta)
+                    changed = meta.get("fingerprint_stale")
+                    stored = str((meta.get("validation_summary") or {}).get("source_fingerprint") or "")
                     _meta_row("真源目录", str(src), str(src) if src.is_dir() else None)
                     _meta_row("变动", {
                         True: "当前指纹与账本指纹不一致——真源有未入账的改标/加图/删图，"
@@ -4610,7 +4554,7 @@ document.addEventListener('scroll', function(e){
 
             def _render_ws_exclude(meta: dict) -> None:
                 """排除与恢复工作区：排除在册条目直连恢复（排除日志是数据集级文件状态）。"""
-                excluded = _excluded_entries(meta)
+                excluded = meta.get("excluded") or []
                 if not excluded:
                     ui.label("没有被排除的文件").classes("text-xs opacity-40")
                     return
@@ -4719,20 +4663,25 @@ document.addEventListener('scroll', function(e){
                                 ui.label(f"… 其余 {len(items) - 20} 张省略").classes("text-[11px] opacity-40")
 
             def _render_validation(meta: dict) -> None:
-                """校验账目：摘要 → 需人工问题（含修复指引）→ 一键修复 → 丢弃确认门。"""
-                lv = _validation_of(meta)
-                if lv:
-                    problems = lv.get("problems")
+                """校验账目：摘要 → 需人工问题（含修复指引）→ 一键修复 → 丢弃确认门。
+
+                摘要读 validation_summary，逐条问题读组合视图的 last_validation
+                （校验报告全文，服务层现取）——v1.4 起「需人工 N 项」照常渲染。
+                """
+                vs = meta.get("validation_summary") or {}
+                report = meta.get("last_validation") or {}
+                if vs or report:
+                    problems = report.get("problems")
                     fixable, manual = _split_fixable(problems or [])
-                    neg = lv.get("negatives", lv.get("background"))
-                    seg = [f"{_fmt_ts(lv.get('checked_at'))}", f"共 {lv.get('total_images', '—')} 图"]
-                    if lv.get("labeled") is not None:
-                        seg.append(f"已标 {lv['labeled']}")
+                    neg = vs.get("negatives", report.get("background"))
+                    seg = [f"{_fmt_ts(vs.get('checked_at') or report.get('checked_at'))}",
+                           f"共 {vs.get('total_images', report.get('total_images', '—'))} 图"]
+                    if report.get("labeled") is not None:
+                        seg.append(f"已标 {report['labeled']}")
                     if neg is not None:
                         seg.append(f"负样本 {neg}")
                     if problems is None:
-                        # v1.4 摘要只留计数，逐条明细在 validation_report.json（票 05 换读取口）
-                        seg.append(f"丢弃 {(lv.get('drops') or {}).get('count', 0)} 条")
+                        seg.append(f"丢弃 {(vs.get('drops') or {}).get('count', 0)} 条")
                     else:
                         seg.append((f"需人工 {len(manual)} 项" if manual else "") + (
                             f" · 可自动修复 {len(fixable)} 项" if fixable else "") or "无问题")
@@ -4797,9 +4746,8 @@ document.addEventListener('scroll', function(e){
                                               on_click=autofix_dlg.open).props(
                                         "dense unelevated color=warning")
                 # M9 确认门：转换丢弃未确认 → 横幅 + 确认按钮（确认前提交训练被拒）
-                if _drops_pending_ack(meta):
-                    n_drop = _drop_count(lv) or sum(
-                        1 for p in lv.get("problems") or [] if p.get("code") == "drop")
+                if meta.get("drops_pending_ack"):
+                    n_drop = (vs.get("drops") or {}).get("count", 0)
 
                     async def _ack_drops(ds_name: str) -> None:
                         try:
@@ -6153,9 +6101,10 @@ document.addEventListener('scroll', function(e){
                                          src or None, c_transfer.value or "copy", None, op.progress)
                         op.finish()
                         create_dialog.close()
-                        vs = _validation_of(meta)
-                        n_prob = len(vs["problems"]) if isinstance(vs.get("problems"), list) else 0
-                        n_drop = _drop_count(vs)
+                        vs = meta.get("validation_summary") or {}
+                        report = meta.get("last_validation") or {}
+                        n_prob = len(report["problems"]) if isinstance(report.get("problems"), list) else 0
+                        n_drop = (vs.get("drops") or {}).get("count", 0)
                         ui.notify(f"已创建 {name}：{vs.get('total_images', '?')} 图 {len(vals)} 类"
                                   + (f" · 问题 {n_prob} 项" if n_prob else "")
                                   + (f" · 丢弃 {n_drop} 条待确认" if n_drop else "")
@@ -6403,7 +6352,7 @@ document.addEventListener('scroll', function(e){
 
             def open_source_in_xal(meta: dict) -> None:
                 """在 X-AnyLabeling 中打开整个真源目录：首图触发 XAL 的目录级导入（单实例协议）。"""
-                src = _source_dir_of(meta)
+                src = Path(meta["source_dir"]) if meta.get("source_dir") else None
                 if src is None:
                     ui.notify("外部数据集没有真源目录（平台只读）", type="warning")
                     return

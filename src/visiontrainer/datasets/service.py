@@ -189,8 +189,9 @@ def _may_have_changes(meta: dict, ds_dir: Path) -> bool:
 
 def _compose_managed(meta: dict, ds_dir: Path) -> dict:
     """托管数据集的读时组合视图：classes / source_dir / excluded / last_validation /
-    drops_pending_ack 均现取于真源文件（classes.txt、source/、excluded.json、
-    validation_report.json），dataset.json 不再持有这些字段。"""
+    drops_pending_ack / fingerprint_stale 均现取于真源文件（classes.txt、source/、
+    excluded.json、validation_report.json），dataset.json 不再持有这些字段。
+    UI 只渲染本视图，不再自带一套读口径（架构复审候选 2）。"""
     out = dict(meta)
     source = _source_dir(ds_dir)
     out["classes"] = read_classes(ds_dir)
@@ -200,6 +201,11 @@ def _compose_managed(meta: dict, ds_dir: Path) -> dict:
     report_path = ds_dir / "validation_report.json"
     out["last_validation"] = _read_meta(report_path) if report_path.is_file() else None
     out["drops_pending_ack"] = drops_lib.pending(meta.get("validation_summary") or {})
+    # 真源指纹对账（票 04 唯一判据）：账本落后 = source/ 当前指纹 ≠ 账本指纹；
+    # 未建账（无真源/无指纹）None——不承重的账不猜
+    stored = str((meta.get("validation_summary") or {}).get("source_fingerprint") or "")
+    out["fingerprint_stale"] = (source_fingerprint(source) != stored
+                                if source.is_dir() and stored else None)
     return out
 
 
