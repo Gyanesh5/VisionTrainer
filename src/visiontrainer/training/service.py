@@ -647,6 +647,61 @@ def _source_images(ds_dir: Path, names: list[str]) -> list[str]:
     return out
 
 
+def _replay_frozen_labels(run, snap: dict, ds_dir: Path) -> Path | None:
+    """从真源回放实效 val 标签，冻结进 `<run_dir>/labels_frozen/val/`（一次性，幂等短路）。
+
+    救治面：labels_frozen 特性（2026-10-31）之前创建、且迁移时旧派生树已不在的旧 Run——
+    启动时点的 GT 物理不可复原，按当前真源现投影是唯一近似（真源自 Run 后未改时严格
+    等价）。口径落 `labels_frozen/source.json` 透明可查；broken 拒绝（错账不如不分析）；
+    classify 无标签文件，不回放（维持 409，GT 归属本就不在 txt 上）。
+    """
+    from ..datasets.formats import adapter_for
+    from ..datasets.pool import encode_label_text
+    from ..datasets.projection import PROJECTION_VERSION
+
+    frozen_val = Path(run.run_dir) / "labels_frozen" / "val"
+    if frozen_val.is_dir():
+        return frozen_val                    # 已有冻结副本（或已回放过）——恒读冻结
+    val_names = ((snap.get("effective") or {}).get("val")) or []
+    if not val_names:
+        return None
+    try:
+        task_type = json.loads((ds_dir / "dataset.json").read_text(
+            encoding="utf-8")).get("task_type")
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        task_type = None
+    classes = ((snap.get("classes") or {}).get("list")) or []
+    class_map = ((snap.get("format") or {}).get("class_map")) \
+        or {c: i for i, c in enumerate(classes)}
+    if not (task_type and classes) or task_type == "classify":
+        return None
+    source = ds_dir / "source"
+    texts: dict[str, str] = {}
+    for name in val_names:
+        if not (source / name).is_file():
+            continue          # 真源已无此图：推理行会记 error，不参与对账，不造负样本账
+        text, broken = encode_label_text(source, Path(name).name, task_type, classes, class_map)
+        if broken:
+            raise _http_err("state_conflict",
+                            f"{name} 的标注无法投影（坏 JSON / 缺画布尺寸 / 坏坐标），无法回放 GT"
+                            "——先到数据集页「重新校验」处理后再分析", 409)
+        texts[f"{Path(name).stem}.txt"] = text
+    if not texts:
+        return None
+    frozen_val.mkdir(parents=True, exist_ok=True)
+    for fname, text in texts.items():
+        (frozen_val / fname).write_text(text, encoding="utf-8")
+    provenance = {"origin": "replayed_from_source",
+                  "at": datetime.now().isoformat(timespec="seconds"),
+                  "projection_version": PROJECTION_VERSION,
+                  "converter_version": adapter_for(DEFAULT_FORMAT_ID).converter_version,
+                  "note": "labels_frozen 特性（2026-10-31）前的旧 Run，GT 按当前真源回放"
+                          "（名单 = 运行快照 effective.val）"}
+    (frozen_val.parent / "source.json").write_text(
+        json.dumps(provenance, ensure_ascii=False, indent=2), encoding="utf-8")
+    return frozen_val
+
+
 def _analysis_payload(manager, run) -> dict:
     """错误分析的输入包：一切从运行快照取（票 05 起 GT 名单 = 快照 `effective.val`）。"""
     snap = load_snapshot(run.run_dir) if run.run_dir else None
@@ -659,14 +714,14 @@ def _analysis_payload(manager, run) -> dict:
         raise _http_err("state_conflict", "best.pt 不在（训练未产出权重），无法分析", 409)
     ds_dir = Path((snap or {}).get("dataset_dir") or "")
     val_images = _source_images(ds_dir, val_names)
-    # GT 口径：Run 启动时冻结的 val 标签副本（labels_frozen）——此后数据集改标/重建派生
-    # 不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；无副本时回退当轮派生目录
-    frozen_val = Path(run.run_dir) / "labels_frozen" / "val" if run.run_dir else None
-    data_yaml = (snap or {}).get("data_yaml")
-    derived_labels = Path(data_yaml).parent / "labels" / "val" if data_yaml else None
-    labels_dir = frozen_val if frozen_val and frozen_val.is_dir() else derived_labels
+    # GT 口径（spec §2.2）：恒读 Run 启动时冻结的 val 标签副本（labels_frozen）——此后
+    # 数据集改标/池重建不影响旧 Run 对账；迁移已为旧树在的 Run 补冻结，旧树也不在的
+    # （labels_frozen 特性前）首次分析时从真源回放冻结，不留旧派生目录回退分支
+    labels_dir = _replay_frozen_labels(run, snap or {}, ds_dir)
     if not labels_dir or not labels_dir.is_dir():
-        raise _http_err("state_conflict", f"派生 val 标签目录缺失：{labels_dir}", 409)
+        raise _http_err("state_conflict",
+                        "Run 缺 val 标签冻结副本，且无法从真源回放（旧派生已随 v1.4 迁移删除）"
+                        "——重跑训练后再分析", 409)
     classes = ((snap or {}).get("classes") or {}).get("list") or []
     if not classes:
         raise _http_err("state_conflict", "快照缺类别表，无法分析", 409)

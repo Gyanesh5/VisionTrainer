@@ -10,12 +10,16 @@ CLI：`python -m visiontrainer.migrate_v14 --dry-run|--apply`（平台 venv 手�
              瘦身形态；excluded 搬 `<ds>/excluded.json`（同名取最早 at）。
   孤儿集     circle-mix-800 直接删除（唯一豁免回收区语义）。
   切分转制   旧 derived/<uid>/split_manifest.json → splits/<new_uid>/split.json（内容寻址），
-             同划分去重；memo 记旧 uid 溯源；active 版本成为「最近切分」；旧树删除。
+             同划分去重；memo 记旧 uid 溯源；active 版本成为「最近切分」。
   tile2x2    dataset.json.tiling.groups 由 `_r{r}c{c}` 反推回填，任一瓦片无法映射即中止。
   库改写     schema 5→6；tasks 三列回填（dataset/split_uid/format_id）+ 删旧列；
              两本账表重建弃档（init_db 既有逻辑）。
   快照改写   每个 run_manifest.json 就地补 split/effective/format 三段（uid 换新、
-             实效集按当时名单现算、class_map 按 classes 行序）。
+             实效集按当时名单现算、class_map 按 classes 行序）；无 labels_frozen 副本的
+             旧 Run（特性 2026-10-31 前创建）趁旧树还在，按旧快照 val 名单从旧树
+             labels/val 补冻结（错误分析 GT 恒读冻结副本，删树后无处可读）。
+  旧树删除   快照改写与补冻结完成后的收尾步：各集 derived/ 整树删除（池按需重建）——
+             挪到最后是为了补冻结还能读到旧树。
 
 幂等：每集 `.migrated-v14` 标记，中断重跑跳过已完成集；库与快照改写幂等
 （schema 版本 / 列存在性 / 快照新键判断）。回退：恢复 DB 备份 + 反向 rename（手工，
@@ -277,12 +281,9 @@ def migrate_dataset(ds_dir: Path, actions: list[str], apply: bool) -> dict:
         _write_json(ds_dir / "dataset.json", new_meta)
         _write_json(marker, {"migrated_at": now, "old_uids": sorted(uid_map),
                              "new_uids": sorted(seen_new)})
-        # ⑦ 旧树删除（池按需重建；以 format_id 名与 8 位 uid 名区分新旧）
-        derived = ds_dir / "derived"
-        if derived.is_dir():
-            shutil.rmtree(derived)
+        # ⑦ 旧树删除挪到编排末尾（补冻结后）：见 _cleanup_derived
     if manifests:
-        actions.append(f"[{name}] dataset.json 瘦身 + 旧 derived/ 树删除 + .migrated-v14 标记")
+        actions.append(f"[{name}] dataset.json 瘦身 + .migrated-v14 标记（旧树收尾统一删）")
     return {"name": name, "uid_map": uid_map, "skipped": False,
             "classes": classes, "source": source, "entities": entities,
             "excluded": entries}
@@ -375,6 +376,65 @@ def _migrate_db(db: Path, root: Path, uid_maps: dict[str, dict[str, str]],
     con.close()
 
 
+def _freeze_legacy_val(run_dir: Path, snap: dict, ds_dir: Path,
+                       actions: list[str], apply: bool) -> None:
+    """补冻结：无 labels_frozen 副本的旧 Run，按旧快照 val 名单从旧树 labels/val 拷冻结。
+
+    labels_frozen 特性（2026-10-31）前创建的旧 Run 没有冻结副本，错误分析 GT 恒读
+    冻结副本（spec §2.2）——旧树一删就无处可读，迁移承诺的「旧 Run 可错误分析」破灭。
+    趁树还在就地补：val 名单取旧键 split_manifest.val（重跑补漏时旧键已改写，回退
+    新键 effective.val）；旧 uid 取 split_manifest.uid 或 data_yaml 路径段（data_yaml
+    迁移不改写，恒指向旧树）。既有冻结副本不动（spec：保持不动）。
+    """
+    frozen_val = run_dir / "labels_frozen" / "val"
+    if frozen_val.is_dir() and any(frozen_val.iterdir()):
+        return
+    val_names = [Path(p).name for p in (snap.get("split_manifest") or {}).get("val") or []] \
+        or list((snap.get("effective") or {}).get("val") or [])
+    if not val_names:
+        return                              # 无名单（外部集/更旧快照）——与快照跳过同口径
+    old_uid = (snap.get("split_manifest") or {}).get("uid") \
+        or Path(snap.get("data_yaml") or "").parent.name
+    legacy = ds_dir / "derived" / str(old_uid) / "labels" / "val"
+    if not legacy.is_dir():
+        return                              # 旧树无 val 标签（classify/树已删/dry-run 缺账）
+    copied = 0
+    for name in val_names:
+        src = legacy / f"{Path(name).stem}.txt"
+        if not src.is_file():
+            continue                        # 旧树本就没有（负样本/未派生）——维持负样本账
+        if apply:
+            frozen_val.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, frozen_val / src.name)
+        copied += 1
+    if copied and apply:
+        _write_json(run_dir / "labels_frozen" / "source.json",
+                    {"origin": "migrated_v14_legacy", "old_uid": str(old_uid),
+                     "at": datetime.now().isoformat(timespec="seconds"),
+                     "note": "labels_frozen 特性（2026-10-31）前的旧 Run，迁移删旧树前"
+                             "从旧派生树 labels/val 补冻结"})
+    if copied:
+        actions.append(f"[freeze {run_dir.name}] 旧树 val 标签 {copied} 份补冻结"
+                       f"（derived/{old_uid} → labels_frozen/val）")
+
+
+def _cleanup_derived(root: Path, actions: list[str], apply: bool) -> None:
+    """收尾：各已迁移集的旧 derived/ 整树删除（池按需重建）。
+
+    幂等：树不在即无操作。挂在 `.migrated-v14` 标记上而不是前次返回值——apply 中断
+    在「补冻结完成、删树前」时重跑，前面的步骤按标记跳过，这里仍能收尾。
+    """
+    if not root.is_dir():
+        return
+    for ds_dir in sorted(root.iterdir()):
+        if not (ds_dir.is_dir() and (ds_dir / ".migrated-v14").is_file()
+                and (ds_dir / "derived").is_dir()):
+            continue
+        if apply:
+            shutil.rmtree(ds_dir / "derived")
+        actions.append(f"[{ds_dir.name}] 旧 derived/ 树删除（补冻结后收尾；池按需重建）")
+
+
 def _migrate_snapshots(runs_root: Path, uid_maps: dict[str, dict[str, str]],
                        entities_map: dict[str, dict[str, dict]],
                        excluded_map: dict[str, set],
@@ -387,6 +447,7 @@ def _migrate_snapshots(runs_root: Path, uid_maps: dict[str, dict[str, str]],
     （uid=名单哈希、params 照搬快照、created_at 用快照冻结时间、memo 记回放溯源），
     该 Run 因此仍可续训/错误分析（结果面保留）；
     ③连名单都空（外部集/更旧快照）→ 跳过并说明。
+    另：无冻结副本的旧 Run 先补冻结（`_freeze_legacy_val`，删树前唯一窗口）。
     dry-run 下真源尚未入位（source/ 不存在）：实效按「全员在场 − 排除在册」预览并注明。
     """
     if not runs_root.is_dir():
@@ -397,8 +458,11 @@ def _migrate_snapshots(runs_root: Path, uid_maps: dict[str, dict[str, str]],
             if not snap_path.is_file():
                 continue
             snap = _read_json(snap_path)
+            ds_dir_for_freeze = Path(snap.get("dataset_dir") or "")
+            if ds_dir_for_freeze.is_dir():
+                _freeze_legacy_val(run_dir, snap, ds_dir_for_freeze, actions, apply)
             if "format" in snap and "split_manifest" not in snap:
-                continue                    # 已是新格式（幂等）
+                continue                    # 已是新格式（幂等；补冻结独立于快照改写先行）
             ds_dir = Path(snap.get("dataset_dir") or "")
             ds_name = ds_dir.name
             sm = snap.get("split_manifest") or {}
@@ -494,9 +558,11 @@ def _rollback_steps(db: Path, root: Path) -> list[str]:
         "手工回退步骤（无自动 --rollback）：",
         f"  1. 停 8600；恢复库备份：cp {db}.bak-<ts> {db}",
         f"  2. 反向 rename：对每集 mv <root>/<名>/source → 原真源目录"
-        f"（原路径见各集 dataset.json origin.path 的迁移前备份）",
-        "  3. 删除各集 splits/ excluded.json .migrated-v14；dataset.json 无法自动还原——",
-        "     依赖第 1 步的库备份与 exports 之外的旧账副本（迁移前建议整集 tar 备份）",
+        "（原路径见各集 dataset.json origin.path 的迁移前备份）",
+        "  3. 删除各集 splits/ excluded.json .migrated-v14，及各 Run 的"
+        "labels_frozen/（若为补冻结/回放产物——source.json 记了来源）；"
+        "dataset.json 无法自动还原——依赖第 1 步的库备份与 exports 之外的旧账副本"
+        "（迁移前建议整集 tar 备份）",
     ]
 
 
@@ -561,10 +627,12 @@ def main(argv: list[str] | None = None) -> int:
         if info.get("classes"):
             classes_map[info["name"]] = info["classes"]
 
-    # ③ 库与快照
+    # ③ 库与快照（补冻结在快照改写循环内，趁旧树还在）
     if db.is_file():
         _migrate_db(db, root, uid_maps, actions, apply)
     _migrate_snapshots(runs_root, uid_maps, entities_map, excluded_map, actions, apply)
+    # ④ 收尾：旧树整删（补冻结之后的最后一步，中断重跑按标记幂等收尾）
+    _cleanup_derived(root, actions, apply)
 
     print("\n".join(actions) if actions else "（无事可做）")
     print("\n".join(_rollback_steps(db, root)))

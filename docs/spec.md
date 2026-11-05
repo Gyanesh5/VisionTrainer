@@ -70,7 +70,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **生命周期**：训练子进程 `start_new_session` 脱离；平台重启**孤儿收养**（pid + csv 恢复监控）；停止链 SIGTERM → `trainer.stop` → 超时 killpg SIGKILL。
 - **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态）。
 - **派生新鲜度门与出队六步** [v1.4-03/04，ADR 0011/0012]：①成员段计算实效集；②检查格式池 `converter_version / projection_version / classes_sha`，任一失配整池重建；③逐实效成员计算 `adapter.encode_image(project(JSON))` 并与池文件**逐字节比对**、不一致即重写并补齐图片链接，`broken` 拒训，投影 drops 按 M9 确认门放行（未确认/账外新丢弃拒训，已确认的丢弃形状不进训练）；④移除真源已不存在者的池链接与标签；⑤写逐 Run 训练入口与 `labels_frozen/`；⑥快照冻结 `format{format_id, converter_version, projection_version, class_map, entry_path}`。改完标注直接开训是唯一正确用法，导出标注不再承重；外部数据集不走平台格式池。
-- **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**。v1.4 迁移会改写既有 Run 快照，新代码不保留旧派生目录回退分支。
+- **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**。v1.4 迁移会改写既有 Run 快照，并为无冻结副本的旧 Run（特性 2026-10-31 前创建）在删旧派生树前从旧树 `labels/val` 补冻结（溯源记 `labels_frozen/source.json`）；旧树也不在的，首次错误分析时按当前真源现投影回放冻结（真源自 Run 后未改时严格等价，同记 source.json）。新代码不保留旧派生目录回退分支。
 - **训练记录列表**（2026-10-30 重构）：训练页按数据集分组、每 Run 一行；组头折叠状态记忆、单表渲染、取消轮保留、终态显示实际 epoch、任务新在前且轮次升序、点行查看该次运行等既有口径不变。
 - **删除粒度**：单条终态 Run 可独立删除，其余轮次不受影响；queued/running/stopping 409；任务删空连任务移除，存余轮次时聚合状态回落。Run 子表随轮清理，磁盘产物默认保留，勾选后删对应 run_dir；「删除任务」仍整任务删。
 - **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供「续训」新 Run；重开与续训钉原 split_uid，实效集按当时真相重算。
@@ -90,7 +90,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 - Run 归档：全量 args、逐 epoch 指标（**入库，单一数据源**）、results.csv、training.log、ultralytics 全套产物图（混淆矩阵/PR/F1/P/R 曲线不自绘）、best/last.pt、Agent 轮 LLM 决策记录（输入摘要/输出/clamp）。
 - 复盘报告：一键生成 markdown（复用 Agent 多模态管线）存 Run 目录；PDF 不做。
-- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标与格式池懒刷新不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；v1.4 迁移保持既有冻结副本不动，新代码不增加旧派生目录回退分支。
+- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标与格式池懒刷新不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；v1.4 迁移保持既有冻结副本不动、为无副本旧 Run 从旧树补冻结，两路都不可得时首次分析从真源回放冻结（§2.2 val 标签冻结副本条），新代码不增加旧派生目录回退分支。
 - **复盘升级** [M8]：结构化错误统计（Top 混淆类对/缺数据类/FP-FN 失衡/小目标占比）作 LLM 输入 schema；报告固定加「**下一步实验推荐**」章节（超参改动+理由+预期收益，与审批门共享输出结构）。
 - **对比页六件套** [M8；v1.4-03]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键；Run 按 split_uid 分组并标注各轮实效 val 张数，不同切分不暗示直接可比。
 

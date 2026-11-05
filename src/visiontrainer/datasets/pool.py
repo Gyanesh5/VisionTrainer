@@ -211,6 +211,18 @@ def _confirmed_drop_set(ds_dir: Path) -> set[tuple[str, str, str]] | None:
             for p in report.get("problems") or [] if p.get("code") == "drop"}
 
 
+def encode_label_text(source: Path, image_name: str, task_type: str,
+                      classes: list[str], class_map: dict[str, int]) -> tuple[str, bool]:
+    """真源单成员 → 期望标签文本 `(text, broken)`；负样本 = 空文本。
+
+    出队六步③之外的单成员复用口径（错误分析回放冻结）：与池逐字节比对走同一条
+    `_encode_member` 编码路径，回放文本与出队时写的池标签同源。
+    """
+    expected, _drops, broken = _encode_member(source, source / image_name,
+                                              task_type, classes, class_map)
+    return expected, broken
+
+
 def _encode_member(source: Path, image: Path, task_type: str, classes: list[str],
                    class_map: dict[str, int]) -> tuple[str, list[dict], bool]:
     """真源 JSON → 期望的池标签文本。返回 (expected, drops, broken)；负样本 = 空文本。

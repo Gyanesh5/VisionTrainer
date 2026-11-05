@@ -76,6 +76,10 @@ def _old_dataset(root: Path, name: str, *, outside: bool, tmp_path: Path,
     (d / "labels").mkdir()
     (d / "labels" / "train").mkdir()
     (d / "labels" / "train" / "x.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+    (d / "labels" / "val").mkdir()
+    for n in val:   # 旧树 val 标签（补冻结的取数源）
+        (d / "labels" / "val" / f"{Path(n).stem}.txt").write_text(
+            "0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
     return ds_dir
 
 
@@ -222,11 +226,46 @@ def test_apply_full_migration(tmp_path):
     assert snap["effective"]["dropped"]["excluded"] == ["car1.png"]
     assert snap["format"]["format_id"] == "yolo"
     assert snap["format"]["class_map"] == {"car": 0, "person": 1}
+    # 补冻结：无 labels_frozen 副本的旧 Run 从旧树 labels/val 拷（错误分析 GT 恒读冻结副本）
+    frozen = rd / "labels_frozen" / "val"
+    assert sorted(p.name for p in frozen.iterdir()) == ["car2.txt", "car3.txt"]
+    assert (frozen / "car2.txt").read_text() == "0 0.5 0.5 0.2 0.2\n"
+    prov = json.loads((rd / "labels_frozen" / "source.json").read_text())
+    assert prov["origin"] == "migrated_v14_legacy" and prov["old_uid"] == "1ee0587b"
 
     # 幂等：重跑 --apply 无事可做
     out = mig.main(["--apply", "--datasets-root", str(root), "--runs-root", str(runs_root),
                     "--db", str(db)])
     assert out == 0
+
+
+def test_freeze_keeps_existing_and_cleanup_resumes(tmp_path, capsys):
+    """补冻结两边界：既有冻结副本不动；删树前中断的重跑按标记收尾（不重复冻结）。"""
+    root, runs_root, db, ds_a, ds_b, rd = _old_root(tmp_path)
+    # 既有冻结副本（labels_frozen 特性后的 Run）：迁移不碰
+    keep = rd / "labels_frozen" / "val"
+    keep.mkdir(parents=True)
+    (keep / "car2.txt").write_text("9 9 9 9 9\n", encoding="utf-8")
+
+    assert mig.main(["--apply", "--datasets-root", str(root), "--runs-root", str(runs_root),
+                     "--db", str(db)]) == 0
+    assert (keep / "car2.txt").read_text() == "9 9 9 9 9\n"
+    assert sorted(p.name for p in keep.iterdir()) == ["car2.txt"]   # 不追加 car3
+    assert not (rd / "labels_frozen" / "source.json").exists()      # 非补冻结来源，无溯源账
+    assert not (ds_a / "derived").exists()
+
+    # 模拟中断在「补冻结后、删树前」的终态：标记/快照/冻结都在，旧树还在 → 重跑只收尾
+    legacy = ds_a / "derived" / "1ee0587b" / "labels" / "val"
+    legacy.mkdir(parents=True)
+    (legacy / "car2.txt").write_text("0 0.5 0.5 0.2 0.2\n", encoding="utf-8")
+    capsys.readouterr()
+    assert mig.main(["--apply", "--datasets-root", str(root), "--runs-root", str(runs_root),
+                     "--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert "[freeze" not in out                                  # 冻结已齐，不再动
+    assert "旧 derived/ 树删除" in out                           # 收尾闭环
+    assert not (ds_a / "derived").exists()
+    assert (keep / "car2.txt").read_text() == "9 9 9 9 9\n"       # 既有副本始终不动
 
 
 def test_dry_run_changes_nothing(tmp_path):
@@ -367,7 +406,7 @@ def test_dry_run_effective_preview_notes_source_not_moved(tmp_path):
     with contextlib.redirect_stdout(buf):
         mig.main(["--dry-run", "--datasets-root", str(root), "--runs-root", str(runs_root),
                   "--db", str(db)])
-    line = next(l for l in buf.getvalue().splitlines() if "runaaaa" in l)
+    line = next(l for l in buf.getvalue().splitlines() if "[snap runaaaa]" in l)
     assert "真源未入位" in line
     # 成员 train{car0,car1,neg} + val{car2,car3}，car1 排除被剔 → 实效 t/v 2/2
     assert "实效 t/v 2/2" in line

@@ -569,3 +569,63 @@ def test_snapshot_classes_priority(tmp_path: Path):
 
     no_snap = type("R", (), {"run_dir": str(tmp_path / "none")})()
     assert tsvc._snapshot_classes_of(no_snap) == []
+
+
+# ---------------------------------------------------------------- 回放冻结（旧 Run GT 救治）
+
+def _replay_fixture(tmp_path: Path) -> tuple:
+    """labels_frozen 特性前的旧 Run 形态：快照有名单/类别，但无冻结副本；真源在。"""
+    ds_dir = tmp_path / "ds"
+    (ds_dir / "source").mkdir(parents=True)
+    (ds_dir / "dataset.json").write_text(json.dumps({"task_type": "detect"}), encoding="utf-8")
+    (ds_dir / "classes.txt").write_text("car\n", encoding="utf-8")
+    for stem, box in (("a", (1, 1, 60, 60)), ("b", (10, 10, 40, 40))):
+        (ds_dir / "source" / f"{stem}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (ds_dir / "source" / f"{stem}.json").write_text(json.dumps(
+            {"imageWidth": 100, "imageHeight": 100, "shapes": [
+                {"label": "car", "shape_type": "rectangle",
+                 "points": [[box[0], box[1]], [box[2], box[1]], [box[2], box[3]], [box[0], box[3]]]}]},
+        ), encoding="utf-8")
+    run_dir = tmp_path / "run"
+    (run_dir / "weights").mkdir(parents=True)
+    (run_dir / "weights" / "best.pt").write_bytes(b"pt")
+    (run_dir / "run_manifest.json").write_text(json.dumps({
+        "effective": {"val": ["a.png", "b.png"]},
+        "classes": {"list": ["car"]},
+        "format": {"class_map": {"car": 0}},
+        "train_args": {"imgsz": 640},
+        "dataset_dir": str(ds_dir),
+    }), encoding="utf-8")
+    run = type("R", (), {"run_dir": str(run_dir), "best_pt": str(run_dir / "weights" / "best.pt")})()
+    return ds_dir, run_dir, run
+
+
+def test_analysis_replays_frozen_labels_from_source(tmp_path: Path):
+    """无冻结副本的旧 Run：GT 从真源回放冻结（一次性），此后改标不影响（恒读冻结）。"""
+    from visiontrainer.training import service as tsvc
+
+    ds_dir, run_dir, run = _replay_fixture(tmp_path)
+    payload = tsvc._analysis_payload(None, run)
+    frozen = run_dir / "labels_frozen" / "val"
+    assert payload["labels_dir"] == str(frozen)
+    assert (frozen / "a.txt").read_text() == "0 0.305000 0.305000 0.590000 0.590000\n"
+    assert sorted(p.name for p in frozen.iterdir()) == ["a.txt", "b.txt"]
+    prov = json.loads((frozen.parent / "source.json").read_text())
+    assert prov["origin"] == "replayed_from_source"
+    # 幂等 + 恒读冻结：改标真源后再取 payload，冻结副本不随真源变
+    (ds_dir / "source" / "a.json").write_text(json.dumps(
+        {"imageWidth": 100, "imageHeight": 100, "shapes": []}), encoding="utf-8")
+    _ = tsvc._analysis_payload(None, run)
+    assert (frozen / "a.txt").read_text() == "0 0.305000 0.305000 0.590000 0.590000\n"
+
+
+def test_analysis_replay_rejects_broken_annotation(tmp_path: Path):
+    """真源坏标注回放拒绝（409）：错账不如不分析。"""
+    from visiontrainer.training import service as tsvc
+
+    ds_dir, run_dir, run = _replay_fixture(tmp_path)
+    (ds_dir / "source" / "a.json").write_text("{ 坏 JSON", encoding="utf-8")
+    with pytest.raises(tsvc.TaskError) as ei:
+        tsvc._analysis_payload(None, run)
+    assert ei.value.status == 409 and "无法投影" in ei.value.message
+    assert not (run_dir / "labels_frozen" / "val").exists()   # 拒绝时不落半截冻结
