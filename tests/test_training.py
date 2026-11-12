@@ -87,6 +87,23 @@ def test_run_dir_layout_is_readable(training_client):
     assert task_uid not in run_dir.parts, "uid 不应再进入路径"
 
 
+def test_create_task_rejects_unusable_names(training_client):
+    """任务名边界校验（ADR 0013）：纯符号/空白/含路径分隔符 400，中文名合法且落为目录名。"""
+    c = training_client
+    for bad in ("///", "  ", "___", "a/b"):
+        r = c.post("/api/v1/tasks", json={"name": bad, "base_model": "stub-model",
+                                          "dataset": "plate", "epochs": 1})
+        assert r.status_code == 400, (bad, r.text)
+        assert r.json()["detail"]["error"]["code"] == "invalid_args", (bad, r.text)
+
+    r = c.post("/api/v1/tasks", json={"name": "钢板复训", "base_model": "stub-model",
+                                      "dataset": "plate", "epochs": 1})
+    assert r.status_code == 200, r.text
+    task = c.get(f"/api/v1/tasks/{r.json()['id']}").json()
+    run = _wait_status(c, task["runs"][0]["uid"], {"done"})
+    assert Path(run["run_dir"]).parent.name == "钢板复训"
+
+
 def _wait_task(client: TestClient, task_uid: str, statuses: set[str], timeout: float = 20.0) -> dict:
     deadline = time.time() + timeout
     last = {}

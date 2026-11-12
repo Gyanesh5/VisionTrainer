@@ -12,7 +12,29 @@ from datetime import datetime
 
 _ILLEGAL = re.compile(r"[\\/\x00-\x1f]")
 
+# 「有信息量」判据：词字符去掉下划线，只认字母数字/汉字
+_HAS_INFO = re.compile(r"[^\W_]")
+
 _TASK_DIR_MAX = 80
+
+
+def validate_task_name(name: str) -> None:
+    """任务名边界校验：任务名会落为出队目录名（ADR 0013），不可承载的名字在入口拒掉。
+
+    HTTP、Agent MCP 工具、UI 三条建任务路共用本判据；naming 的清洗函数只作
+    存量数据兜底，不当校验用（用户起的名不可静默改写）。
+
+    Args:
+        name: 任务名原样。
+
+    Raises:
+        ValueError: 含 `/`、`\\`、控制字符，或不含任何字母/数字/汉字（纯符号、
+            空白视同空名——空信息量目录名与随机串同样不可读）。
+    """
+    if any(c in "/\\" or ord(c) < 32 or ord(c) == 127 for c in name):
+        raise ValueError(f"任务名不能包含 / \\ 或控制字符：{name!r}")
+    if not _HAS_INFO.search(name):
+        raise ValueError(f"任务名至少要含一个字母、数字或汉字：{name!r}")
 
 
 def sanitize_component(raw: str) -> str:
@@ -34,8 +56,7 @@ def task_dir_base(task_name: str) -> str:
     由 task_dir_name 回退到 uid——空信息量目录名与随机串同样不可读。
     """
     base = sanitize_component(task_name)[:_TASK_DIR_MAX]
-    # [^\W_] = 词字符去掉下划线：只认字母数字/汉字，`"___"` 这类纯符号视同空名
-    return base if re.search(r"[^\W_]", base) else ""
+    return base if _HAS_INFO.search(base) else ""
 
 
 def task_dir_name(task_name: str, task_uid: str, other_task_bases: set[str]) -> str:

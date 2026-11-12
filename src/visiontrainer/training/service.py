@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ..datasets.formats import DEFAULT_FORMAT_ID
+from . import naming
 from .manager import SubprocessHandle, task_inputs
 from .snapshot import load_snapshot
 from ..datasets import service as ds
@@ -72,6 +73,13 @@ def create_task(manager, *, name: str, base_model: str, dataset: str, split_uid:
     """
     from .manager import new_uid
     from visiontrainer.db.models import Run, Task
+
+    # 任务名边界校验（ADR 0013）：名字会落为出队目录名，HTTP 与 Agent MCP 共用本函数，
+    # 在此一次拒掉；校验判据与目录命名同在 naming，单一事实源
+    try:
+        naming.validate_task_name(name)
+    except ValueError as exc:
+        raise _http_err("invalid_args", str(exc), 400) from exc
 
     try:
         meta = ds.get_dataset(dataset)

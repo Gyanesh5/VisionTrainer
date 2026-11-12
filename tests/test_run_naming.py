@@ -1,14 +1,17 @@
-"""Run 目录两级可读命名（ADR 0013）：清洗、截断、撞名后缀与空名回退。"""
+"""Run 目录两级可读命名（ADR 0013）：清洗、截断、撞名后缀、空名回退与任务名边界校验。"""
 
 from __future__ import annotations
 
 from datetime import datetime
+
+import pytest
 
 from visiontrainer.training.naming import (
     run_dir_name,
     sanitize_component,
     task_dir_base,
     task_dir_name,
+    validate_task_name,
 )
 
 
@@ -45,3 +48,14 @@ def test_run_dir_name_appends_uid_when_taken():
     started = datetime(2026, 11, 4, 21, 16, 32)
     taken = {"20261104_211632_r1"}
     assert run_dir_name(started, 1, "fa75207f", taken) == "20261104_211632_r1-fa75207f"
+
+
+@pytest.mark.parametrize("bad", ["///", "  ", "___", "a/b", "a\\b", "\x07bell", "🚀🚀"])
+def test_validate_task_name_rejects_unusable(bad: str):
+    with pytest.raises(ValueError):
+        validate_task_name(bad)
+
+
+@pytest.mark.parametrize("good", ["plate-579", "钢板复训", "transfer-anomaly_yolo26s_20261104_2115"])
+def test_validate_task_name_accepts_readable(good: str):
+    validate_task_name(good)  # 不抛即通过
