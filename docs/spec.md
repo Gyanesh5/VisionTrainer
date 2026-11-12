@@ -70,6 +70,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **生命周期**：训练子进程 `start_new_session` 脱离；平台重启**孤儿收养**（pid + csv 恢复监控）；停止链 SIGTERM → `trainer.stop` → 超时 killpg SIGKILL。
 - **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态）。
 - **派生新鲜度门与出队六步** [v1.4-03/04，ADR 0011/0012]：①成员段计算实效集；②检查格式池 `converter_version / projection_version / classes_sha`，任一失配整池重建；③逐实效成员计算 `adapter.encode_image(project(JSON))` 并与池文件**逐字节比对**、不一致即重写并补齐图片链接，`broken` 拒训，投影 drops 按 M9 确认门放行（未确认/账外新丢弃拒训，已确认的丢弃形状不进训练）；④移除真源已不存在者的池链接与标签；⑤写逐 Run 训练入口与 `labels_frozen/`；⑥快照冻结 `format{format_id, converter_version, projection_version, class_map, entry_path}`。改完标注直接开训是唯一正确用法，导出标注不再承重；外部数据集不走平台格式池。
+- **Run 目录命名** [ADR 0013]：`runs/<任务目录>/<Run 目录>` 两级可读——任务级取任务名（清洗非法字符、截 80 字符），Run 级取 `{开训时刻 %Y%m%d_%H%M%S}_r{轮次}`（与 `runs.started_at` 同源）；uid 只作库内与 API 标识，任务重名或同级重名兜底追加 `-{uid}` 后缀。
 - **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**，缺副本的 Run 直接 409（重跑训练后再分析），不设任何旧派生目录回退分支。
 - **训练记录列表**（2026-10-30 重构）：训练页按数据集分组、每 Run 一行；组头折叠状态记忆、单表渲染、取消轮保留、终态显示实际 epoch、任务新在前且轮次升序、点行查看该次运行等既有口径不变。
 - **删除粒度**：单条终态 Run 可独立删除，其余轮次不受影响；queued/running/stopping 409；任务删空连任务移除，存余轮次时聚合状态回落。Run 子表随轮清理，磁盘产物默认保留，勾选后删对应 run_dir；「删除任务」仍整任务删。
@@ -200,7 +201,7 @@ ProjectedImage {
 
 **格式池** `<ds>/derived/<format_id>/`：`images/` 平铺符号链接、`labels/` 平铺标签、`derived.json{format_id,converter_version,projection_version,classes_sha,task_type,class_map,counts,updated_at}`。一集每格式一池，与切分无关；可删重建，池清理在出队时。平铺布局要求 stem 唯一。
 
-**逐 Run 入口** `runs/<run_dir>/data/`：`data.yaml + train.txt + val.txt` 指向池内图片与本次实效集，和运行快照、`labels_frozen/` 同地归档。classify 例外为 `data/{train,val}/<NN_类名>/` 链接树 + 根 `.ndjson.yaml`，以两位数字前缀让字母序等于类别行序，并以 class_map 为唯一回查依据。Run 目录仍是 Ultralytics save_dir，training.log/report.md/export/ 同目录。
+**逐 Run 入口** `runs/<任务目录>/<Run 目录>/data/`：两级目录按 ADR 0013 可读命名（任务名 / 开训时刻_r 轮次）。`data.yaml + train.txt + val.txt` 指向池内图片与本次实效集，和运行快照、`labels_frozen/` 同地归档。classify 例外为 `data/{train,val}/<NN_类名>/` 链接树 + 根 `.ndjson.yaml`，以两位数字前缀让字母序等于类别行序，并以 class_map 为唯一回查依据。Run 目录仍是 Ultralytics save_dir，training.log/report.md/export/ 同目录。
 
 **外部导出适配器**：YOLO/COCO/VOC 进 M11；COCO/VOC 由平台以 stdlib 实现，XAL 仅作参考。导出与格式池完全解耦，DOTA/mask/mot 等长尾格式不做。
 

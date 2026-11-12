@@ -28,6 +28,7 @@ from ..datasets import service as ds
 from ..datasets.formats import DEFAULT_FORMAT_ID
 from ..datasets import split as split_ent
 from ..datasets.service import DatasetError
+from . import naming
 from ..ws import publish_threadsafe
 
 RUNNING_STATES = {"running", "stopping"}
@@ -416,8 +417,14 @@ class TrainingManager:
             if inputs["form"] == "managed":
                 pool_info = ds.check_pool(task.dataset, inputs["split"], inputs["effective"])
             run.status = "running"
-            run.run_dir = str(self.s.runs_dir / task.uid / run.uid)
             run.started_at = _now()
+            # 两级可读命名（ADR 0013）：任务重名查库内其他任务，Run 同名查目标目录既有条目，
+            # 均兜底追加 uid 后缀；路径经库落盘，磁盘目录随其后 mkdir。
+            other_task_bases = {naming.task_dir_base(n)
+                                for (n,) in s.query(Task.name).filter(Task.id != task.id)}
+            task_dir = self.s.runs_dir / naming.task_dir_name(task.name, task.uid, other_task_bases)
+            taken = {p.name for p in task_dir.iterdir()} if task_dir.is_dir() else set()
+            run.run_dir = str(task_dir / naming.run_dir_name(run.started_at, run.round_no, run.uid, taken))
             s.commit()
             task_id, run_dir = run.task_id, run.run_dir
             ds_dir = Path(inputs["dataset_dir"])

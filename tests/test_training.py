@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import signal
 import sys
 import time
@@ -69,6 +70,21 @@ def test_task_runs_to_done(training_client):
     assert run["primary_metric"] is not None and run["primary_metric"] > 0
     # 产物路径登记（results.csv 由 stub 不产出，不苛求；training.log 必有）
     assert run["artifacts"]["training_log"]
+
+
+def test_run_dir_layout_is_readable(training_client):
+    """出队两级目录应为 runs/<任务名>/<开训时刻>_r<轮次>（ADR 0013），uid 不再进路径。"""
+    c = training_client
+    task_uid = _create_task(c, epochs=1, name="naming-shape")
+    task = _wait_task(c, task_uid, {"done"})
+    run_uid = task["runs"][0]["uid"]
+    run = _wait_status(c, run_uid, {"done"})
+
+    run_dir = Path(run["run_dir"])
+    assert run_dir.is_dir(), f"run_dir 应在磁盘存在：{run_dir}"
+    assert run_dir.parent.name == "naming-shape", f"任务目录应为任务名：{run_dir.parent.name}"
+    assert re.fullmatch(r"\d{8}_\d{6}_r1", run_dir.name), f"Run 目录应为 时刻_r轮次：{run_dir.name}"
+    assert task_uid not in run_dir.parts, "uid 不应再进入路径"
 
 
 def _wait_task(client: TestClient, task_uid: str, statuses: set[str], timeout: float = 20.0) -> dict:
