@@ -490,6 +490,31 @@ def test_delete_single_run_keeps_other_rounds(training_client):
     # 删到最后一轮：任务已无记录可聚合，连任务移除
     assert c.delete(f"/api/v1/runs/{r1['uid']}").status_code == 200
     assert c.get(f"/api/v1/tasks/{tid}").status_code == 404
+
+
+def test_delete_files_removes_readable_task_dir(training_client):
+    """delete_files 须删到可读任务目录（ADR 0013 回归）：旧实现按 task_uid 重拼路径，
+    新布局下打空且 ignore_errors 吞掉失败，产物成孤儿。覆盖删整任务与删最后一轮两条路。"""
+    c = training_client
+    # ① 删整任务（DELETE /tasks/{id}?delete_files）
+    uid1 = _create_task(c, epochs=1, name="del-whole")
+    tid1 = next(t["id"] for t in c.get("/api/v1/tasks").json() if t["uid"] == uid1)
+    t1 = _wait_task(c, uid1, {"done"})
+    r1 = c.get(f"/api/v1/runs/{t1['runs'][0]['uid']}").json()
+    d1 = Path(r1["run_dir"]).parent
+    assert c.delete(f"/api/v1/tasks/{tid1}", params={"delete_files": True}).status_code == 200
+    assert not d1.exists(), f"删整任务应连任务目录一起清理：{d1}"
+
+    # ② 删最后一轮（连任务移除），任务目录同样应被清理
+    uid2 = _create_task(c, epochs=1, name="del-last-run")
+    tid2 = next(t["id"] for t in c.get("/api/v1/tasks").json() if t["uid"] == uid2)
+    t2 = _wait_task(c, uid2, {"done"})
+    r2 = c.get(f"/api/v1/runs/{t2['runs'][0]['uid']}").json()
+    d2 = Path(r2["run_dir"]).parent
+    run2 = t2["runs"][0]["uid"]
+    assert c.delete(f"/api/v1/runs/{run2}", params={"delete_files": True}).status_code == 200
+    assert c.get(f"/api/v1/tasks/{tid2}").status_code == 404
+    assert not d2.exists(), f"删空最后一轮应连任务目录一起清理：{d2}"
     assert all(t["uid"] != task_uid for t in c.get("/api/v1/tasks").json())
 
 

@@ -233,14 +233,18 @@ def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
             raise _http_err("not_found", f"任务不存在：{task_id}", 404)
         if t.status in ("running", "stopping"):
             raise _http_err("state_conflict", "任务运行中，请先停止", 409)
-        task_uid = t.uid
+        # 任务目录 = 库内 run_dir 的父目录（两级布局，ADR 0013）：不按 task_uid 重拼
+        # 路径——那是旧 hex 布局假设，重拼打空且 ignore_errors 会吞掉失败，产物成孤儿
+        run_dirs = [Path(r.run_dir) for r in s.query(Run).filter(Run.task_id == task_id)
+                    if r.run_dir]
         _purge_run_children(s, [rid for (rid,) in
                                 s.query(Run.id).filter(Run.task_id == task_id).all()])
         s.query(Run).filter(Run.task_id == task_id).delete()
         s.delete(t)
         s.commit()
     if delete_files:
-        shutil.rmtree(manager.s.runs_dir / task_uid, ignore_errors=True)
+        for task_dir in {p.parent for p in run_dirs}:
+            shutil.rmtree(task_dir, ignore_errors=True)
 
 
 def delete_run(manager, uid: str, delete_files: bool = False) -> None:
@@ -259,7 +263,6 @@ def delete_run(manager, uid: str, delete_files: bool = False) -> None:
             raise _http_err("state_conflict",
                             "仅已结束的训练记录可删除（运行/排队中请先停止或取消）", 409)
         task = s.get(Task, r.task_id)
-        task_uid = task.uid if task else None
         _purge_run_children(s, [r.id])
         s.query(Run).filter(Run.id == r.id).delete(synchronize_session=False)
         manager.current_progress.pop(r.id, None)
@@ -273,8 +276,9 @@ def delete_run(manager, uid: str, delete_files: bool = False) -> None:
         run_dir = r.run_dir
         s.commit()
     if delete_files:
-        if whole_task_dir and task_uid:
-            shutil.rmtree(manager.s.runs_dir / task_uid, ignore_errors=True)
+        if whole_task_dir and run_dir:
+            # 删空任务连任务目录：取 run_dir 父目录（ADR 0013），不按 task_uid 重拼
+            shutil.rmtree(Path(run_dir).parent, ignore_errors=True)
         elif run_dir:
             shutil.rmtree(Path(run_dir), ignore_errors=True)
 
