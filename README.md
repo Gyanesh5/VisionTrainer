@@ -30,5 +30,5 @@ src/visiontrainer/
 
 ## 约定
 
-- 领域词汇表：根目录 `CONTEXT.md`（Task/Run/Runner/单飞/切分清单……），实现与文档统一用语。
+- 领域词汇表：根目录 `GLOSSARY.md`（Task/Run/Runner/单飞/切分清单……），实现与文档统一用语。
 - UI 是薄层：业务数据只走 `/api` 与 `/ws`，将来换 Vue3 重写 UI 不动后端契约（ADR 0002）。

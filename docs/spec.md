@@ -214,7 +214,7 @@ ProjectedImage {
 
 ### 3.5 接口与词汇
 
-全部端点与消息 schema 见 [docs/api.md](./api.md)，Pydantic 硬契约位于 `src/visiontrainer/api/schemas.py`；未来常规迁移仍走 create_all + schema_version 幂等函数，不上 Alembic。根目录 [CONTEXT.md](../CONTEXT.md) 是 Task/Run/切分/格式池/审批门等领域词汇的唯一事实源。
+全部端点与消息 schema 见 [docs/api.md](./api.md)，Pydantic 硬契约位于 `src/visiontrainer/api/schemas.py`；未来常规迁移仍走 create_all + schema_version 幂等函数，不上 Alembic。根目录 [GLOSSARY.md](../GLOSSARY.md) 是 Task/Run/切分/格式池/审批门等领域词汇的唯一事实源。
 
 ## 4. 非目标（Out of scope）
 
