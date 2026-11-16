@@ -428,6 +428,18 @@ def estimate_training_time(manager) -> dict | None:
     return {"seconds_per_epoch": round(med, 1), "samples": len(rates)}
 
 
+def queue_snapshot(manager) -> dict:
+    """队列当前态快照（阶段 1c 票 105）：`WS queue.updated` 无回放，前端初始加载与
+    断线补齐从这里取全量。口径与 manager 出队循环的发布载荷逐字一致。"""
+    from visiontrainer.db.models import Run
+
+    with manager.Session() as s:
+        queued = [r.uid for r in s.query(Run).filter(Run.status == "queued")
+                  .order_by(Run.id).all()]
+    return {"running_uid": manager.current.uid if manager.current else None,
+            "queued_uids": queued, "block_reason": manager.block_reason}
+
+
 def run_gpu_samples(manager, uid: str) -> list[dict]:
     """Run 的 GPU 采样序列（M7 01 号票）；首样本时刻归零，便于多 Run 对齐。"""
     from visiontrainer.db.models import GPUSample, Run

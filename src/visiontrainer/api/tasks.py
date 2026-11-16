@@ -136,6 +136,13 @@ def list_tasks(request: Request):
     return tsvc.list_tasks(_manager(request))
 
 
+@router.get("/queue")
+def queue_state(request: Request):
+    """队列当前态（阶段 1c 票 105）：`WS queue.updated` 的 REST 补齐源——事件无回放，
+    初始加载与断线重连从这里取全量 `{running_uid, queued_uids, block_reason}`。"""
+    return tsvc.queue_snapshot(_manager(request))
+
+
 @router.get("/tasks/{task_id}")
 @_maps_errors
 def get_task(task_id: int, request: Request):
