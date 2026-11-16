@@ -15,6 +15,7 @@ import { AddImagesDialog } from "../components/datasets/AddImagesDialog";
 import { AuditPanel } from "../components/datasets/AuditPanel";
 import { ClassTablePanel } from "../components/datasets/ClassTablePanel";
 import { ReviewFlow } from "../components/datasets/ReviewFlow";
+import { ExportDialog, HealthPanel, TilingPanel } from "../components/datasets/QualityPanels";
 import { AUTO_FIX_CODES, GUIDANCE, PROBLEM_ZH, formatTs } from "../components/datasets/domain";
 
 /**
@@ -26,7 +27,7 @@ import { AUTO_FIX_CODES, GUIDANCE, PROBLEM_ZH, formatTs } from "../components/da
  * 批 2 实做 来源/类别表/校验·画像/排除恢复 与加图、删除；审查/体检/切片/导出按批 3/5 落位。
  */
 
-type WsKey = "source" | "classes" | "validation" | "audit" | "review" | "exclude";
+type WsKey = "source" | "classes" | "validation" | "audit" | "review" | "exclude" | "tiling" | "health";
 
 const WS_TITLES: Record<WsKey, string> = {
   source: "来源",
@@ -35,6 +36,8 @@ const WS_TITLES: Record<WsKey, string> = {
   audit: "体检",
   review: "标注审查",
   exclude: "排除与恢复",
+  tiling: "切片",
+  health: "健康报告",
 };
 
 interface ValProblem {
@@ -76,6 +79,7 @@ export function DatasetDetailPage() {
   const [openWs, setOpenWs] = useState<WsKey | null>(null);
   const [msg, setMsg] = useState<{ text: string; kind: string } | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const [deleteGate, setDeleteGate] = useState<{ force: boolean; runs?: number | null } | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const reconciledFor = useRef<string | null>(null);
@@ -214,6 +218,14 @@ export function DatasetDetailPage() {
                 >
                   加图
                 </button>
+                <button
+                  type="button"
+                  className="btn"
+                  title="把真源标注导出为自包含目录（格式 × 范围 × 图片），与训练用的格式池无关"
+                  onClick={() => setExportOpen(true)}
+                >
+                  导出标注
+                </button>
               </>
             )}
             <button type="button" className="btn btn-danger" onClick={() => setDeleteGate({ force: false })}>
@@ -304,7 +316,7 @@ export function DatasetDetailPage() {
       {/* 工作区入口行：状态卡之外的工作区（审查/体检）从这里进；全部区也可直达 */}
       {managed && (
         <div className="ws-nav" role="group" aria-label="工作区导航">
-          {(["source", "classes", "validation", "audit", "review", "exclude"] as WsKey[]).map((key) => (
+          {(["source", "classes", "validation", "audit", "review", "exclude", "tiling", "health"] as WsKey[]).map((key) => (
             <button
               key={key}
               type="button"
@@ -348,10 +360,16 @@ export function DatasetDetailPage() {
               {key === "audit" && (
                 <AuditPanel meta={meta} onMessage={notify} onChanged={() => invalidateAll()} />
               )}
+              {key === "tiling" && (
+                <TilingPanel meta={meta} onMessage={notify} onChanged={() => invalidateAll()} />
+              )}
+              {key === "health" && <HealthPanel meta={meta} />}
             </>
           )}
         </section>
       ))}
+
+      <ExportDialog meta={meta} open={exportOpen} onClose={() => setExportOpen(false)} onMessage={notify} />
 
       <AddImagesDialog
         open={addOpen}

@@ -304,6 +304,101 @@ export const datasetsApi = {
       method: "POST",
     }),
   /** 体检缓存读（未体检 null；指纹失配带 stale；leaks 由服务端按切分即时算） */
+  /** 健康报告读时视图（compose_view：split_uid 缺省=最近切分、空串=全集；include_excluded 默认剔除） */
+  stats: (name: string, splitUid: string | null, includeExcluded: boolean) => {
+    const q = new URLSearchParams();
+    if (splitUid !== null) q.set("split_uid", splitUid);
+    if (includeExcluded) q.set("include_excluded", "true");
+    const qs = q.toString();
+    return request<{
+      dataset?: string;
+      task_type: TaskType;
+      classes?: string[];
+      computed_at?: string | null;
+      source_fingerprint?: string;
+      split_uid?: string | null;
+      summary: {
+        images?: number;
+        labeled?: number;
+        background?: number;
+        train?: number;
+        val?: number;
+        ann?: number;
+        avg_ann?: number;
+        [k: string]: unknown;
+      };
+      per_image: {
+        name: string;
+        n?: number;
+        labels?: string[];
+        label_counts?: Record<string, number>;
+        w?: number | null;
+        h?: number | null;
+        cls?: string;
+        split?: string | null;
+      }[];
+      agg?: {
+        obj_hist?: Record<string, number>;
+        by_class?: Record<string, number>;
+        obj_size?: { total: number; small: number; medium: number; large: number; small_ratio: number } | null;
+        [k: string]: unknown;
+      };
+      by_split?: Record<string, { images: number; background: number; by_class: Record<string, number> }> | null;
+    }>(`/api/v1/datasets/${encodeURIComponent(name)}/stats${qs ? `?${qs}` : ""}`);
+  },
+  /** 切分历史（created_at 倒序；外部数据集 400） */
+  listSplits: (name: string) =>
+    request<
+      {
+        uid: string;
+        memo?: string;
+        created_at?: string;
+        params?: { seed?: number; ratio?: number; stratify?: boolean; mode?: string };
+        counts?: { train?: number; val?: number };
+      }[]
+    >(`/api/v1/datasets/${encodeURIComponent(name)}/splits`),
+  /** 切片预览（dry-run 零写入，数字与执行同口径） */
+  tilePreview: (name: string, body: { rows: number; cols: number; overlap: number; keep_empty: boolean }) =>
+    request<{
+      images: number;
+      tiles_total: number;
+      tiles_written: number;
+      empty_dropped: number;
+      frag_empty_dropped: number;
+      dropped_assignments: number;
+      dropped_pct: number;
+      re_review: number;
+      shapes_nowhere: number;
+      skipped: string[];
+      default_name?: string;
+    }>(`/api/v1/datasets/${encodeURIComponent(name)}/tile/preview`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  /** 执行切片 → 新托管数据集（源集零改动；票 05 起切片产物出生不切分） */
+  tile: (name: string, body: { rows: number; cols: number; overlap: number; keep_empty: boolean; name?: string }) =>
+    request<{ meta: { name: string }; summary: { tiles_written: number; re_review: number } }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/tile`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  /** 三维外部导出（格式 × 范围 × 图片处置；supports × task_type 校验在服务端同口径） */
+  exportAnnotations: (
+    name: string,
+    body: { format: "yolo" | "coco" | "voc"; scope: "all" | "split"; split_uid?: string | null; images: "link" | "copy"; zip: boolean },
+  ) =>
+    request<{ path: string; counts: Record<string, number>; drops: number; broken: string[]; zip?: string }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/export`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   runAudit: (name: string) =>
     request<{
       summary?: { exact?: number; near?: number; leaks?: number; imbalance_ok?: boolean };

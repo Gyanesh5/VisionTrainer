@@ -15,11 +15,13 @@ const signUrls = vi.mocked(signThumbUrls);
  * IntersectionObserver 桩：注册表保留回调，测试用例手动投递条目——
  * 模拟滚近（rootMargin 1000px 内相交）/滚远（2500px 外不相交）。
  */
-class FakeIO implements IntersectionObserver {
+class FakeIO {
   static instances: FakeIO[] = [];
   rootMargin: string;
   callback: IntersectionObserverCallback;
   targets: Element[] = [];
+  root: Element | Document | null = null;
+  thresholds: number[] = [0];
   constructor(cb: IntersectionObserverCallback, opts?: IntersectionObserverInit) {
     this.callback = cb;
     this.rootMargin = opts?.rootMargin ?? "0px";

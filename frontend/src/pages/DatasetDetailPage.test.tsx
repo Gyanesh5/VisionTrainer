@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { fireEvent } from "@testing-library/react";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -34,6 +35,10 @@ vi.mock("../api/client", async (importOriginal) => {
       statsInstanceCounts: vi.fn(),
       cachedAudit: vi.fn(),
       expandPaths: vi.fn(),
+      listSplits: vi.fn(),
+      exportAnnotations: vi.fn(),
+      tilePreview: vi.fn(),
+      tile: vi.fn(),
     },
     operationsApi: { snapshot: vi.fn() },
   };
@@ -109,6 +114,10 @@ beforeEach(() => {
   renameSuspects.mockResolvedValue({});
   statsInstanceCounts.mockResolvedValue({ car: 96, person: 24 });
   xalRescan.mockResolvedValue({ delivered: false });
+  vi.mocked(datasetsApi.listSplits).mockResolvedValue([]);
+  vi.mocked(datasetsApi.exportAnnotations).mockResolvedValue({
+    path: "/tmp/exports", counts: {}, drops: 0, broken: [],
+  });
 });
 
 afterEach(() => {
@@ -353,11 +362,133 @@ describe("ExcludePanel restore", () => {
     const user = userEvent.setup();
     renderDetail();
     await screen.findByTestId("status-cards");
-    await user.click(screen.getByTestId("status-exclude"));
+    // 排除与恢复经工作区导航行进入（状态卡四张 = 来源/类别表/校验·画像/体检）
+    await user.click(screen.getByRole("button", { name: "排除与恢复" }));
     await screen.findByTestId("exclude-panel");
     await user.click(screen.getByRole("checkbox", { name: "选择 dup1.png" }));
     await user.click(screen.getByRole("button", { name: "恢复选中（1）" }));
     await waitFor(() => expect(restore).toHaveBeenCalledWith("plate", ["dup1.png"]));
     await waitFor(() => expect(screen.getByRole("button", { name: "恢复选中（0）" })).toBeInTheDocument());
+  });
+});
+
+describe("ExportDialog three dimensions (batch 5)", () => {
+  it("gates_formats_by_task_type_and_exports_with_scope_and_images", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByTestId("status-cards");
+    vi.mocked(datasetsApi.listSplits).mockResolvedValue([
+      { uid: "abc123", created_at: "2026-11-17T09:00:00", counts: { train: 100, val: 28 } },
+    ]);
+    await user.click(screen.getByRole("button", { name: "导出标注" }));
+    const dlg = await screen.findByTestId("export-dialog");
+    // VOC 仅 detect：当前 detect 全亮；COCO/YOLO 默认 yolo 选中
+    expect(dlg.textContent).toContain("YOLO");
+    // 范围默认全集，切到按切分需切分在场（select 随 scope 渲染）
+    await user.click(screen.getByLabelText("按切分（train/val 分目录）"));
+    await waitFor(() => expect(screen.getByLabelText("切分")).toBeEnabled());
+    vi.mocked(datasetsApi.exportAnnotations).mockResolvedValue({
+      path: "/tmp/ds/plate/exports/20261117-yolo-abc123",
+      counts: { train: 100, val: 28 },
+      drops: 0,
+      broken: [],
+    });
+    await user.click(screen.getByTestId("export-submit"));
+    await waitFor(() =>
+      expect(datasetsApi.exportAnnotations).toHaveBeenCalledWith("plate", {
+        format: "yolo",
+        scope: "split",
+        split_uid: null, // 默认最近切分（空串表全集——scope=split 下空选即最近切分）
+        images: "link",
+        zip: false,
+      }),
+    );
+  });
+
+  it("blocks_voc_for_classify_task_with_note", async () => {
+    get.mockResolvedValue({ ...baseMeta, task_type: "classify" });
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByTestId("status-cards");
+    await user.click(screen.getByRole("button", { name: "导出标注" }));
+    const dlg = await screen.findByTestId("export-dialog");
+    const vocBtn = [...dlg.querySelectorAll("button")].find((b) => b.textContent === "Pascal VOC XML");
+    expect(vocBtn).toBeDisabled(); // supports × task_type 置灰
+    expect(vocBtn).toHaveAttribute("title", "仅 检测 任务可用");
+  });
+});
+
+describe("TilingPanel dry-run gate (batch 5)", () => {
+  it("preview_numbers_enable_confirm_and_execute_posts", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByTestId("status-cards");
+    await user.click(screen.getByRole("button", { name: "来源" })); // 打开任一区，保证工作区导航可点
+    await user.click(screen.getByRole("button", { name: "切片" }));
+    await user.click(screen.getByRole("button", { name: "打开切片" }));
+    await screen.findByTestId("tiling-dialog");
+    // 未预览前确认禁用（dry-run 确认门）
+    expect(screen.getByTestId("tile-confirm")).toBeDisabled();
+    vi.mocked(datasetsApi.tilePreview).mockResolvedValue({
+      images: 40,
+      tiles_total: 160,
+      tiles_written: 150,
+      empty_dropped: 6,
+      frag_empty_dropped: 4,
+      dropped_assignments: 10,
+      dropped_pct: 6,
+      re_review: 12,
+      shapes_nowhere: 0,
+      skipped: [],
+    });
+    await user.click(screen.getByRole("button", { name: "预览" }));
+    const prev = await screen.findByTestId("tile-preview");
+    expect(prev.textContent).toContain("产片 150");
+    expect(prev.textContent).toContain("复审片 12");
+    vi.mocked(datasetsApi.tile).mockResolvedValue({
+      meta: { name: "plate-tile2x2" },
+      summary: { tiles_written: 150, re_review: 12 },
+    });
+    await user.click(screen.getByTestId("tile-confirm"));
+    await waitFor(() =>
+      expect(datasetsApi.tile).toHaveBeenCalledWith("plate", {
+        rows: 2,
+        cols: 2,
+        overlap: 0.2,
+        keep_empty: false,
+        name: "plate-tile2x2",
+      }),
+    );
+  });
+
+  it("param_change_invalidates_preview_until_rerun", async () => {
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByTestId("status-cards");
+    await user.click(screen.getByRole("button", { name: "切片" }));
+    await user.click(screen.getByRole("button", { name: "打开切片" }));
+    const dlg = await screen.findByTestId("tiling-dialog");
+    await waitFor(() => expect(dlg.querySelector("[data-testid=tile-confirm]")).not.toBeNull());
+    vi.mocked(datasetsApi.tilePreview).mockResolvedValue({
+      images: 40,
+      tiles_total: 160,
+      tiles_written: 150,
+      empty_dropped: 6,
+      frag_empty_dropped: 0,
+      dropped_assignments: 10,
+      dropped_pct: 6,
+      re_review: 0,
+      shapes_nowhere: 0,
+      skipped: [],
+    });
+    await user.click(screen.getByRole("button", { name: "预览" }));
+    await screen.findByTestId("tile-preview");
+    expect(screen.getByTestId("tile-confirm")).toBeEnabled();
+    // 参数变更即失效：预览作废、确认门重新关闭
+    fireEvent.change(screen.getByLabelText("行数"), { target: { value: "3" } });
+    await waitFor(() => expect(screen.queryByTestId("tile-preview")).not.toBeInTheDocument());
+    expect(screen.getByTestId("tile-confirm")).toBeDisabled();
+    // 未手改名字时默认名跟行×列走
+    expect((screen.getByLabelText("新数据集名") as HTMLInputElement).value).toBe("plate-tile3x2");
   });
 });
