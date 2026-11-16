@@ -42,14 +42,15 @@ export function SystemPage() {
             <p className={selfcheck.data.ok ? "state-text ok" : "state-text error"}>
               {selfcheck.data.ok
                 ? `全部通过（${selfcheck.data.items.length} 项）`
-                : `发现 ${selfcheck.data.error_count} 项错误、${selfcheck.data.problems.length} 条问题`}
+                : `发现 ${selfcheck.data.error_count} 项错误、${selfcheck.data.problems} 条问题`}
             </p>
             <ul className="check-list">
               {selfcheck.data.items.map((item) => (
-                <li key={item.name} className="check-item">
+                <li key={item.key} className="check-item">
                   <span className={`severity-badge ${item.severity}`}>{SEVERITY_LABEL[item.severity]}</span>
-                  <span>{item.name}</span>
-                  <p className="check-message tnum">{item.message}</p>
+                  <span>{item.label}</span>
+                  <p className="check-message tnum">{item.summary}</p>
+                  {item.detail ? <p className="check-message placeholder-note">{item.detail}</p> : null}
                 </li>
               ))}
             </ul>

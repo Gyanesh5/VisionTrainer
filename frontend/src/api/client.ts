@@ -44,16 +44,17 @@ export interface SystemLogsResult {
 }
 
 export interface SelfcheckItem {
-  name: string;
+  key: string;
+  label: string;
   severity: "ok" | "warning" | "error";
-  message: string;
-  detail?: Record<string, unknown>;
+  summary: string;
+  detail?: string;
 }
 
 export interface SelfcheckResult {
   items: SelfcheckItem[];
   ok: boolean;
-  problems: string[];
+  problems: number;
   error_count: number;
 }
 
