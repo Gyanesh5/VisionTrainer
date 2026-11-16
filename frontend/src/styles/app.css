@@ -366,6 +366,241 @@ body {
   margin: 0;
 }
 
+/* ---------------------------------------------------------------- 部署页（票 108，D 族 operate · 总貌档） */
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+/* 按钮：动词开头文案；danger 只给破坏性确认门 */
+.btn {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 14px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--chrome-bg);
+}
+
+.btn:disabled {
+  color: var(--chrome-text-dim);
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--action-primary);
+  border-color: var(--action-primary);
+  color: var(--chrome-surface);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--action-primary);
+}
+
+.btn-danger {
+  background: var(--alarm-critical);
+  border-color: var(--alarm-critical);
+  color: var(--chrome-surface);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--alarm-critical);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  padding: 3px 8px;
+  font-size: var(--font-label);
+  color: var(--chrome-accent);
+}
+
+/* 状态徽章：语义色 + 形状标记 + 文字三重编码（DESIGN.md §3） */
+.badge {
+  font-size: var(--font-label);
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  flex: none;
+  white-space: nowrap;
+}
+
+.badge.is-ok {
+  color: var(--state-ok);
+}
+
+.badge.is-running {
+  color: var(--state-running);
+}
+
+.badge.is-failed {
+  color: var(--alarm-critical);
+}
+
+.badge.is-unverified,
+.badge.is-unregistered {
+  color: var(--chrome-text-dim);
+}
+
+.badge.is-latest {
+  color: var(--chrome-accent);
+}
+
+/* 数据表（总貌档疏排）：数值右对齐等宽，表头带单位 */
+.data-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.data-table th {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+  white-space: nowrap;
+}
+
+.data-table .num {
+  text-align: right;
+}
+
+.data-table .num,
+.data-table .tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 部署入口与过滤行 */
+.deploy-toolbar {
+  display: flex;
+  align-items: end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.deploy-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.deploy-toolbar select {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  min-width: 220px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.filter-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: var(--space-1);
+}
+
+/* 提示行：进行中操作 / 导出验证未落定 / LRU 挤出预警 */
+.op-line {
+  margin: 0;
+  font-size: var(--font-body);
+}
+
+.pending-note,
+.warn-note {
+  font-size: var(--font-label);
+  margin: 0 0 var(--space-1);
+}
+
+.pending-note {
+  color: var(--chrome-text-dim);
+}
+
+.warn-note {
+  color: var(--alarm-warning);
+  margin: var(--space-1) 0 0;
+}
+
+.lib-root {
+  color: var(--chrome-text-dim);
+  margin: var(--space-1) 0 0;
+}
+
+/* 空态：一句话 + 动作（首用空与过滤空两种文案分开，专利 10） */
+.empty-state {
+  padding: var(--space-2) 0;
+}
+
+.empty-state p {
+  margin: 0 0 var(--space-1);
+  color: var(--chrome-text-dim);
+}
+
+/* 确认门对话框：浮层允许阴影；遮罩由令牌派生，不硬编码色值 */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--vp-bg-page) 55%, transparent);
+}
+
+.dialog {
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: var(--space-2);
+  width: min(480px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--vp-bg-page) 35%, transparent);
+}
+
+.dialog h2 {
+  margin: 0 0 var(--space-1);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.intent-list {
+  margin: 0 0 var(--space-1);
+  padding-left: 20px;
+}
+
+.intent-list li {
+  margin-bottom: 4px;
+}
+
+.dialog-consequence {
+  margin: 0 0 var(--space-1);
+  color: var(--chrome-text-dim);
+  font-size: var(--font-label);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 /* ---------------------------------------------------------------- 动效回退（DESIGN.md §5） */
 
 @media (prefers-reduced-motion: reduce) {

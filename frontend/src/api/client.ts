@@ -58,7 +58,88 @@ export interface SelfcheckResult {
   error_count: number;
 }
 
+// ---------------------------------------------------------------- 部署域（回注）
+
+/** 单条部署记录：GET /api/v1/deployments（docs/api.md 回注域节）。 */
+export interface DeploymentItem {
+  deployment_id: number;
+  run_uid: string;
+  task_id: number;
+  task_name: string;
+  model_lib_dir: string;
+  verified: boolean;
+  /** 落定前 `{status:"exporting"}`；进程失败 `{status:"failed",detail}`；完成后只有 `{verified,detail}` */
+  verification: Record<string, unknown>;
+  created_at: string | null;
+}
+
+export interface DeploymentsResult {
+  deployments: DeploymentItem[];
+  /** 超过 5 个模型时后端给的 LRU 挤出提示 */
+  lru_hint: string | null;
+}
+
+/** 模型库目录条目：GET /api/v1/model-library（docs/api.md 任务域节）。 */
+export interface ModelLibraryItem {
+  name: string;
+  path: string;
+  size_mb: number;
+  mtime: string;
+  run_uid: string | null;
+  task_name: string | null;
+  verified: boolean | null;
+  is_latest: boolean;
+}
+
+export interface ModelLibraryResult {
+  root: string;
+  items: ModelLibraryItem[];
+}
+
+/** 任务概要（GET /api/v1/tasks，部署入口只消费其中的完成轮） */
+export interface TaskBrief {
+  id: number;
+  name: string;
+  status: string;
+  dataset: string;
+  runs: {
+    uid: string;
+    round_no: number;
+    status: string;
+    primary_metric: number | null;
+    pruned: boolean;
+  }[];
+}
+
+export interface DeployStartResult {
+  deployment_id: number;
+  target: string;
+  status: string;
+}
+
+export interface ModelDirDeleteResult {
+  deleted: string;
+  removed_deployments: number;
+}
+
 export const api = {
+  getDeployments: () => request<DeploymentsResult>("/api/v1/deployments"),
+  getModelLibrary: () => request<ModelLibraryResult>("/api/v1/model-library"),
+  listTasks: () => request<TaskBrief[]>("/api/v1/tasks"),
+  deployRun: (uid: string) =>
+    request<DeployStartResult>(`/api/v1/runs/${encodeURIComponent(uid)}/deploy`, {
+      method: "POST",
+    }),
+  deleteModelDir: (name: string) =>
+    request<ModelDirDeleteResult>(`/api/v1/model-library/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  openDir: (path: string) =>
+    request<{ opened: string }>("/api/v1/system/open-dir", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    }),
   getSystemLogs: (params: SystemLogsParams = {}) => {
     const query = new URLSearchParams();
     if (params.tail) query.set("tail", String(params.tail));
