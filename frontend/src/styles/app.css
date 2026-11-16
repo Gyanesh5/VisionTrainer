@@ -395,6 +395,13 @@ body {
   cursor: not-allowed;
 }
 
+/* 禁用态不再保留语义底色（红色禁用按钮读作「可点的危险操作」） */
+.btn-primary:disabled,
+.btn-danger:disabled {
+  background: var(--chrome-border);
+  border-color: var(--chrome-border);
+}
+
 .btn-primary {
   background: var(--action-primary);
   border-color: var(--action-primary);
