@@ -1,9 +1,11 @@
-# API 契约（v1.4 · 2026-11-03）
+# API 契约（v1.4 · 2026-11-03；阶段 1c 增补 · 2026-11-17）
 
 > v1.4 按 dataset-training-rehome 02–09 号票硬切换数据集、切分与训练输入契约；旧 `/import`、`/resplit`、`/sync-added`、`/switch-manifest`、`/relabel-refresh` 端点退役，不留兼容层。
 
 > 原则（08 号票）：契约层**框架无关**——UI 可整体替换，本文件与 `/api`、`/ws` 不动。
 > 单机自用无认证（Q4 决策）。所有业务端点前缀 `/api/v1`；`/api/health` 不版本化。
+
+> 阶段 1c（票 105）：REST 缺口补齐——UI 直调服务层的每个落点都有 HTTP 面；新增「训练域元数据」「XAL 协同」两节与 `POST /thumb/sign`、`GET /operations`、`GET /queue`、`POST /config/llm-test`、`POST /system/open-dir` 等端点。**长操作登记**：此前只在 NiceGUI 页面层 `ops.begin`，现改在 API 薄层统一登记（`api/opctx.long_op`），key 与 UI 层逐字一致（`ds:{name}:validate`、`run:{uid}:analysis` 等）——REST 触发的长操作照发 `operation.updated` 事件，细粒度进度经 `GET /operations` 读登记表（事件只管生命周期，纪律不变）。涉及端点：datasets 的 create/images/validate/audit/autofix/tile±preview/export/classes 四动作/rollback/reconcile/review 读与驳回导出/probe-classes、analysis 与其导出、test-infer、deploy、report、compare、model-library 删除、llm-test。
 
 ## REST 端点
 
@@ -13,15 +15,19 @@
 | :--- | :--- | :--- |
 | GET | `/api/health` | 存活探针（不版本化） |
 | GET | `/api/v1/system/gpu` | GPU 状态：显存/利用率/外部占用（pynvml，04） |
+| GET | `/api/v1/operations` | 进行中操作登记表全量快照（阶段 1c）：`{running:[按登记序], last:最近终态\|null}`；`operation.updated` 只在登记/换阶段/终态发，细粒度进度消费方逢事件读本端点刷新 |
+| POST | `/api/v1/system/open-dir` | 服务端文件管理器打开目录（阶段 1c）：body `{path}`；fire-and-forget（xdg-open），目录不存在 400 `invalid_args`，无桌面环境 500 |
 | GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地） |
 | PUT | `/api/v1/config` | 白名单部分更新。body: `{server?:{host,port}, llm?:{base_url,api_key,model}, training?:{python,trainer_entry,export_entry,datasets_dir,runs_dir,model_lib_dir,check_occupancy}}`（节/键均可省略）；返回 `{config, restart_required}`——llm 即存即生效，server/training 改动须重启（设置页，2026-09-20） |
+| POST | `/api/v1/config/llm-test` | LLM 连通性测试（阶段 1c）：按当前 [llm] 发一条探测消息，返回 `{reply}`；未配置/不可达 502 `llm_unavailable`；多模态链路可达数十秒（长操作，登记 `llm:test`） |
 
 ### 数据集域（v1.4 按 02/03/05/06/07 重写）
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/datasets` | 列表：task_type、managed/external、类别数、样本数、校验摘要、source_fingerprint 与「可能有变更」粗判；不再返回 active_manifest |
-| POST | `/api/v1/datasets` | 新建托管数据集（长操作：入图 + 校验 + 画像，不切分）。body: `{name, task_type, classes:[...], source:{mode:empty\|images_dir\|annotated_dir, path?, transfer:copy\|move}}`；annotated_dir 的 classes 为探测预填后确认值，表外类别 409 并列清单；响应可带 drops `needs_confirm` |
+| POST | `/api/v1/datasets` | 新建托管数据集（长操作：入图 + 校验 + 画像，不切分）。body: `{name, task_type, classes:[...], source_mode:empty\|images\|labeled, source_path?, transfer:copy\|move}`；labeled 态的 classes 为探测预填（`POST /datasets/probe-classes`）后确认值，表外类别 409 并列清单（detail.source_labels）；响应可带 drops `needs_confirm` |
+| POST | `/api/v1/datasets/probe-classes` | 已标目录类别探测（阶段 1c，向导「探测」按钮）：body `{src_dir, task_type}`，只读来源目录零写入；返回 `{labels:[去重排序], counts:{类别:次数}, images:图片数}`（shape label 口径，坏 JSON 跳过不炸）；目录不存在 400。结果不承重——确认后才写类别表，真正的表外类别由 `POST /datasets` 阻断 |
 | POST | `/api/v1/datasets/external` | 注册外部标准 YOLO 目录（只读）。body: `{name, task_type, path}` |
 | GET | `/api/v1/datasets/{id}` | 详情：瘦身 metadata、validation_summary、classes、tiling、排除条目、审查进度与 `fingerprint_stale`（真源指纹对账，读时组合视图现算）；切分另走 `/splits` |
 | POST | `/api/v1/datasets/{id}/validate` | 重跑校验并在同一次遍历里聚合画像；报告含投影 drops、stem_conflict 与跨任务信息级 lint，不含漂移比对 |
@@ -53,6 +59,7 @@
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/thumb?p=&box=&t=` | 图片直出（PIL 缩略图或原图）。`box` 白名单 0/72/96/260/512（0=原图不缩放，大图查看器用）。`t` 为 HMAC 签名（UI 经 `thumbs.thumb_url` 签发，24h 有效）——无签名/篡改路径 → 403；缺文件/坏图 → 404；box 越界 → 400。响应带 ETag（绑 size+mtime+box）与 `Cache-Control: max-age=86400`，`If-None-Match` 命中回 304。缩略图档服务端 (path, mtime, box) LRU 缓存字节 |
+| POST | `/api/v1/thumb/sign` | 批量签发签名 URL（阶段 1c）：body `{items:[{path, box?}]}`（box 缺省 260）；返回 `{urls:[{path, box, url}]}`。纯 HMAC 计算不触盘、不校验路径（防篡改由 GET verify 承担）；签名密钥只在服务端——React 侧展示任何平台图片（审查队列/源浏览/产物/叠加/试跑）都先经此签发 |
 
 ### 数据集域 v1.2 增补（标注审查 / 规则扩充，2026-09-22）
 
@@ -62,8 +69,15 @@
 | POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单原子写回 JSON，rejected 必填 reason；图不在 source/ 审查集合 404 |
 | POST | `/api/v1/datasets/{id}/review/export` | 导出驳回清单 markdown 至数据集目录（与改标清单同构：逐项图名+理由+XAL 直达行） |
 | POST | `/api/v1/datasets/{id}/drops-ack` | 确认当前投影丢弃签名；待确认状态按 `drops.count>0 ∧ signature≠acked` 现算，提交训练时有未确认 drops 则 409 |
+| POST | `/api/v1/datasets/{id}/xal-rescan` | 存活 XAL 实例推 rescan（阶段 1c）：加图/类别动作完成后调用，新图立即可标；无存活实例幂等 no-op 返回 `{delivered:false}`（不为此冷启动 GUI），零写盘 |
 
 校验报告契约：新建/加图/validate 均含 `drops`、`degenerate`、`out_of_bounds`、`orphan`（图↔JSON）、任务特化问题与 `fixable` 标记；v1.4 增 `stem_conflict` 红灯和跨任务投影信息级 lint，`task_mismatch` 只剩不可投影者。`approved_only` 移至 splits preview/create body；`GET /datasets/{id}` 与列表保留审查进度摘要；`POST /tasks` 附审查完成度与实效集提示。审查状态仍寄生 JSON，v1.4 DB schema 为 v6。
+
+### XAL 协同（阶段 1c，2026-11-17）
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/v1/xal/open` | 在 X-AnyLabeling 桌面端打开指定图片：body `{image}`；单实例复用（已开窗口其内加载并前置）；托管真源图自动带 `--dir source/ --classes classes.txt`（外部图不带——零类别表写入承诺）；强制 `QT_QPA_PLATFORM=xcb`、冷启动 `--labels … --validatelabel exact` 软守卫。spawn 失败（训练 python 未指向 XAL 环境）500 |
 
 ### 数据集域切片（Tiling，2026-10-30，ADR 0004）
 
@@ -95,6 +109,7 @@
 | GET | `/api/v1/runs/{uid}/analysis` | 错误分析读（M8 01/02）：`{summary(P/R/F1/计数/Top混淆/小目标), sweep(阈值曲线+建议conf), per_image[逐图错误明细：全部含逐框记录的 val 图（image/tp/fp/fn/confusion/score 错框数降序/overlay），无 Top10 截断], matrix(axis+cells 含背景)}`；未分析返回 null |
 | POST | `/api/v1/runs/{uid}/analysis` | 跑错误分析：训练 venv 低置信度全量推理 + IoU 贪心匹配入 run_sample_errors；仅 done Run；重复触发覆盖。body `{conf?}`（默认 0.25）设分析口径——低于该 conf 的预测框视同未检出，summary 回填 `conf`；同 Run 已推理过（predictions.jsonl 与 _done 在）则复用结果仅平台侧重算；阈值扫描恒基于全量匹配。segment/obb 任务 GT 与预测另采归一化 `poly`（预测取 masks.xyn）——匹配仍按外接矩形 IoU，叠加图与 `box` 字段绘/存多边形本体 |
 | GET | `/api/v1/runs/{uid}/analysis/cell?gt=&pred=` | 混淆矩阵点格筛选：该 (GT,Pred) 格逐框记录（UI 明细表点格后整表切换为此数据；眼睛按钮据此渲染**格内聚焦叠加**——该图只画本格记录，按格缓存于 analysis/overlays_cells/，随重算失效） |
+| GET | `/api/v1/runs/{uid}/analysis/cell/overlay?gt=&pred=&image=` | 格内单图聚焦叠加（阶段 1c）：只画该格在该图的记录，产物按格缓存 `analysis/overlays_cells/<gt>__<pred>/`，随重算失效；返回 `{path}`（字节经 `POST /thumb/sign` 签名展示）；该图该格无记录 404、Run 无运行目录 409 |
 | POST | `/api/v1/runs/{uid}/analysis/export` | 导出 FN/FP 改标清单 markdown 至 Run 目录 |
 | POST | `/api/v1/runs/{uid}/test-infer` | 训后试跑（M8 05）：body `{image, conf?, iou?}`；image 支持单图/图片目录（递归取前 30 张，响应附 `dir_total` 供截断提示）/视频（抽帧）；按需导出 ONNX 缓存 + 叠框图 |
 | GET | `/api/v1/model-library` | 模型库目录视图（M8 07）：items[{name,size_mb,mtime,run_uid,verified,is_latest}] |
@@ -117,9 +132,13 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 | :--- | :--- | :--- |
 | POST | `/api/v1/tasks` | 创建任务。body: `{name, base_model, dataset, split_uid?, format_id?, epochs, imgsz, batch, patience, device, workers, seed, extra_args, agent}`；`name` 会落为出队目录名（ADR 0013）：含 `/` `\` 控制字符、或不含任何字母/数字/汉字（纯符号/空白视同空名）→ `invalid_args`(400)，HTTP 与 Agent MCP 工具共用此校验；`split_uid` 省略即沿用最近切分（`created_at` 倒序首项，无 active 指针），显式 uid 不属该数据集 404，外部数据集走自带 data.yaml；`format_id` 省略即按 `backend_id → format_id` 注册表取（当前唯一 `ultralytics → yolo`），不可由用户选择；创建时按出队口径同算**实效集**（切分成员 − 盘上缺失 − 排除在册）并在响应回显 `{train, val, dropped{missing[], excluded[]}}`，剔除计数只提示不拒训、train 或 val 为空 → `state_conflict`(409)，有未确认投影 drops → 409；`base_model` = 预训练权重——官方模型名（ultralytics 首次自动下载）或本地 .pt 绝对路径（如历史 Run 的 best.pt），原样传训练子进程 `YOLO(...)`，不做存在性校验；`extra_args` 为对齐 ultralytics 8.4.100 的全量官方训练参数（见 `src/visiontrainer/training/params.py`，非法键/越界值 400 拒绝）；含 `agent:{max_rounds, approval, objective}` 即调参任务（06），Agent 轮内决策仍受其白名单 clamp |
 | GET | `/api/v1/tasks` | 列表（status、source、primary_metric、dataset、split_uid、format_id、created_at；**2026-10-30 起每任务附 `runs` Run 概要列表**——uid/round_no/status/pruned/primary_metric/error/epochs（实际产出 epoch 数）/started_at/finished_at，在跑轮带 progress/prog_frac、排队轮带位次与 block_reason——与 `rounds` 计数并存，训练页按数据集分组每 Run 一行渲染；取消轮一律保留） |
+| GET | `/api/v1/queue` | 队列当前态快照（阶段 1c）：`{running_uid, queued_uids:[按入队序], block_reason}`——`queue.updated` 事件的 REST 补齐源（事件无回放，初始加载与断线重连读这里），口径与出队循环的发布载荷逐字一致 |
 | GET | `/api/v1/tasks/{id}` | 详情（含 runs 概要、Agent 轮次时间线数据与 `decisions` 决策归档——changes/clamps/analysis/param_importance 快照，M7 06） |
 | DELETE | `/api/v1/tasks/{id}?delete_files=` | 删除（级联删行，磁盘默认保留） |
-| POST | `/api/v1/tasks/{id}/approve` | 审批门裁决。body: `{action: "continue" \| "stop"}`（manual 模式） |
+| POST | `/api/v1/tasks/{id}/approve` | 审批门裁决（ADR 0007 四态）：body `{action: "approve" \| "approve_with_changes", hyperparameters?} \| {action: "reject"} \| {action: "stop"}`（manual 模式；旧 continue/stop 值在循环读侧兼容映射）；`approve_with_changes` 附调整后超参 |
+| POST | `/api/v1/tasks/{id}/preapproval` | 批量预审授权（ADR 0007）：body `{rounds: N}`——接下来 N 轮一次放行，流水留档可审计 |
+| DELETE | `/api/v1/tasks/{id}/preapproval` | 撤销批量预审：下一轮立即回到逐轮审批 |
+| POST | `/api/v1/tasks/{id}/agent-mode` | 自主档位切换（ADR 0007）：body `{approval: "autonomous" \| "supervised"}`，下一轮生效 |
 | GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照，v1.4 冻结三段：`split{uid,params,memo,grouped}` / `effective{train[],val[],dropped{missing[],excluded[]}}` / `format{format_id,converter_version,projection_version,class_map,entry_path}`，连同当轮参数、权重标识、类别表哈希与标签聚合哈希 `labels`；早于该功能的 Run 为 null）；出队新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
 | DELETE | `/api/v1/runs/{uid}?delete_files=` | 删除单条训练记录（2026-10-31）：仅终态（done/failed/cancelled）可删，queued/running/stopping 409；只删该轮，其余轮次不受影响；子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策/部署登记）一并清理；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；`delete_files=true` 另删该轮 run_dir（删空任务时整任务目录）；磁盘默认保留 |
 | GET | `/api/v1/runs/{uid}/logs?tail=200` | 日志尾读（配合日志页轮询） |
@@ -136,6 +155,13 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 | :--- | :--- | :--- |
 | POST | `/api/v1/runs/{uid}/deploy` | 导出 ONNX + 组装模型库目录 + 导出验证（后台任务链）；类别名回查读该 Run 快照的 `format.class_map`，不回读当前类别表 |
 | GET | `/api/v1/deployments` | 已部署清单（含 LRU 提示依据的顺序） |
+
+### 训练域元数据（阶段 1c，2026-11-17）
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/training/params` | 训练参数白名单元数据（GROUPS 透传）：`{groups: {分组名: [{key, type, default, label, min?, max?, options?}]}}`——向导表单构建与超参 diff（提交只带非默认项）的前端真源，对齐 ultralytics 官方参数面 |
+| GET | `/api/v1/training/estimate` | 时长预估（M7 02）：历史 done Run 每 epoch 秒数中位数 `{seconds_per_epoch, samples}`；无样本 `null` |
 
 ## WebSocket
 
