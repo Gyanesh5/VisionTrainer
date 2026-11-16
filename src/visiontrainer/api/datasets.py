@@ -212,6 +212,40 @@ def probe_classes(body: ProbeClassesBody):
         return _error_response(exc)
 
 
+class ExpandPathsBody(BaseModel):
+    """加图同名冲突的「跳过重试」载体：目录展开成文件清单并按 basename 剔除。"""
+
+    paths: list[str]
+    skip: list[str] = []
+
+
+@router.post("/expand-paths")
+def expand_add_paths(body: ExpandPathsBody):
+    """把「目录」展开成图片 + 同词干 JSON 的文件清单，并按 skip 剔除（阶段 3b 补只读缺口）。
+
+    只服务加图 409 后「跳过这些文件后重试」这一次重发：图片清单口径与校验同源
+    （validate.list_images），JSON 按同词干配对带入，负样本（无 JSON 的图）照投。
+    前身是 NiceGUI 页面层 _expand_add_paths（有盘访问）；React 前端无盘，故收进 REST。
+    零写入；目录不存在按空集处理（与加图路径校验各管各段）。"""
+    from ..datasets.validate import list_images
+
+    skip = set(body.skip)
+    out: list[str] = []
+    for raw in body.paths:
+        p = Path(raw).expanduser()
+        if p.is_dir():
+            for img in list_images(p):
+                if img.name in skip:
+                    continue
+                out.append(str(img))
+                sidecar = img.with_suffix(".json")
+                if sidecar.is_file():
+                    out.append(str(sidecar))
+        elif p.is_file() and p.name not in skip:
+            out.append(str(p))
+    return {"files": out}
+
+
 @router.get("/{name}")
 def get_dataset(name: str):
     try:

@@ -945,6 +945,121 @@ body {
   flex: 1;
 }
 
+/* 详情工作区内部 */
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-1);
+}
+
+.panel-head > p {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.problem-group {
+  border-top: 1px solid var(--chrome-border);
+  padding: var(--space-1) 0 0;
+  margin-top: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.problem-group p {
+  margin: 0;
+}
+
+.problem-line {
+  font-size: var(--font-label);
+  margin: 0;
+}
+
+.append-row {
+  display: flex;
+  gap: 8px;
+  margin: var(--space-1) 0;
+}
+
+.append-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.cls-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.cls-line input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.suspect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.suspect-row select {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.exclude-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.exclude-row .problem-line {
+  flex-sh: 0;
+}
+
+.exclude-row .form-hint {
+  flex: 1;
+  min-width: 0;
+}
+
+.is-danger-text {
+  color: var(--alarm-critical);
+}
+
 /* 动效回退（DESIGN.md §5） */
 
 

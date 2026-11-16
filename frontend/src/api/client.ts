@@ -210,6 +210,139 @@ export const datasetsApi = {
   list: () => request<DatasetBrief[]>("/api/v1/datasets"),
   get: (name: string) =>
     request<DatasetDetail>(`/api/v1/datasets/${encodeURIComponent(name)}`),
+  validate: (name: string) =>
+    request<ValidationReport & { validation_summary?: ValidationSummary }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/validate`,
+      { method: "POST" },
+    ),
+  reconcile: (name: string) =>
+    request<{ changed: boolean; revalidated?: boolean; total_images?: number; corrupted?: number }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/reconcile`,
+      { method: "POST" },
+    ),
+  addImages: (
+    name: string,
+    body: { paths: string[]; transfer: "copy" | "move"; append_classes?: string[] },
+  ) =>
+    request<{ added: number; images: string[]; classes: string[]; appended_classes?: string[]; transfer: string }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/images`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  /** 类别表四动作唯一入口（PUT /classes）：参数随 action 走，契约见 docs/api.md */
+  classesAction: (
+    name: string,
+    body: {
+      action: "append" | "rename" | "reorder" | "delete";
+      classes?: string[];
+      class_name?: string;
+      confirm?: boolean;
+    },
+  ) =>
+    request<Record<string, unknown>>(`/api/v1/datasets/${encodeURIComponent(name)}/classes`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  renameSuspects: (name: string) =>
+    request<{
+      unregistered?: { label: string; instances: number }[];
+      empty_classes?: { class: string; row: number }[];
+      pairs?: { old: string; new: string; instances: number; basis?: string }[];
+      ambiguous?: boolean;
+    }>(`/api/v1/datasets/${encodeURIComponent(name)}/rename-suspects`),
+  rollbackClasses: (name: string) =>
+    request<{ action?: string; restored: string[]; backup_dir: string }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/classes/rollback`,
+      { method: "POST" },
+    ),
+  exclude: (name: string, files: string[], reason = "") =>
+    request<{ excluded: string[] }>(`/api/v1/datasets/${encodeURIComponent(name)}/exclude`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files, reason }),
+    }),
+  restore: (name: string, files: string[]) =>
+    request<{ restored: string[] }>(`/api/v1/datasets/${encodeURIComponent(name)}/restore`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ files }),
+    }),
+  deleteDataset: (name: string, force = false) =>
+    request<{ trashed: string }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}${force ? "?force=true" : ""}`,
+      { method: "DELETE" },
+    ),
+  autoFix: (name: string) =>
+    request<{
+      fixed_files: number;
+      orphans_moved: number;
+      backup_dir: string;
+      validation?: { ok?: boolean };
+    }>(`/api/v1/datasets/${encodeURIComponent(name)}/autofix`, { method: "POST" }),
+  dropsAck: (name: string) =>
+    request<Record<string, unknown>>(`/api/v1/datasets/${encodeURIComponent(name)}/drops-ack`, {
+      method: "POST",
+    }),
+  /** 体检缓存读（未体检 null；指纹失配带 stale；leaks 由服务端按切分即时算） */
+  cachedAudit: (name: string) =>
+    request<{
+      summary?: { exact?: number; near?: number; leaks?: number; imbalance_ok?: boolean; rule?: string };
+      stale?: boolean;
+      from_cache?: boolean;
+      checked_at?: string | null;
+      files?: number;
+      split_uid?: string | null;
+      skipped_undecodable?: number;
+      leaks?: { kind: string; items: { image: string; name: string; split: string }[] }[];
+      exact_groups?: { image: string; name: string; split: string }[][];
+      near_groups?: { image: string; name: string; split: string }[][];
+      imbalance?: { rule?: string; ok?: boolean; items?: { class: string; count: number; ratio: number }[] };
+    } | null>(`/api/v1/datasets/${encodeURIComponent(name)}/audit`),
+  xalRescan: (name: string) =>
+    request<{ delivered: boolean }>(`/api/v1/datasets/${encodeURIComponent(name)}/xal-rescan`, {
+      method: "POST",
+    }),
+  xalOpen: (image: string) =>
+    request<Record<string, unknown>>("/api/v1/xal/open", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image }),
+    }),
+  /** 逐类实例数（类别表四动作的显示依据，读最近画像；画像缺位 null——不猜 0） */
+  statsInstanceCounts: async (name: string): Promise<Record<string, number> | null> => {
+    let payload: {
+      by_split?: Record<string, { by_class?: Record<string, number> }> | null;
+      per_image?: { label_counts?: Record<string, number>; cls?: string }[];
+      task_type?: string;
+    };
+    try {
+      payload = await request(`/api/v1/datasets/${encodeURIComponent(name)}/stats`);
+    } catch {
+      return null; // 提示性数据读失败不惊扰用户：服务端 409 才是删除的权威判据
+    }
+    const counts: Record<string, number> = {};
+    if (payload.by_split) {
+      for (const side of Object.values(payload.by_split)) {
+        for (const [cls, n] of Object.entries(side.by_class ?? {})) {
+          counts[cls] = (counts[cls] ?? 0) + (n ?? 0);
+        }
+      }
+      return counts;
+    }
+    for (const r of payload.per_image ?? []) {
+      for (const [cls, n] of Object.entries(r.label_counts ?? {})) {
+        counts[cls] = (counts[cls] ?? 0) + (n ?? 0);
+      }
+      if (payload.task_type === "classify" && r.cls) {
+        counts[r.cls] = (counts[r.cls] ?? 0) + 1;
+      }
+    }
+    return counts;
+  },
   create: (body: {
     name: string;
     task_type: TaskType;
@@ -228,6 +361,13 @@ export const datasetsApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
+    }),
+  /** 加图同名冲突的「跳过重试」载体：目录展开成文件清单并按 basename 剔除（零写入） */
+  expandPaths: (name: string, paths: string[], skip: string[]) =>
+    request<{ files: string[] }>(`/api/v1/datasets/${encodeURIComponent(name)}/expand-paths`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ paths, skip }),
     }),
   probeClasses: (srcDir: string, taskType: TaskType) =>
     request<ProbeClassesResult>("/api/v1/datasets/probe-classes", {

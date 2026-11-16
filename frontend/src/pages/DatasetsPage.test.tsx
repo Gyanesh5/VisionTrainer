@@ -18,6 +18,8 @@ vi.mock("../api/client", async (importOriginal) => {
       probeClasses: vi.fn(),
       registerExternal: vi.fn(),
       get: vi.fn(),
+      renameSuspects: vi.fn(),
+      statsInstanceCounts: vi.fn(),
     },
     operationsApi: { snapshot: vi.fn() },
   };
@@ -140,6 +142,7 @@ describe("DatasetsPage list", () => {
 
   it("card_click_navigates_to_detail_route", async () => {
     list.mockResolvedValue(sampleList);
+    // 批 2 起详情页是完整状态流：类别区副作用一并 mock（不落真 fetch）
     vi.mocked(datasetsApi.get).mockResolvedValue({
       ...sampleList[0],
       source_dir: "/tmp/ds/plate/source",
@@ -149,13 +152,15 @@ describe("DatasetsPage list", () => {
       fingerprint_stale: false,
       validation_summary: { ok: true, total_images: 128 },
     });
+    vi.mocked(datasetsApi.renameSuspects).mockResolvedValue({});
+    vi.mocked(datasetsApi.statsInstanceCounts).mockResolvedValue({ scratch: 3 });
     const user = userEvent.setup();
     renderList();
     await screen.findByTestId("ds-grid");
     await user.click(screen.getAllByTestId("dataset-card")[0]);
-    // 详情路由读 meta（批 1 壳：名称 + 摘要）
+    // 详情路由读 meta 并渲染状态卡
     await waitFor(() => expect(datasetsApi.get).toHaveBeenCalledWith("plate"));
-    expect(await screen.findByTestId("detail-summary")).toBeInTheDocument();
+    expect(await screen.findByTestId("status-cards")).toBeInTheDocument();
   });
 });
 
