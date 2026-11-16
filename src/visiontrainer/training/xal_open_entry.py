@@ -29,13 +29,19 @@ wire 协议（一请求一行 UTF-8 JSON + ``\\n``，一连接一 ack）：
       - 客户端发出请求后必须等到 ok ack 才算送达；连不上 / 不回复 / 超时 /
         ok=false 一律返回 False，调用方回落冷启动。
 
-换集序列（驱动 XAL 既有 UI 状态，方法名以 vendored v4.0.5 为准）：
+换集序列（驱动 XAL 既有 UI 状态，方法名以 vendored v4.3.3 为准）：
     may_continue → load_labels(clear_existing=True) → import_image_folder → load_file
 
 调起参数恒带 ``--labels <数据集>/classes.txt --validatelabel exact``。
 **「exact」只是拦新建/编辑标注的软守卫**：它拦不住存量 JSON 里已有的表外类别，
 也拦不住 Label Manager 直接建/删类别的绕道（ADR 0009 Considered Options），
 根治靠平台新建/加图阻断和疑似改名识别；产品文案与文档措辞保持一致，不做硬承诺。
+
+调起参数不回写用户 rc（2026-11-16 根治）：XAL 退出/设置保存时 save_config(self._config)
+会把合并了 CLI 的运行时配置整体回写 ~/.xanylabelingrc，手动 .desktop 启动读同一份
+rc——平台会话一关，exact 校验和当时数据集的类别表就焊进 rc。冷启动早期改绑
+save_config，持久化时剔除这两个每次调起参数、回填 rc 原值；会话内 config 不动，
+exact 校验与 Label 面板行为不变。
 
 平台侧调用点（本文件同时是协议唯一实现处，纯 stdlib，可被平台 venv 直接 import）：
 - 「在 X-AnyLabeling 中打开」：Popen 本脚本，cmd=open 失败即自然冷启动；
@@ -47,10 +53,12 @@ wire 协议（一请求一行 UTF-8 JSON + ``\\n``，一连接一 ack）：
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import os
 import socket
 import sys
+from collections.abc import Callable
 
 # 服务名按 uid 分域（单机自用，防多用户互串）；绝对路径监听，stdlib 客户端零 Qt 即可探测。
 # XAL_REUSE_SOCK 环境变量可覆盖——假服务端测试与多域并存用；客户端与服务端同源生效。
@@ -277,6 +285,19 @@ def install_reuse_server() -> None:
     Qt 依赖全部延迟在本函数内 import：平台 venv（无 PyQt6）可安全 import 本模块的
     协议纯函数与 send_to_running_instance。
     """
+    # 时序红线：save_config 过滤必须先于 mainwindow import——mainwindow 传递 import
+    # label_widget，其 `from ...config import save_config` 绑定到谁由这一先后决定；
+    # settings/controller、model_manager 尚未 import，随 anylabeling.app 启动自然拿过滤版。
+    import anylabeling.config as anylabeling_config_module
+
+    rc_path = os.path.join(
+        anylabeling_config_module.get_work_directory(), ".xanylabelingrc"
+    )
+    anylabeling_config_module.save_config = make_persist_filtered_saver(
+        anylabeling_config_module.save_config,
+        load_persist_baseline(rc_path),
+    )
+
     import anylabeling.views.mainwindow as mainwindow_module
     from PyQt6.QtCore import QTimer
     from PyQt6.QtNetwork import QLocalServer, QLocalSocket
@@ -351,6 +372,47 @@ def build_launch_args(image: str, classes: str | None) -> list[str]:
         print(f"类别表不存在，本次调起不带 --labels/--validatelabel：{classes}",
               file=sys.stderr)
     return argv
+
+
+# 每次调起参数（build_launch_args 注入的 CLI 覆盖项）不进用户 rc：持久化时剔除并回填
+# rc 原值。空基线 = rc 从未持久化过这两个键 → 直接剔除，保持出厂形状（不写 null）。
+_PERSIST_EXCLUDED_KEYS = ("labels", "validate_label")
+
+
+def load_persist_baseline(rc_path: str) -> dict[str, object]:
+    """读 rc 文件中调起参数键的应持久化值；文件缺失/键缺席/顶层非映射 → 空 dict。"""
+    import yaml  # XAL venv 硬依赖；本模块协议面保持 stdlib 可 import，故延迟进函数
+
+    try:
+        with open(rc_path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+    except FileNotFoundError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {key: data[key] for key in _PERSIST_EXCLUDED_KEYS if key in data}
+
+
+def make_persist_filtered_saver(
+    original: Callable[[dict], object],
+    baseline: dict[str, object],
+) -> Callable[[dict], object]:
+    """包一层 save_config：写副本剔除调起参数键、回填 rc 原值；传入的 config 不改动。
+
+    会话内 config 保持 CLI 值（exact 校验与 Label 面板行为不变），只有落到磁盘的
+    视图被过滤。
+    """
+
+    @functools.wraps(original)
+    def saver(config: dict) -> object:
+        filtered = {
+            key: value for key, value in config.items()
+            if key not in _PERSIST_EXCLUDED_KEYS
+        }
+        filtered.update(baseline)
+        return original(filtered)
+
+    return saver
 
 
 def main() -> int:

@@ -381,3 +381,63 @@ def test_入口CLI_open目标图不存在_退出码2(tmp_path):
         env={"XAL_REUSE_SOCK": str(tmp_path / "none.sock"), "PATH": "/usr/bin:/bin"},
         capture_output=True, text=True, timeout=30)
     assert proc.returncode == 2
+
+
+# --------------------------------------------------------------------------- 调起参数不持久化（rc 防污染）
+
+
+def test_persist_baseline_读出现存两键(tmp_path):
+    # rc 其余键（嵌套 shape 等）不进基线——只关心调起参数键的应持久化值
+    rc = tmp_path / ".xanylabelingrc"
+    rc.write_text(
+        "labels:\n- circle\nvalidate_label: exact\nshape:\n  line_color: [0, 0, 0]\n",
+        encoding="utf-8")
+    assert xal.load_persist_baseline(str(rc)) == {
+        "labels": ["circle"], "validate_label": "exact"}
+
+
+@pytest.mark.parametrize("content", [
+    "",                       # 空文件
+    "language: zh_CN\n",      # 两键均缺席
+    "- a\n- b\n",             # 顶层非映射
+])
+def test_persist_baseline_键缺席_返回空(tmp_path, content):
+    rc = tmp_path / ".xanylabelingrc"
+    rc.write_text(content, encoding="utf-8")
+    assert xal.load_persist_baseline(str(rc)) == {}
+
+
+def test_persist_baseline_文件缺失_返回空(tmp_path):
+    assert xal.load_persist_baseline(str(tmp_path / "none.yaml")) == {}
+
+
+def test_persist_saver_剔除调起两键并回填基线_实参不动():
+    received: dict = {}
+
+    def fake_save(config: dict) -> int:
+        received.clear()
+        received.update(config)
+        return 1
+
+    saver = xal.make_persist_filtered_saver(
+        fake_save, {"labels": ["chip_ok"], "validate_label": None})
+    live = {"labels": ["pole_ng"], "validate_label": "exact", "language": "zh_CN"}
+    assert saver(live) == 1
+    # 持久化视图：调起参数键回填 rc 原值，其余键原样
+    assert received == {"labels": ["chip_ok"], "validate_label": None,
+                        "language": "zh_CN"}
+    # 会话内 config 不被改动：exact 校验与 Label 面板行为保持到进程退出
+    assert live == {"labels": ["pole_ng"], "validate_label": "exact",
+                    "language": "zh_CN"}
+
+
+def test_persist_saver_基线为空_两键直接剔除(tmp_path):
+    # rc 从未持久化过这两个键 → 持久化视图保持出厂形状（不写入 labels: null）
+    received: dict = {}
+
+    def fake_save(config: dict) -> None:
+        received.update(config)
+
+    saver = xal.make_persist_filtered_saver(fake_save, {})
+    saver({"labels": ["pole_ng"], "validate_label": "exact", "dark_mode": True})
+    assert received == {"dark_mode": True}
