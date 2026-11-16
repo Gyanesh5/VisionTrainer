@@ -13,6 +13,7 @@ import { OpLines, useOpLines } from "../components/OpProgress";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { AddImagesDialog } from "../components/datasets/AddImagesDialog";
 import { ClassTablePanel } from "../components/datasets/ClassTablePanel";
+import { ReviewFlow } from "../components/datasets/ReviewFlow";
 import { AUTO_FIX_CODES, GUIDANCE, PROBLEM_ZH, formatTs } from "../components/datasets/domain";
 
 /**
@@ -24,12 +25,13 @@ import { AUTO_FIX_CODES, GUIDANCE, PROBLEM_ZH, formatTs } from "../components/da
  * 批 2 实做 来源/类别表/校验·画像/排除恢复 与加图、删除；审查/体检/切片/导出按批 3/5 落位。
  */
 
-type WsKey = "source" | "classes" | "validation" | "exclude";
+type WsKey = "source" | "classes" | "validation" | "review" | "exclude";
 
 const WS_TITLES: Record<WsKey, string> = {
   source: "来源",
   classes: "类别表",
   validation: "校验与画像",
+  review: "标注审查",
   exclude: "排除与恢复",
 };
 
@@ -280,7 +282,24 @@ export function DatasetDetailPage() {
         </div>
       )}
 
-      {/* 工作区（点状态卡展开同名区；懒渲染——逐区只挂当前打开的一只） */}
+      {/* 工作区入口行：状态卡之外的工作区（审查）从这里进；全部区也可直达 */}
+      {managed && (
+        <div className="ws-nav" role="group" aria-label="工作区导航">
+          {(["source", "classes", "validation", "review", "exclude"] as WsKey[]).map((key) => (
+            <button
+              key={key}
+              type="button"
+              className={`level-btn ${openWs === key ? "active" : ""}`}
+              onClick={() => openSection(key)}
+            >
+              {WS_TITLES[key]}
+              {key === "review" && meta.review ? ` ${meta.review.done}/${meta.review.total}` : ""}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {/* 工作区（点状态卡/入口行展开同名区；懒渲染——逐区只挂当前打开的一只） */}
       {managed && (Object.keys(WS_TITLES) as WsKey[]).map((key) => (
         <section
           key={key}
@@ -303,6 +322,9 @@ export function DatasetDetailPage() {
               )}
               {key === "exclude" && (
                 <ExcludePanel meta={meta} onChanged={() => invalidateAll()} onMessage={notify} />
+              )}
+              {key === "review" && (
+                <ReviewFlow meta={meta} onMessage={notify} onChanged={() => invalidateAll()} />
               )}
             </>
           )}

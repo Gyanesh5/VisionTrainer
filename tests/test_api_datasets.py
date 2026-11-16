@@ -208,3 +208,25 @@ def test_expand_paths_lists_images_with_sidecars_and_skip(datasets_root, detect_
     r = client.post("/api/v1/datasets/expand-paths", json={"paths": [str(src2)], "skip": []})
     names3 = [Path(f).name for f in r.json()["files"]]
     assert names3 == ["x.png", "x.json"]
+
+
+# ---------------------------------------------------------------- GET /datasets/{name}/annotation（阶段 3b 补只读缺口）
+
+def test_annotation_returns_labelme_json_for_source_image(datasets_root, detect_source, client):
+    """审查画布叠加的数据源：image 取 source/ 内 basename，返回标注 JSON 全文，零写入。"""
+    build_dataset("plate", "detect", detect_source)  # 出生即拷贝真源（labeled 态）
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "car0.png"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["imageWidth"] == 640 and body["imageHeight"] == 480  # conftest 夹具真值
+    assert body["shapes"][0]["label"] == "car"
+
+    # 负样本（有 JSON 无 shapes 也算有标注）；真正无 JSON 的图才 404
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "negative.png"})
+    assert r.status_code == 200 and r.json()["shapes"] == []
+
+    # basename 之外不解析：穿越路径按名截断防穿越（../annot/car1.png → car1.png，仍在 source/ 内）
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "../annot/car1.png"})
+    assert r.status_code == 200 and r.json()["shapes"][0]["label"] == "car"
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "missing.png"})
+    assert r.status_code == 404

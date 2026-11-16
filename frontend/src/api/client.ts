@@ -112,6 +112,22 @@ export const REVIEW_REASONS = ["漏标", "多标", "框不准", "类别错"] as 
 /** 审查四态 + 有效状态语义（effective 恒为四态之一；modified 是改标回流标记） */
 export type ReviewState = "pending" | "approved" | "rejected" | "skipped";
 
+/** 审查队列条目（GET /review；迭代源=source/ 带标注 JSON 的图，负样本与已排除不入列） */
+export interface ReviewItem {
+  image: string;
+  label: string;
+  name: string;
+  state: ReviewState;
+  effective: ReviewState;
+  reason: string;
+  note: string;
+  decided_at: string | null;
+  modified: boolean;
+  source: string;
+  susp: number;
+  sources: string[];
+}
+
 export const REVIEW_STATE_ZH: Record<ReviewState, string> = {
   pending: "待审",
   approved: "通过",
@@ -302,6 +318,40 @@ export const datasetsApi = {
       near_groups?: { image: string; name: string; split: string }[][];
       imbalance?: { rule?: string; ok?: boolean; items?: { class: string; count: number; ratio: number }[] };
     } | null>(`/api/v1/datasets/${encodeURIComponent(name)}/audit`),
+  /** 审查队列读（可疑度降序、双指纹现算有效状态；大集解析秒级——后端登记长操作） */
+  reviewQueue: (name: string) =>
+    request<{
+      counts: Record<ReviewState, number> & { modified?: number };
+      done: number;
+      total: number;
+      unlabeled: number;
+      items: ReviewItem[];
+    }>(`/api/v1/datasets/${encodeURIComponent(name)}/review`),
+  /** 判定一图（窄写原子落盘；rejected 必填 reason） */
+  reviewDecide: (name: string, body: { image: string; state: ReviewState; reason?: string; note?: string }) =>
+    request<{ image: string; state: ReviewState; effective: ReviewState; reason: string; checked_synced: boolean }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/review`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  exportReviewRejects: (name: string) =>
+    request<{ path: string; count: number }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/review/export`,
+      { method: "POST" },
+    ),
+  /** 真源标注 JSON 全文（审查叠加数据源；负样本 404） */
+  annotation: (name: string, image: string) =>
+    request<{
+      imageWidth?: number;
+      imageHeight?: number;
+      shapes?: { label?: string; points?: number[][]; shape_type?: string }[];
+      flags?: Record<string, unknown>;
+    }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/annotation?image=${encodeURIComponent(image)}`,
+    ),
   xalRescan: (name: string) =>
     request<{ delivered: boolean }>(`/api/v1/datasets/${encodeURIComponent(name)}/xal-rescan`, {
       method: "POST",

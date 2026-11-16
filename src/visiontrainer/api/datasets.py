@@ -18,6 +18,7 @@ v1.4 票 03 硬切：`POST /datasets/import`、`POST /{name}/resplit`、`POST /{
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Literal
 
@@ -512,6 +513,31 @@ def review_decide(name: str, body: ReviewDecideBody):
     """判定一图（M9 02）：窄写 checked/vt_review 原子落盘（ADR 0003）；rejected 必填 reason。"""
     try:
         return svc.review_decide(name, body.image, body.state, body.reason, body.note)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.get("/{name}/annotation")
+def get_annotation(name: str, image: str):
+    """读取真源标注 JSON 全文（阶段 3b 补只读缺口：审查画布叠加与大图合成的数据源）。
+
+    NiceGUI 页面层此前直接读盘；React 前端无盘访问，故收进 REST。`image` 是 source/ 内
+    图片 basename，同名校验防穿越；无标注 JSON（负样本）404。零写入。"""
+    try:
+        _, ds_dir = svc._managed_dataset(name, None, "标注审查")
+        from ..datasets.split import label_json_of
+
+        source = svc._source_dir(ds_dir)
+        p = source / Path(image).name
+        if not p.is_file():
+            raise DatasetError("not_found", f"图片不在 source/ 内：{Path(image).name}")
+        lbl = label_json_of(source, p)
+        if lbl is None:
+            raise DatasetError("not_found", f"负样本无标注 JSON：{p.name}")
+        try:
+            return json.loads(lbl.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            raise DatasetError("invalid_args", f"标注 JSON 读取失败：{exc}") from exc
     except DatasetError as exc:
         return _error_response(exc)
 

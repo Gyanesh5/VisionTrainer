@@ -69,6 +69,7 @@
 | :--- | :--- | :--- |
 | GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——迭代源为 `source/` 下带 JSON 的图（v1.4 去掉清单归属 `split` 维度）；有效状态按双指纹现算（shapes 哈希变更 → pending + modified 标记）；负样本（无标注 JSON）与排除在册图不入前进序列；可疑度分值与来源（校验/审计/错误分析）由平台聚合，队列按可疑度降序 |
 | POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单原子写回 JSON，rejected 必填 reason；图不在 source/ 审查集合 404 |
+| GET | `/api/v1/datasets/{id}/annotation?image=` | 读取真源标注 JSON 全文（阶段 3b 补只读缺口，审查画布叠加/大图合成的数据源）：`image` 为 source/ 内图片 basename（同名校验防穿越）；返回 labelme JSON 原文；无标注 JSON（负样本）或图不在 source/ 404、坏 JSON 400。零写入 |
 | POST | `/api/v1/datasets/{id}/review/export` | 导出驳回清单 markdown 至数据集目录（与改标清单同构：逐项图名+理由+XAL 直达行） |
 | POST | `/api/v1/datasets/{id}/drops-ack` | 确认当前投影丢弃签名；待确认状态按 `drops.count>0 ∧ signature≠acked` 现算，提交训练时有未确认 drops 则 409 |
 | POST | `/api/v1/datasets/{id}/xal-rescan` | 存活 XAL 实例推 rescan（阶段 1c）：加图/类别动作完成后调用，新图立即可标；无存活实例幂等 no-op 返回 `{delivered:false}`（不为此冷启动 GUI），零写盘 |
