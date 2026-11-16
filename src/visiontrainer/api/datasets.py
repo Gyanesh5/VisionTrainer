@@ -18,6 +18,7 @@ v1.4 票 03 硬切：`POST /datasets/import`、`POST /{name}/resplit`、`POST /{
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 from fastapi import APIRouter
@@ -25,6 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from ..datasets import service as svc
+from ..datasets import xal as xal_lib
 from ..datasets.service import DatasetError
 from .opctx import long_op
 from .schemas import ErrorResponse
@@ -185,6 +187,27 @@ def create_dataset(body: CreateBody):
 def register_external(body: ExternalBody):
     try:
         return svc.register_external(body.name, body.task_type, body.path)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+class ProbeClassesBody(BaseModel):
+    """已标目录类别探测（阶段 1c 票 105）：新建向导预填，只读来源目录、零写入。"""
+
+    src_dir: str
+    task_type: str
+
+
+@router.post("/probe-classes")
+def probe_classes(body: ProbeClassesBody):
+    """探测已标目录的类别与图片数（向导「探测」按钮）：`{labels, counts, images}`。
+
+    结果不承重——确认后才写类别表；真正的表外类别由 `POST /datasets` 出生校验阻断。
+    长操作：登记 `ds:probe:{src_dir}`（与 UI 层同键）。"""
+    try:
+        with long_op(f"ds:probe:{body.src_dir}", f"探测类别 · {Path(body.src_dir).name}") as op:
+            return svc.probe_source_classes(body.src_dir, body.task_type,
+                                            progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -476,6 +499,15 @@ def drops_ack(name: str):
         return svc.ack_drops(name)
     except DatasetError as exc:
         return _error_response(exc)
+
+
+@router.post("/{name}/xal-rescan")
+def xal_rescan(name: str):
+    """存活 XAL 实例推 rescan（阶段 1c 票 105）：加图/类别动作完成后调用，新图立即可标。
+
+    无存活实例是幂等 no-op（`delivered: false`，不为此冷启动 GUI 窗口）；本动作零写盘，
+    只向单实例 socket 推送。"""
+    return {"delivered": xal_lib.rescan_dataset(name)}
 
 
 @router.post("/{name}/autofix")

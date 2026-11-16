@@ -11,6 +11,7 @@ from .system import router as system_router
 from .tasks import router as tasks_router
 from .thumbs import router as thumbs_router
 from .training import router as training_router
+from .xal import router as xal_router
 
 router = APIRouter()
 
@@ -21,6 +22,7 @@ v1.include_router(system_router)
 v1.include_router(tasks_router)
 v1.include_router(thumbs_router)
 v1.include_router(training_router)
+v1.include_router(xal_router)
 router.include_router(v1)
 
 

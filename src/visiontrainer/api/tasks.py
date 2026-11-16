@@ -245,6 +245,17 @@ def analysis_cell(uid: str, request: Request, gt: str = "", pred: str = ""):
     return {"entries": tsvc.analysis_cell(_manager(request), uid, gt or "背景", pred or "背景")}
 
 
+@router.get("/runs/{uid}/analysis/cell/overlay")
+@_maps_errors
+def analysis_cell_overlay(uid: str, request: Request, gt: str = "", pred: str = "",
+                          image: str = ""):
+    """混淆矩阵格内单图聚焦叠加（M8 02 · 阶段 1c 票 105）：只画该格在该图的记录，
+    其余标注一律不画（2026-10-29 用户反馈）。产物按格缓存 analysis/overlays_cells/，
+    随重算失效；返回 `{path}`，图片字节经 `POST /thumb/sign` 签名 URL 展示。"""
+    return {"path": tsvc.analysis_cell_overlay(_manager(request), uid,
+                                               gt or "背景", pred or "背景", image)}
+
+
 @router.post("/runs/{uid}/test-infer")
 @_maps_errors
 def test_infer(uid: str, request: Request, body: dict | None = None):

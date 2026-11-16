@@ -273,6 +273,39 @@ def test_analysis_cell_overlay_scoped_to_cell(m8_client):
         tsvc.analysis_cell_overlay(get_manager(), uid, "背景", "背景", fp_entry["image"])
 
 
+def test_analysis_cell_overlay_endpoint_returns_path(m8_client):
+    """REST 契约（阶段 1c 票 105）：端点返回 {path}（字节经 thumb/sign 展示）；
+    空格 404 错误信封。"""
+    c = m8_client
+    _tid, uid = _done_task(c, "ana-ovp")
+    c.post(f"/api/v1/runs/{uid}/analysis")
+
+    cell, image = None, None
+    for gt in ("car", "person", "背景"):
+        for pred in ("car", "person", "背景"):
+            if gt == pred:
+                continue
+            entries = c.get(f"/api/v1/runs/{uid}/analysis/cell",
+                            params={"gt": gt, "pred": pred}).json()["entries"]
+            if entries:
+                cell, image = (gt, pred), entries[0]["image"]
+                break
+        if cell:
+            break
+    assert cell, "stub 应至少注入一格记录"
+
+    r = c.get(f"/api/v1/runs/{uid}/analysis/cell/overlay",
+              params={"gt": cell[0], "pred": cell[1], "image": image})
+    assert r.status_code == 200
+    ov = Path(r.json()["path"])
+    assert ov.is_file() and "overlays_cells" in str(ov)
+
+    empty = c.get(f"/api/v1/runs/{uid}/analysis/cell/overlay",
+                  params={"gt": "背景", "pred": "背景", "image": image})
+    assert empty.status_code == 404
+    assert empty.json()["detail"]["error"]["code"] == "not_found"
+
+
 # ---------------------------------------------------------------- 03 复盘升级 + 04 部署阈值
 
 def test_report_includes_error_stats_and_next_steps(m8_client, monkeypatch):

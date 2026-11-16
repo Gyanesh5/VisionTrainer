@@ -1832,3 +1832,46 @@ def _brief(meta: dict, ds_dir: Path | None = None) -> dict:
         brief["path"] = meta.get("path")
         brief["has_data_yaml"] = meta.get("has_data_yaml")
     return brief
+
+
+# ---------------------------------------------------------------- 类别预填探测（阶段 1c 票 105）
+
+def _probe_label_shapes(label_path: str | None) -> list[dict]:
+    """宽松读标注 JSON 的 shapes（预填探测专用）：不可读/损坏归空，报错是校验的活。"""
+    if not label_path:
+        return []
+    try:
+        data = json.loads(Path(label_path).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        return []
+    shapes = data.get("shapes") if isinstance(data, dict) else None
+    return [s for s in (shapes or []) if isinstance(s, dict)]
+
+
+def probe_source_classes(src_dir: str, task_type: str, progress_cb=None) -> dict:
+    """探测已标 X-AnyLabeling 目录的类别与图片数（新建向导预填用，只读来源目录）。
+
+    与出生校验共用 scan_entries 的探测轮（classes 为空即不判表外类别），再逐标注收
+    shape label。结果不承重——用户确认后才是类别表，真正的表外类别由 create_dataset 阻断。
+
+    Args:
+        src_dir: 用户选中的已标目录。
+        task_type: 数据集任务类型。
+        progress_cb: 可选 (phase, cur, total) 回调（与出生/校验同约定）。
+
+    Returns:
+        {"labels": 去重排序后的类别名, "counts": {类别名: 出现次数}, "images": 图片数}
+    """
+    def _cb(phase: str):
+        return (lambda cur, total: progress_cb(phase, cur, total)) if progress_cb else None
+
+    src = Path(src_dir).expanduser()
+    if not src.is_dir():
+        raise DatasetError("invalid_args", f"来源目录不存在：{src}")
+    scan = scan_entries(src, task_type, [], progress=_cb("探测类别"))
+    counts: dict[str, int] = {}
+    for e in scan["entries"]:
+        for s in _probe_label_shapes(e.get("label")):
+            if s.get("label"):
+                counts[str(s["label"])] = counts.get(str(s["label"]), 0) + 1
+    return {"labels": sorted(counts), "counts": counts, "images": len(scan["entries"])}
