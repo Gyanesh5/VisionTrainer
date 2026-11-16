@@ -11,7 +11,7 @@ import {
   type ThumbUrl,
 } from "../../api/client";
 import { overlaySvg, overlaySvgInner, shapeLegend, type LabelJson } from "./overlay";
-import { openZoom, setZoomFollow, zoomFollowIfShown } from "./zoomViewer";
+import { openZoom, setZoomFollow } from "./zoomViewer";
 
 /**
  * 标注审查工作区（M9 02 键盘流，专利 2/3/4/5 密集区）：
@@ -135,9 +135,10 @@ export function ReviewFlow({
       { path: cur.image, box: 512 },
       { path: cur.image, box: 0 },
     ];
-    // 预签接下来 5 张的画布档，前进不断档
+    // 预签接下来 5 张的画布档与原图档（follow 槽换图需要 box=0 在场），前进不断档
     for (let i = idx + 1; i <= Math.min(idx + 5, filtered.length - 1); i += 1) {
       paths.push({ path: filtered[i].image, box: 512 });
+      paths.push({ path: filtered[i].image, box: 0 });
     }
     signThumbUrls(paths)
       .then((map) => {
@@ -208,6 +209,22 @@ export function ReviewFlow({
     setRejectOpen(false);
   }, []);
 
+  // follow 槽挂起标记：React 状态更新是异步的——键盘 handler 里同步调 follow 只会读到
+  // 旧当前项/旧签名；挂起后由下方 effect 在渲染与新签名就绪后再换图（关了不重开）
+  const followPendingRef = useRef(false);
+  useEffect(() => {
+    if (!followPendingRef.current) return;
+    const c = curRef.current;
+    if (!c) return;
+    if (!window.__vtV?.isShown) {
+      followPendingRef.current = false; // 已关闭：不惊动、不重开
+      return;
+    }
+    if (!signedRef.current[c.image]?.zoom) return; // 原图签名未落，等下一次就绪再试
+    followPendingRef.current = false;
+    openCurZoom();
+  }, [idx, signed]);
+
   const decide = useCallback(
     async (state: ReviewState, reason = "") => {
       const c = curRef.current;
@@ -231,7 +248,7 @@ export function ReviewFlow({
         setRejectOpen(false);
         go(1);
         void queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
-        zoomFollowIfShown();
+        followPendingRef.current = true;
         onChanged();
       } catch (e) {
         onMessage(e instanceof Error ? e.message : "判定失败", "error");
@@ -254,10 +271,10 @@ export function ReviewFlow({
       if (e.isComposing || e.repeat) return;
       if (e.code === "ArrowRight") {
         go(1);
-        zoomFollowIfShown();
+        followPendingRef.current = true;
       } else if (e.code === "ArrowLeft") {
         go(-1);
-        zoomFollowIfShown();
+        followPendingRef.current = true;
       } else if (e.code === "KeyN") {
         void decide("approved");
       } else if (e.code === "KeyS") {
@@ -450,7 +467,11 @@ export function ReviewFlow({
               ))}
             </div>
             <div className="btn-row">
-              <button type="button" className="btn" onClick={() => { go(-1); zoomFollowIfShown(); }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => { go(-1); followPendingRef.current = true; }}
+              >
                 ← 上一张
               </button>
               <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void decide("approved")}>
@@ -462,7 +483,11 @@ export function ReviewFlow({
               <button type="button" className="btn" disabled={busy} onClick={() => void decide("skipped")}>
                 跳过 s
               </button>
-              <button type="button" className="btn" onClick={() => { go(1); zoomFollowIfShown(); }}>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => { go(1); followPendingRef.current = true; }}
+              >
                 下一张 →
               </button>
               <button

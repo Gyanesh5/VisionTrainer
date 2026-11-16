@@ -84,7 +84,7 @@ export function openZoom(opts: ZoomOptions): void {
   }
   retries = 0;
 
-  const initV = (el: HTMLImageElement, title: string, xal: boolean) => {
+  const initV = (el: HTMLElement, title: string, xal: boolean) => {
     if (window.__vtV) {
       try {
         window.__vtV.destroy();
@@ -122,20 +122,28 @@ export function openZoom(opts: ZoomOptions): void {
       },
     });
     window.__vtV?.show(true);
+    // 标题直写：库的标题走 viewed 事件一次性渲染，dataURL 大图上该事件链路实测
+    // 不落定（image 已渲染但 viewed 恒 false）——display-only 直写兜底，不动交互
+    const titleEl = document.querySelector(".viewer-container .viewer-title");
+    if (titleEl) titleEl.textContent = title;
   };
 
-  // 旧隐藏 img 由上一次 openZoom 留下——destroy 已收走其 Viewer 容器，DOM 壳先补删
-  document.querySelectorAll<HTMLImageElement>("#vt-zoom-holder").forEach((n) => n.remove());
-  // 隐藏 holder img：Viewer 以它为根；合成 SVG 后 dataURL 换 src 再 init
-  const el = document.createElement("img");
+  // 旧隐藏 holder 由上一次 openZoom 留下——destroy 已收走其 Viewer 容器，DOM 壳先补删
+  document.querySelectorAll("#vt-zoom-holder").forEach((n) => n.remove());
+  // 隐藏 holder：Viewer 以容器为根（裸 img 根上 querySelector("img") 落空，viewed 不触发、
+  // 标题/内部状态机失效）——div 包一层 img；合成 SVG 后 dataURL 换 src 再 init
+  const el = document.createElement("div");
   el.id = "vt-zoom-holder";
   el.style.display = "none";
+  const holderImg = document.createElement("img");
+  holderImg.alt = opts.title;
+  el.appendChild(holderImg);
   document.body.appendChild(el);
 
   const title = opts.title;
   const overlay = opts.overlaySvg ?? "";
   const xal = opts.xal ?? false;
-  el.src = opts.url;
+  holderImg.src = opts.url;
   if (overlay) {
     const bi = new Image();
     bi.onload = () => {
@@ -151,7 +159,7 @@ export function openZoom(opts: ZoomOptions): void {
         }
         cx.drawImage(bi, 0, 0);
         cx.drawImage(ov, 0, 0, cv.width, cv.height);
-        el.src = cv.toDataURL("image/jpeg", 0.92);
+        holderImg.src = cv.toDataURL("image/jpeg", 0.92);
         initV(el, title, xal);
       };
       ov.onerror = () => initV(el, title, xal);
