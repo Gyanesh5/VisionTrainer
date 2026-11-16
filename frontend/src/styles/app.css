@@ -1218,6 +1218,108 @@ body {
   flex-wrap: wrap;
 }
 
+/* ---------------------------------------------------------------- 窗口化缩略图网格（专利 1） */
+
+.thumb-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.thumb-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 卡宽 168 + gap 8 = 176 步距；卡高 139（spacer 校准公式与 ThumbWindowGrid 同源） */
+.thumb-card {
+  width: 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.thumb-ph {
+  width: 100%;
+  height: 112px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 6px;
+  background: var(--vp-bg);
+  border: 1px solid var(--vp-border);
+  overflow: hidden;
+}
+
+.thumb-ph img {
+  width: 100%;
+  height: 112px;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  min-width: 0;
+}
+
+.thumb-name {
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--chrome-text-dim);
+}
+
+.thumb-spacer {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--chrome-text-dim);
+  padding-top: 8px;
+}
+
+.audit-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-top: 1px solid var(--chrome-border);
+}
+
+.imbalance-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.imbalance-name {
+  width: 112px;
+  flex: none;
+  font-size: var(--font-body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imbalance-bar {
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+  max-width: 60%;
+}
+
 /* 动效回退（DESIGN.md §5） */
 
 

@@ -304,6 +304,12 @@ export const datasetsApi = {
       method: "POST",
     }),
   /** 体检缓存读（未体检 null；指纹失配带 stale；leaks 由服务端按切分即时算） */
+  runAudit: (name: string) =>
+    request<{
+      summary?: { exact?: number; near?: number; leaks?: number; imbalance_ok?: boolean };
+      checked_at?: string;
+      files?: number;
+    }>(`/api/v1/datasets/${encodeURIComponent(name)}/audit`, { method: "POST" }),
   cachedAudit: (name: string) =>
     request<{
       summary?: { exact?: number; near?: number; leaks?: number; imbalance_ok?: boolean; rule?: string };

@@ -12,6 +12,7 @@ import {
 import { OpLines, useOpLines } from "../components/OpProgress";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { AddImagesDialog } from "../components/datasets/AddImagesDialog";
+import { AuditPanel } from "../components/datasets/AuditPanel";
 import { ClassTablePanel } from "../components/datasets/ClassTablePanel";
 import { ReviewFlow } from "../components/datasets/ReviewFlow";
 import { AUTO_FIX_CODES, GUIDANCE, PROBLEM_ZH, formatTs } from "../components/datasets/domain";
@@ -25,12 +26,13 @@ import { AUTO_FIX_CODES, GUIDANCE, PROBLEM_ZH, formatTs } from "../components/da
  * 批 2 实做 来源/类别表/校验·画像/排除恢复 与加图、删除；审查/体检/切片/导出按批 3/5 落位。
  */
 
-type WsKey = "source" | "classes" | "validation" | "review" | "exclude";
+type WsKey = "source" | "classes" | "validation" | "audit" | "review" | "exclude";
 
 const WS_TITLES: Record<WsKey, string> = {
   source: "来源",
   classes: "类别表",
   validation: "校验与画像",
+  audit: "体检",
   review: "标注审查",
   exclude: "排除与恢复",
 };
@@ -62,6 +64,14 @@ export function DatasetDetailPage() {
   });
   const meta = metaQ.data;
   const managed = meta?.form === "managed";
+
+  // 体检卡用缓存结果（读失败只回 null，完整错误留给体检工作区说）
+  const auditQ = useQuery({
+    queryKey: ["dataset-audit", name],
+    queryFn: () => datasetsApi.cachedAudit(name),
+    enabled: managed,
+  });
+  const audit = auditQ.data ?? null;
 
   const [openWs, setOpenWs] = useState<WsKey | null>(null);
   const [msg, setMsg] = useState<{ text: string; kind: string } | null>(null);
@@ -131,7 +141,6 @@ export function DatasetDetailPage() {
 
   const vs = meta?.validation_summary ?? null;
   const report: ValidationReport | null = meta?.last_validation ?? null;
-  const excluded = meta?.excluded ?? [];
 
   if (metaQ.isError) {
     return (
@@ -270,22 +279,32 @@ export function DatasetDetailPage() {
             onClick={() => openSection("validation")}
           />
           <StatusCard
-            id="exclude"
-            title="排除与恢复"
-            status={{
-              text: `${excluded.length}`,
-              cls: excluded.length ? "is-warning" : "is-unverified",
-            }}
-            line={excluded.length ? "真源未动；排除者不入新建切分、出队时剔除" : "排除日志为空（体检处置与审查排除落在这里）"}
-            onClick={() => openSection("exclude")}
+            id="audit"
+            title="体检"
+            status={
+              !audit
+                ? { text: "未体检", cls: "is-unverified" }
+                : audit.stale
+                  ? { text: "已过期", cls: "is-warning" }
+                  : { text: "有结果", cls: "is-ok" }
+            }
+            line={
+              audit
+                ? `精确 ${audit.summary?.exact ?? 0} · 近似 ${audit.summary?.near ?? 0} · 泄漏 ${audit.summary?.leaks ?? 0}` +
+                  (audit.summary?.imbalance_ok === false ? " · 类别失衡" : "") +
+                  ` · ${formatTs(audit.checked_at ?? null)}` +
+                  (audit.stale ? "（真源已变）" : "")
+                : "手动触发；结果缓存，真源变更后标记过期"
+            }
+            onClick={() => openSection("audit")}
           />
         </div>
       )}
 
-      {/* 工作区入口行：状态卡之外的工作区（审查）从这里进；全部区也可直达 */}
+      {/* 工作区入口行：状态卡之外的工作区（审查/体检）从这里进；全部区也可直达 */}
       {managed && (
         <div className="ws-nav" role="group" aria-label="工作区导航">
-          {(["source", "classes", "validation", "review", "exclude"] as WsKey[]).map((key) => (
+          {(["source", "classes", "validation", "audit", "review", "exclude"] as WsKey[]).map((key) => (
             <button
               key={key}
               type="button"
@@ -325,6 +344,9 @@ export function DatasetDetailPage() {
               )}
               {key === "review" && (
                 <ReviewFlow meta={meta} onMessage={notify} onChanged={() => invalidateAll()} />
+              )}
+              {key === "audit" && (
+                <AuditPanel meta={meta} onMessage={notify} onChanged={() => invalidateAll()} />
               )}
             </>
           )}
