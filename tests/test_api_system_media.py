@@ -116,3 +116,75 @@ def test_thumb_sign_default_box_is_260(tmp_path: Path, client):
     url = r.json()["urls"][0]
     assert url["box"] == 260
     assert client.get(url["url"]).status_code == 200
+
+
+# ---------------------------------------------------------------- GET /system/logs（票 107 日志页）
+
+_LOG_LINES = [
+    "2026-11-17 09:00:00,001 INFO visiontrainer.main 平台启动",
+    "  Traceback (most recent call last):",
+    "2026-11-17 09:00:05,100 WARNING visiontrainer.training GPU 占用 80%",
+    "2026-11-17 09:00:10,300 ERROR visiontrainer.training 训练退出码 1",
+    "2026-11-17 09:01:00,000 INFO visiontrainer.datasets 完成导入 42 张",
+]
+
+
+@pytest.fixture()
+def log_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    p = tmp_path / "visiontrainer.log"
+    p.write_text("\n".join(_LOG_LINES) + "\n", encoding="utf-8")
+    monkeypatch.setattr("visiontrainer.api.system.log_file_path", lambda: p)
+    return p
+
+
+def test_system_logs_tail_returns_last_lines(client, log_file: Path):
+    r = client.get("/api/v1/system/logs", params={"tail": 2})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["lines"] == _LOG_LINES[-2:]
+    assert (body["matched"], body["total"]) == (2, 5)
+    assert body["level"] is None and body["q"] is None
+    assert body["path"].endswith("visiontrainer.log")
+
+
+def test_system_logs_level_filter_keeps_continuation_lines(client, log_file: Path):
+    """级别筛选 == 匹配；堆栈续行跟随其前标准行入选（不丢上下文）。"""
+    r = client.get("/api/v1/system/logs", params={"level": "INFO"})
+    assert r.status_code == 200
+    body = r.json()
+    # 两条 INFO + 第一条 INFO 之后的 Traceback 续行
+    assert body["lines"] == [_LOG_LINES[0], _LOG_LINES[1], _LOG_LINES[4]]
+    assert (body["matched"], body["total"]) == (3, 5)
+
+    r = client.get("/api/v1/system/logs", params={"level": "ERROR"})
+    assert r.json()["lines"] == [_LOG_LINES[3]]
+
+
+def test_system_logs_substring_case_insensitive(client, log_file: Path):
+    r = client.get("/api/v1/system/logs", params={"q": "gpu"})
+    assert r.status_code == 200
+    assert r.json()["lines"] == [_LOG_LINES[2]]
+
+    r = client.get("/api/v1/system/logs", params={"q": "GPU"})
+    assert r.json()["lines"] == [_LOG_LINES[2]]
+
+
+def test_system_logs_level_and_substring_combine(client, log_file: Path):
+    r = client.get("/api/v1/system/logs", params={"level": "INFO", "q": "导入"})
+    assert r.json()["lines"] == [_LOG_LINES[4]]
+
+
+def test_system_logs_missing_file_returns_empty(client, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr("visiontrainer.api.system.log_file_path",
+                        lambda: tmp_path / "absent.log")
+    r = client.get("/api/v1/system/logs")
+    assert r.status_code == 200
+    body = r.json()
+    assert body == {"path": str(tmp_path / "absent.log"), "tail": 300, "level": None,
+                    "q": None, "lines": [], "matched": 0, "total": 0}
+
+
+def test_system_logs_rejects_invalid_query(client, log_file: Path):
+    assert client.get("/api/v1/system/logs", params={"tail": 0}).status_code == 422
+    assert client.get("/api/v1/system/logs", params={"tail": 5001}).status_code == 422
+    assert client.get("/api/v1/system/logs", params={"level": "TRACE"}).status_code == 422

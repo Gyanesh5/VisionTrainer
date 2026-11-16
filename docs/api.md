@@ -17,6 +17,7 @@
 | GET | `/api/v1/system/gpu` | GPU 状态：显存/利用率/外部占用（pynvml，04） |
 | GET | `/api/v1/operations` | 进行中操作登记表全量快照（阶段 1c）：`{running:[按登记序], last:最近终态\|null}`；`operation.updated` 只在登记/换阶段/终态发，细粒度进度消费方逢事件读本端点刷新 |
 | POST | `/api/v1/system/open-dir` | 服务端文件管理器打开目录（阶段 1c）：body `{path}`；fire-and-forget（xdg-open），目录不存在 400 `invalid_args`，无桌面环境 500 |
+| GET | `/api/v1/system/logs` | 运行日志尾部读取（票 107 日志页）：query `tail`(1–5000, 默认 300)/`level`(DEBUG\|INFO\|WARNING\|ERROR, ==匹配)/`q`(子串，大小写不敏感)；返回 `{path, tail, level, q, lines[], matched, total}`——筛选后取最近 N 条，堆栈续行随前一行入选，文件缺失返回空集 |
 | GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地） |
 | PUT | `/api/v1/config` | 白名单部分更新。body: `{server?:{host,port}, llm?:{base_url,api_key,model}, training?:{python,trainer_entry,export_entry,datasets_dir,runs_dir,model_lib_dir,check_occupancy}}`（节/键均可省略）；返回 `{config, restart_required}`——llm 即存即生效，server/training 改动须重启（设置页，2026-09-20） |
 | POST | `/api/v1/config/llm-test` | LLM 连通性测试（阶段 1c）：按当前 [llm] 发一条探测消息，返回 `{reply}`；未配置/不可达 502 `llm_unavailable`；多模态链路可达数十秒（长操作，登记 `llm:test`） |

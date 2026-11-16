@@ -8,6 +8,7 @@ runs/
 data/
 *.egg-info/
 dist/
+node_modules/
 .pyplaywright/
 *.pt
 .nicegui/
