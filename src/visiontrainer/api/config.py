@@ -9,7 +9,9 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
+from ..agent.llm import LLMError, smoke_test
 from ..config import ConfigError, load_config, update_config
+from .opctx import long_op
 
 router = APIRouter(prefix="/config", tags=["config"])
 
@@ -35,3 +37,20 @@ def put_config(body: ConfigBody):
         return JSONResponse(status_code=400,
                             content={"error": {"code": exc.code, "message": exc.message, "detail": {}}})
     return {"config": merged, "restart_required": restart_required}
+
+
+@router.post("/llm-test")
+def llm_test():
+    """LLM 连通性测试（阶段 1c 票 105）：按当前 config.toml [llm] 发一条探测消息回显回复。
+
+    长操作：登记 `llm:test`（多模态链路可达数十秒）。未配置/不可达 → 502 `llm_unavailable`
+    （错误约定与 Agent 域一致）；llm 即存即生效，改配置后无需重测旧值。
+    """
+    try:
+        with long_op("llm:test", "LLM 连通性测试"):
+            text = smoke_test()
+    except LLMError as exc:
+        return JSONResponse(status_code=502,
+                            content={"error": {"code": "llm_unavailable",
+                                               "message": str(exc), "detail": {}}})
+    return {"reply": text}

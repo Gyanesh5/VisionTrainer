@@ -1,10 +1,13 @@
-"""系统域端点：启动自检（M6 07 号票）+ 进程内操作登记表读（阶段 1c 票 105）。"""
+"""系统域端点：启动自检（M6 07 号票）+ 进程内操作登记表读 + 桌面直达（阶段 1c 票 105）。"""
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from .. import progress
+from ..core import desktop
 from ..core.selfcheck import run_selfcheck
 
 router = APIRouter(tags=["system"])
@@ -24,3 +27,22 @@ def operations() -> dict:
     不进事件（防刷爆队列），消费方逢事件读本端点刷新。
     """
     return progress.snapshot()
+
+
+class OpenDirBody(BaseModel):
+    path: str
+
+
+@router.post("/system/open-dir")
+def open_dir(body: OpenDirBody):
+    """服务端文件管理器打开目录（阶段 1c 票 105）：单机部署语义，与 UI 直开同一行为。
+
+    fire-and-forget（不等待文件管理器退出）；目录不存在 → 400 `invalid_args`；
+    无桌面环境 → 500（OSError 上抛）。"""
+    try:
+        desktop.open_dir(body.path)
+    except ValueError as exc:
+        return JSONResponse(status_code=400,
+                            content={"error": {"code": "invalid_args",
+                                               "message": str(exc), "detail": {}}})
+    return {"opened": body.path}
