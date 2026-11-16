@@ -250,13 +250,14 @@ def test_invalidation_matrix(ds14, datasets_root, tmp_db):
     assert "bus" in get_stats(name)["classes"]           # 画像行随改名后的重校验刷新
 
 
-# ---------------------------------------------------------------- v5→v6 两表重建迁移（验收⑦）
+# ---------------------------------------------------------------- v5 旧形状（票 104 后拒绝接入）
 
-def test_v5_to_v6_account_tables_rebuild_idempotent(tmp_path):
-    """v5 建库（旧两表带 manifest_uid 且有行）→ init_db 迁移 → v6 两表空；重复执行 no-op。"""
+def test_v5_shape_rejected_by_alembic_gate(tmp_path):
+    """v5 形状（两账表带 manifest_uid）→ init_db 拒绝 stamp（SchemaError），原始行不受破坏。"""
     from sqlalchemy import create_engine as sa_create
 
-    from visiontrainer.db.models import SCHEMA_VERSION, Base
+    from visiontrainer.db.models import SchemaError, init_db
+    from visiontrainer.db import runtime
 
     db = tmp_path / "v5.db"
     url = f"sqlite:///{db}"
@@ -277,25 +278,13 @@ def test_v5_to_v6_account_tables_rebuild_idempotent(tmp_path):
         conn.exec_driver_sql("INSERT INTO schema_version (id, version) VALUES (1, 5)")
     engine.dispose()
 
-    from visiontrainer.db.models import init_db
-    from visiontrainer.db import runtime
-
     old_factory = runtime.get_session_factory()
     try:
-        factory = init_db(url)                            # 迁移：两表重建弃档
-        con = sqlite3.connect(db)
-        ver = con.execute("SELECT version FROM schema_version WHERE id=1").fetchone()[0]
-        assert ver == SCHEMA_VERSION
-        stats_cols = [r[1] for r in con.execute("PRAGMA table_info(dataset_stats)")]
-        audits_cols = [r[1] for r in con.execute("PRAGMA table_info(dataset_audits)")]
-        assert "manifest_uid" not in stats_cols and "source_fingerprint" in stats_cols
-        assert "manifest_uid" not in audits_cols and "source_fingerprint" in audits_cols
-        assert con.execute("SELECT COUNT(*) FROM dataset_stats").fetchone()[0] == 0  # 弃档清零
-        assert con.execute("SELECT COUNT(*) FROM dataset_audits").fetchone()[0] == 0
-        con.close()
-        init_db(url)                                      # 重复执行 no-op（不炸、数据不丢）
-        con = sqlite3.connect(db)
-        assert con.execute("SELECT COUNT(*) FROM dataset_stats").fetchone()[0] == 0
+        with pytest.raises(SchemaError, match="缺少"):
+            init_db(url)
+        con = sqlite3.connect(db)                         # 拒绝即无写操作：原始行原样
+        assert con.execute("SELECT COUNT(*) FROM dataset_stats").fetchone()[0] == 1
+        assert con.execute("SELECT version FROM schema_version WHERE id=1").fetchone()[0] == 5
         con.close()
     finally:
         runtime.set_session_factory(old_factory)
