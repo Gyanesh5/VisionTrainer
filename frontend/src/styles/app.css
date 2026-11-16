@@ -1,0 +1,376 @@
+/* 壳与页面基线：布局/密度/刻度走 tokens.css 令牌，本文件不出现色值。 */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--font-body);
+  color: var(--chrome-text);
+  background: var(--chrome-bg);
+}
+
+/* 数值一律等宽数字（DESIGN.md §4） */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 六导航壳 */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.shell-topbar {
+  height: var(--shell-topbar);
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  background: var(--chrome-surface);
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.shell-brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-weight: 600;
+}
+
+.shell-brand-mark {
+  font-variant-numeric: tabular-nums;
+  color: var(--chrome-accent);
+}
+
+.shell-topbar-spacer {
+  flex: 1;
+}
+
+/* 后台状态灯（D 族硬指标：顶栏常显）——颜色 + 文字双编码（DESIGN.md §3） */
+.conn-light {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-label);
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.conn-dot.live {
+  background: var(--state-ok);
+}
+
+.conn-dot.stale {
+  background: var(--state-stale);
+}
+
+.conn-dot.connecting {
+  background: var(--chrome-text-dim);
+}
+
+.shell-layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.shell-sidebar {
+  width: 176px;
+  flex: none;
+  padding: var(--space-2) var(--space-1);
+  background: var(--chrome-surface);
+  border-right: 1px solid var(--chrome-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.nav-group-label {
+  padding: var(--space-1) 10px 4px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  color: var(--chrome-text);
+  text-decoration: none;
+  font-size: var(--font-body);
+}
+
+.nav-item svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: var(--chrome-text-dim);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-item:hover {
+  background: var(--chrome-bg);
+}
+
+.nav-item.active {
+  background: var(--chrome-bg);
+  color: var(--chrome-accent);
+  font-weight: 600;
+}
+
+.nav-item.active svg {
+  stroke: var(--chrome-accent);
+}
+
+.shell-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-3);
+}
+
+/* ---------------------------------------------------------------- 页面骨架 */
+
+.page-head {
+  margin-bottom: var(--space-2);
+}
+
+.page-head h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.page-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.card {
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: var(--space-2);
+}
+
+.card-title {
+  margin: 0 0 var(--space-1);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.placeholder-note {
+  color: var(--chrome-text-dim);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- 汇总卡 */
+
+.summary-row {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.summary-cell {
+  flex: 1;
+}
+
+.summary-cell small {
+  display: block;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.summary-cell strong {
+  font-size: 24px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 日志页（终端暗块 = §2.1 vp 区） */
+
+.log-terminal {
+  background: var(--vp-bg);
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+  padding: var(--space-2);
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.log-terminal pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-body);
+  line-height: 1.6;
+  color: var(--vp-text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-terminal .log-empty {
+  color: var(--vp-text-dim);
+}
+
+.log-line.is-error {
+  color: var(--alarm-critical);
+}
+
+.log-line.is-warning {
+  color: var(--alarm-warning);
+}
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.log-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.log-toolbar input,
+.log-toolbar select {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.level-btn {
+  font: inherit;
+  font-size: var(--font-label);
+  padding: 4px 10px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+  cursor: pointer;
+}
+
+.level-btn.active {
+  background: var(--chrome-accent);
+  border-color: var(--chrome-accent);
+  color: var(--chrome-surface);
+}
+
+/* ---------------------------------------------------------------- 系统页（自检/配置，总貌档疏排） */
+
+.check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.check-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.check-item:last-child {
+  border-bottom: none;
+}
+
+.severity-badge {
+  font-size: var(--font-label);
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  flex: none;
+}
+
+.severity-badge.ok {
+  color: var(--state-ok);
+}
+
+.severity-badge.warning {
+  color: var(--alarm-warning);
+}
+
+.severity-badge.error {
+  color: var(--alarm-critical);
+}
+
+.check-message {
+  margin: 0;
+}
+
+.config-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.config-table th,
+.config-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.config-table th {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+}
+
+.config-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+.state-text.ok {
+  color: var(--state-ok);
+}
+
+.state-text.error {
+  color: var(--alarm-critical);
+}
+
+.error-note {
+  color: var(--alarm-critical);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- 动效回退（DESIGN.md §5） */
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
