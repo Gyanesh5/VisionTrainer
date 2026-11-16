@@ -1,6 +1,7 @@
 import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
 import { AppShell } from "./shell/AppShell";
 import { DatasetsPage } from "./pages/DatasetsPage";
+import { DatasetDetailPage } from "./pages/DatasetDetailPage";
 import { TrainingPage } from "./pages/TrainingPage";
 import { DeployPage } from "./pages/DeployPage";
 import { AgentPage } from "./pages/AgentPage";
@@ -15,6 +16,7 @@ export default function App() {
         <Route element={<AppShell><Outlet /></AppShell>}>
           <Route path="/" element={<Navigate to="/datasets" replace />} />
           <Route path="/datasets" element={<DatasetsPage />} />
+          <Route path="/datasets/:name" element={<DatasetDetailPage />} />
           <Route path="/training" element={<TrainingPage />} />
           <Route path="/deploy" element={<DeployPage />} />
           <Route path="/agent" element={<AgentPage />} />

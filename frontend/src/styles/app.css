@@ -608,7 +608,345 @@ body {
   gap: 8px;
 }
 
-/* ---------------------------------------------------------------- 动效回退（DESIGN.md §5） */
+/* ---------------------------------------------------------------- 数据集域（票 109） */
+
+.page-actions {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+/* 详情页面包屑头 */
+.crumb-link {
+  color: var(--chrome-accent);
+  text-decoration: none;
+  font-size: 15px;
+}
+
+.crumb-link:hover {
+  text-decoration: underline;
+}
+
+.page-head .crumb-current {
+  display: inline;
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.section-title {
+  margin: var(--space-1) 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+}
+
+/* 列表卡片网格：卡片承载「同一数据集的概览」，不做等宽三卡营销布局 */
+.ds-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-1);
+}
+
+.ds-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-1) 12px;
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ds-card:hover {
+  background: var(--chrome-bg);
+}
+
+.ds-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ds-card-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ds-card-stats {
+  display: flex;
+  gap: var(--space-1);
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.badge.is-warning {
+  color: var(--alarm-warning);
+}
+
+/* 表单（F 族）：左标签右控件；hint 三档分流——占位符/删除/防呆精简保留 */
+.form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1);
+}
+
+.form-row > label,
+.form-row > .form-label {
+  width: 88px;
+  flex: none;
+  padding-top: 6px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+  text-align: right;
+}
+
+.form-row input,
+.form-row select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.form-stack {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.radio-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-body);
+}
+
+.radio-line .form-hint {
+  margin-left: 4px;
+}
+
+.form-hint {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.dialog-wide {
+  width: min(880px, 95vw);
+}
+
+.dialog-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+
+.dialog-head-note {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.create-cols {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.create-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.create-col-grow {
+  flex: 1;
+}
+
+/* 类别表行编辑（行序即类别号） */
+.cls-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.cls-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cls-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.cls-idx {
+  width: 24px;
+  flex: none;
+  text-align: right;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.probe-block {
+  margin-top: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probe-result {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probe-result p {
+  margin: 0;
+  font-size: var(--font-body);
+}
+
+.probe-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: var(--font-label);
+}
+
+/* 阻断回执（琥珀警示条）：服务侧拦下 + 处置动作 */
+.block-card {
+  margin-top: var(--space-1);
+  border: 1px solid var(--alarm-warning);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.block-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--alarm-warning);
+}
+
+/* 详情页：状态卡行 + 元信息行 */
+.status-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.status-card {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 10px;
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.status-card:hover {
+  background: var(--chrome-bg);
+}
+
+.status-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-card-head .status-title {
+  font-weight: 600;
+  flex: 1;
+  font-size: var(--font-body);
+}
+
+.status-card-line {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+  word-break: break-all;
+}
+
+.meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-size: var(--font-body);
+}
+
+.meta-row .meta-label {
+  width: 88px;
+  flex: none;
+  color: var(--chrome-text-dim);
+  font-size: var(--font-label);
+  text-align: right;
+}
+
+.meta-row .meta-value {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.detail-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 1;
+}
+
+/* 动效回退（DESIGN.md §5） */
+
 
 @media (prefers-reduced-motion: reduce) {
   * {

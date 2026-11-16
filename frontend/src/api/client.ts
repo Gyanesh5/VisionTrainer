@@ -9,17 +9,35 @@ export interface ApiError {
   detail: Record<string, unknown>;
 }
 
+/** 服务端错误信封原样携带：阻断类 409 的 detail（冲突清单/位移复述）是处置数据，页面要读 */
+export class ApiRequestError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly detail: Record<string, unknown>;
+  constructor(message: string, status: number, code: string, detail: Record<string, unknown>) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.code = code;
+    this.detail = detail;
+  }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, init);
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）`;
+    let code = "";
+    let detail: Record<string, unknown> = {};
     try {
       const body = (await response.json()) as { error?: ApiError };
       if (body.error?.message) message = body.error.message;
+      if (body.error?.code) code = body.error.code;
+      if (body.error?.detail) detail = body.error.detail;
     } catch {
       // 服务端非 JSON 错误体时保留 HTTP 状态行
     }
-    throw new Error(message);
+    throw new ApiRequestError(message, response.status, code, detail);
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
@@ -57,6 +75,182 @@ export interface SelfcheckResult {
   problems: number;
   error_count: number;
 }
+
+// ---------------------------------------------------------------- 数据集域
+
+/** 任务类型（GLOSSARY：检测/分割/旋转框/姿态/分类）；服务端 scan_entries 同枚举 */
+export type TaskType = "detect" | "segment" | "obb" | "pose" | "classify";
+
+export const TASK_TYPE_ZH: Record<TaskType, string> = {
+  detect: "检测",
+  segment: "分割",
+  obb: "旋转框",
+  pose: "姿态",
+  classify: "分类",
+};
+
+/** 新建数据集的图片来源三态（spec §2.1；「导入」折为第三态，无独立入口） */
+export type SourceMode = "empty" | "images" | "labeled";
+
+export const SOURCE_MODE_ZH: Record<SourceMode, string> = {
+  empty: "空数据集",
+  images: "图片目录",
+  labeled: "已标 X-AnyLabeling 目录",
+};
+
+export const SOURCE_MODE_HINT: Record<SourceMode, string> = {
+  empty: "先立骨架（类别表 + 真源目录 source/），图片与标注之后用「加图」补入",
+  images: "只取该目录的图片入真源，出生即全负样本，标注后补",
+  labeled: "连图片带同目录的 X-AnyLabeling JSON 一起入真源（原「导入」，已无独立入口）",
+};
+
+export const TRANSFER_ZH: Record<"copy" | "move", string> = { copy: "拷贝", move: "移动" };
+
+/** 审查驳回理由预设（datasets/review.py REVIEW_REASONS，数字键直选的顺序与此一致） */
+export const REVIEW_REASONS = ["漏标", "多标", "框不准", "类别错"] as const;
+
+/** 审查四态 + 有效状态语义（effective 恒为四态之一；modified 是改标回流标记） */
+export type ReviewState = "pending" | "approved" | "rejected" | "skipped";
+
+export const REVIEW_STATE_ZH: Record<ReviewState, string> = {
+  pending: "待审",
+  approved: "通过",
+  rejected: "驳回",
+  skipped: "跳过",
+};
+
+/** GET /datasets 列表项（服务层 _brief：managed 带摘要，external 只带路径） */
+export interface DatasetBrief {
+  name: string;
+  task_type: TaskType;
+  form: "managed" | "external";
+  created_at: string | null;
+  classes?: string[];
+  validation_ok?: boolean | null;
+  source_dir?: string | null;
+  origin?: { mode?: string; transfer?: string; path?: string; at?: string };
+  images?: number | null;
+  may_have_changes?: boolean;
+  path?: string;
+  has_data_yaml?: boolean;
+}
+
+/** POST /datasets/probe-classes：已标目录类别探测（只读零写入，结果不承重） */
+export interface ProbeClassesResult {
+  labels: string[];
+  counts: Record<string, number>;
+  images: number;
+}
+
+export interface CreateDatasetResult {
+  name: string;
+  task_type: TaskType;
+  validation_summary?: ValidationSummary;
+  last_validation?: ValidationReport | null;
+}
+
+export interface ValidationSummary {
+  ok?: boolean | null;
+  total_images?: number;
+  negatives?: number | null;
+  background?: number | null;
+  checked_at?: string | null;
+  drops?: { count?: number; signature?: string };
+  source_fingerprint?: string;
+  problems?: unknown[];
+}
+
+export interface ValidationReport {
+  checked_at?: string;
+  total_images?: number;
+  labeled?: number | null;
+  background?: number | null;
+  problems?: { image: string; code: string; detail?: unknown; fixable?: boolean }[];
+  drops?: unknown;
+}
+
+/** 签名 URL 条目（POST /thumb/sign 响应；url 为同源绝对路径，直接进 img.src） */
+export interface ThumbUrl {
+  path: string;
+  box: number;
+  url: string;
+}
+
+/** GET /operations：进行中操作登记表快照（事件无细粒度进度，消费方逢事件读这里） */
+export interface OperationsSnapshot {
+  running: {
+    op_id: number;
+    key: string;
+    label: string;
+    scope?: string | null;
+    phase?: string | null;
+    cur?: number | null;
+    total?: number | null;
+  }[];
+  last: { key: string; label: string; status: string; error?: string | null } | null;
+}
+
+/**
+ * 详情组合视图（GET /datasets/{name}）：managed 走服务层 _compose_managed 读时现算，
+ * external 只有 name/task_type/form/path/has_data_yaml——组合字段全部可缺省。
+ */
+export interface DatasetDetail extends DatasetBrief {
+  classes?: string[];
+  source_dir?: string | null;
+  excluded?: { file: string; at: string | null; reason: string }[];
+  last_validation?: ValidationReport | null;
+  drops_pending_ack?: boolean;
+  fingerprint_stale?: boolean | null;
+  validation_summary?: ValidationSummary | null;
+  tiling?: { rows?: number; cols?: number; overlap?: number; source?: string; groups?: Record<string, string[]> };
+  review?: { counts: Record<ReviewState, number>; done: number; total: number; unlabeled: number };
+}
+
+export const datasetsApi = {
+  list: () => request<DatasetBrief[]>("/api/v1/datasets"),
+  get: (name: string) =>
+    request<DatasetDetail>(`/api/v1/datasets/${encodeURIComponent(name)}`),
+  create: (body: {
+    name: string;
+    task_type: TaskType;
+    classes: string[];
+    source_mode: SourceMode;
+    source_path?: string | null;
+    transfer: "copy" | "move";
+  }) =>
+    request<CreateDatasetResult>("/api/v1/datasets", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  registerExternal: (body: { name: string; task_type: TaskType; path: string }) =>
+    request<{ name: string }>("/api/v1/datasets/external", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  probeClasses: (srcDir: string, taskType: TaskType) =>
+    request<ProbeClassesResult>("/api/v1/datasets/probe-classes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ src_dir: srcDir, task_type: taskType }),
+    }),
+};
+
+/** 图片展示唯一通道：先批量签发签名 URL（HMAC 密钥只在服务端），再进 img.src */
+export async function signThumbUrls(items: { path: string; box?: number }[]): Promise<Map<string, ThumbUrl>> {
+  if (items.length === 0) return new Map();
+  const res = await request<{ urls: ThumbUrl[] }>("/api/v1/thumb/sign", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ items }),
+  });
+  return new Map(res.urls.map((u) => [`${u.path}:${u.box}`, u]));
+}
+
+export const operationsApi = {
+  snapshot: () => request<OperationsSnapshot>("/api/v1/operations"),
+};
 
 // ---------------------------------------------------------------- 部署域（回注）
 
