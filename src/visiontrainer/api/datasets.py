@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from ..datasets import service as svc
 from ..datasets.service import DatasetError
+from .opctx import long_op
 from .schemas import ErrorResponse
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
@@ -44,6 +45,17 @@ def _action_classes(body: ClassActionBody) -> list[str]:
     if not body.classes:
         raise DatasetError("invalid_args", f"action={body.action} 需要 classes 清单")
     return body.classes
+
+
+def _cls_label(action: str, name: str, body: ClassActionBody) -> str:
+    """四动作的登记展示名（与 UI 层现用 label 同口径；rename 整表提交，不带逐行 old→new）。"""
+    if action == "append":
+        return f"追加类别 · {name}"
+    if action == "rename":
+        return f"改名类别 · {name}"
+    if action == "reorder":
+        return f"重排类别 · {name}"
+    return f"删除类别 {body.class_name} · {name}"
 
 
 class CreateBody(BaseModel):
@@ -158,10 +170,13 @@ def list_datasets():
 def create_dataset(body: CreateBody):
     """托管数据集出生（票 03）：校验 + 画像一次遍历完成、不切分；返回 meta + validation。
 
-    已标目录含未注册类别时 409 阻断并列出全部 offending labels（detail.source_labels）。"""
+    已标目录含未注册类别时 409 阻断并列出全部 offending labels（detail.source_labels）。
+    长操作：登记 `ds:{name}:create`（键与 UI 层逐字一致，重复提交闸生效）。"""
     try:
-        return svc.create_dataset(body.name, body.task_type, body.classes, body.source_mode,
-                                  body.source_path, body.transfer)
+        with long_op(f"ds:{body.name}:create", f"新建数据集 · {body.name}",
+                     scope=body.name) as op:
+            return svc.create_dataset(body.name, body.task_type, body.classes, body.source_mode,
+                                      body.source_path, body.transfer, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -190,8 +205,10 @@ def get_dataset(name: str):
 
 @router.post("/{name}/validate")
 def validate_dataset(name: str):
+    """重跑校验 + 画像（长操作，登记 `ds:{name}:validate`）。"""
     try:
-        return svc.validate_dataset_by_name(name)
+        with long_op(f"ds:{name}:validate", f"重新校验 · {name}", scope=name) as op:
+            return svc.validate_dataset_by_name(name, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -203,9 +220,12 @@ def add_images(name: str, body: AddImagesBody):
     两种阻断都是 409，处置数据随 `detail` 透传给前端出二次动作：
     `detail.conflicts`＝同名冲突清单（阻断不自动改名，剔除后再投）、
     `detail.source_labels`＝未登记类别清单（带 `append_classes` 重发即一键追加后重试）。
+    长操作：登记 `ds:{name}:add_images`。
     """
     try:
-        return svc.add_images(name, body.paths, body.transfer, append_classes=body.append_classes)
+        with long_op(f"ds:{name}:add_images", f"加图 · {name}", scope=name) as op:
+            return svc.add_images(name, body.paths, body.transfer,
+                                  append_classes=body.append_classes, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -218,17 +238,20 @@ def classes_action(name: str, body: ClassActionBody):
     改写真源 JSON 的 shape label，原子写 + 自动备份 + 审查判定继承）；reorder 改的是类别号
     本身，未经 confirm 一律 409 `state_conflict` 且 `detail` 带逐项位移，确认后重发才落；
     delete 仅零实例类放行，否则 409 带实例数——删除不代删标注。
+    长操作：按 action 登记 `ds:{name}:cls_append|cls_rename|cls_reorder|cls_delete`。
     """
     try:
-        if body.action == "append":
-            return svc.append_classes(name, _action_classes(body))
-        if body.action == "rename":
-            return svc.rename_classes(name, _action_classes(body))
-        if body.action == "reorder":
-            return svc.reorder_classes(name, _action_classes(body), confirm=body.confirm)
-        if not body.class_name:
-            raise DatasetError("invalid_args", "action=delete 必须给出 class_name")
-        return svc.delete_class(name, body.class_name)
+        with long_op(f"ds:{name}:cls_{body.action}",
+                     _cls_label(body.action, name, body), scope=name):
+            if body.action == "append":
+                return svc.append_classes(name, _action_classes(body))
+            if body.action == "rename":
+                return svc.rename_classes(name, _action_classes(body))
+            if body.action == "reorder":
+                return svc.reorder_classes(name, _action_classes(body), confirm=body.confirm)
+            if not body.class_name:
+                raise DatasetError("invalid_args", "action=delete 必须给出 class_name")
+            return svc.delete_class(name, body.class_name)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -252,10 +275,11 @@ def rollback_classes(name: str):
     """回滚最近一次类别写路径（票 04）：classes.txt 与真源 JSON 一起回位。
 
     改名/重排/删除的备份落点唯一（`<数据集根>/<名>/backups/<时间戳>/`），只回其一必账目错位，
-    故一次做完；无备份时 404 `not_found`。回滚后即时重校验 + 画像。
+    故一次做完；无备份时 404 `not_found`。回滚后即时重校验 + 画像。登记 `ds:{name}:cls_rollback`。
     """
     try:
-        return svc.rollback_classes(name)
+        with long_op(f"ds:{name}:cls_rollback", f"回滚类别改动 · {name}", scope=name):
+            return svc.rollback_classes(name)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -266,10 +290,11 @@ def reconcile_on_open(name: str):
 
     `source_fingerprint` 未变 → 一次纯 stat 快路径（`changed: false`）；变了 → 重校验 +
     重算画像（`revalidated: true`）。直接往 `source/` 投放的文件由此自动纳入账目，
-    无常驻监视、无定时任务。
+    无常驻监视、无定时任务。长操作（变化时重校验）：登记 `ds:{name}:reconcile`。
     """
     try:
-        return svc.reconcile_on_open(name)
+        with long_op(f"ds:{name}:reconcile", f"真源对账 · {name}", scope=name) as op:
+            return svc.reconcile_on_open(name, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -297,9 +322,10 @@ def cached_audit(name: str, split_uid: str | None = None):
 
 @router.post("/{name}/audit")
 def run_audit(name: str):
-    """跑体检（M6，长操作）：指纹命中缓存秒回。"""
+    """跑体检（M6，长操作）：指纹命中缓存秒回。登记 `ds:{name}:audit`（tick 为 (cur,total) 口径）。"""
     try:
-        return svc.run_quality_audit(name)
+        with long_op(f"ds:{name}:audit", f"体检 · {name}", scope=name) as op:
+            return svc.run_quality_audit(name, progress=op.tick)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -375,39 +401,51 @@ def effective_split(name: str, uid: str):
 
 @router.post("/{name}/export")
 def export_annotations(name: str, body: ExportBody):
-    """三维外部导出（票 08）：结果落 <ds>/exports/<ts>-<fmt>[-<uid>]/，自包含目录。"""
+    """三维外部导出（票 08）：结果落 <ds>/exports/<ts>-<fmt>[-<uid>]/，自包含目录。
+
+    长操作：登记 `ds:{name}:export`（展示名带格式）。"""
     try:
-        return svc.export_annotations(name, body.format, scope=body.scope,
-                                      split_uid=body.split_uid, images=body.images,
-                                      zip_package=body.zip)
+        with long_op(f"ds:{name}:export", f"导出标注 · {body.format.upper()}", scope=name):
+            return svc.export_annotations(name, body.format, scope=body.scope,
+                                          split_uid=body.split_uid, images=body.images,
+                                          zip_package=body.zip)
     except DatasetError as exc:
         return _error_response(exc)
 
 
 @router.post("/{name}/tile/preview")
 def tile_dataset_preview(name: str, body: TilePreviewBody):
-    """切片预览（dry-run 零写入，确认门数字与执行同口径）。"""
+    """切片预览（dry-run 零写入，确认门数字与执行同口径）。长操作：登记 `ds:{name}:tile_preview`。"""
     try:
-        return svc.tile_dataset_preview(name, body.rows, body.cols, body.overlap, body.keep_empty)
+        with long_op(f"ds:{name}:tile_preview", f"切片预览 · {name}", scope=name):
+            return svc.tile_dataset_preview(name, body.rows, body.cols, body.overlap,
+                                            body.keep_empty)
     except DatasetError as exc:
         return _error_response(exc)
 
 
 @router.post("/{name}/tile")
 def tile_dataset(name: str, body: TileBody):
-    """执行切片 → 新托管数据集（源集不动；返回 meta 含 tiling 血缘 + summary 计数）。"""
+    """执行切片 → 新托管数据集（源集不动；返回 meta 含 tiling 血缘 + summary 计数）。
+
+    长操作：登记 `ds:{name}:tile`（目标名进展示名）。"""
+    label = f"切片 · {name} → {body.name}" if body.name else f"切片 · {name}"
     try:
-        return svc.tile_dataset(name, body.rows, body.cols, body.overlap, body.name,
-                                body.keep_empty)
+        with long_op(f"ds:{name}:tile", label, scope=name) as op:
+            return svc.tile_dataset(name, body.rows, body.cols, body.overlap, body.name,
+                                    body.keep_empty, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
 
 @router.get("/{name}/review")
 def review_queue(name: str):
-    """审查队列读（M9 02）：双指纹现算有效状态 + 可疑度降序（先审最可疑的）。"""
+    """审查队列读（M9 02）：双指纹现算有效状态 + 可疑度降序（先审最可疑的）。
+
+    大集解析可达秒级：登记 `ds:{name}:review_queue`（与 UI 层同键，读操作也留痕）。"""
     try:
-        return svc.review_queue(name)
+        with long_op(f"ds:{name}:review_queue", "解析审查队列", scope=name):
+            return svc.review_queue(name)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -423,9 +461,10 @@ def review_decide(name: str, body: ReviewDecideBody):
 
 @router.post("/{name}/review/export")
 def export_review_rejects(name: str):
-    """导出驳回清单 markdown 至数据集目录（M9 05，与改标清单同构）。"""
+    """导出驳回清单 markdown 至数据集目录（M9 05，与改标清单同构）。登记 `ds:{name}:rejects`。"""
     try:
-        return svc.export_review_rejects(name)
+        with long_op(f"ds:{name}:rejects", "导出驳回清单", scope=name):
+            return svc.export_review_rejects(name)
     except DatasetError as exc:
         return _error_response(exc)
 
@@ -442,9 +481,11 @@ def drops_ack(name: str):
 @router.post("/{name}/autofix")
 def auto_fix(name: str):
     """一键自动修复（ADR 0005）：越界钳制/多边形 make_valid/旋转框重排/关键点钳制/孤儿隔离
-    写回源标注（原文件备份 + 审查判定继承），随后增量重转派生并全量重校验。"""
+    写回源标注（原文件备份 + 审查判定继承），随后增量重转派生并全量重校验。
+    长操作：登记 `ds:{name}:autofix`。"""
     try:
-        return svc.auto_fix_dataset(name)
+        with long_op(f"ds:{name}:autofix", f"一键修复 · {name}", scope=name) as op:
+            return svc.auto_fix_dataset(name, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
