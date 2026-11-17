@@ -192,6 +192,20 @@ class AgentExperience(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class RuntimeSetting(Base):
+    """运行期可变设置键值表（票 122）：Web 可改、改后即生效的设置落这里。
+
+    config.toml 同名键只作兜底默认（文件在启动装配，改文件须重启）——运行期真源在本表，
+    读取侧每次现查（键量个位数，无缓存必要）。首个键 `monitor.base_url`（监控端连接地址）。
+    """
+
+    __tablename__ = "runtime_settings"
+
+    key: Mapped[str] = mapped_column(String(100), primary_key=True)
+    value: Mapped[str] = mapped_column(String(500), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=_now)
+
+
 SCHEMA_VERSION = 6  # 遗迹值（票 104）：与 baseline 种子行对应，结构演进自此走 Alembic，不再递增
 
 
@@ -238,6 +252,9 @@ def _assert_schema6_shape(engine: Engine) -> None:
 def _run_migrations(engine: Engine, db_url: str) -> None:
     """结构管理唯一入口（票 104，D2）：空库 upgrade head；pre-Alembic schema 6 库 stamp 接入；其余 upgrade head。
 
+    stamp 接入先钉 baseline 再升 head（票 122）：post-baseline 迁移（如 runtime_settings）
+    必须在已接入库上真实执行——只 stamp head 会把新表跳过。基线锚 `b0001_baseline` 与迁移纪律同源硬编码。
+
     Args:
         engine: 目标库引擎（仅用于形状探测）。
         db_url: 注入 Alembic 的数据库 URL。
@@ -247,7 +264,8 @@ def _run_migrations(engine: Engine, db_url: str) -> None:
     insp = inspect(engine)
     if not insp.has_table("alembic_version") and insp.get_table_names():
         _assert_schema6_shape(engine)
-        command.stamp(cfg, "head")
+        command.stamp(cfg, "b0001_baseline")
+        command.upgrade(cfg, "head")
         if insp.has_table("schema_version"):
             with engine.begin() as conn:
                 conn.exec_driver_sql(

@@ -112,13 +112,33 @@ def _check_llm(cfg: dict) -> dict:
             "summary": f"{llm.get('model')} @ {llm.get('base_url')}", "detail": ""}
 
 
+def _check_monitor(cfg: dict) -> dict:
+    """监控端（vision-monitor）可达性探测（票 122）：GET /api/health，短超时。
+
+    不可达只降级为 warning——拉取导入/回写不可用，不影响平台本职（与出站回写
+    「告警不阻断」同口径）。生效地址读 runtime_settings（Web 可改即生效）→ config 兜底。
+    """
+    from .monitor import get_monitor_base_url, probe_monitor
+
+    base = get_monitor_base_url(cfg)
+    probe = probe_monitor(base, cfg=cfg)
+    if probe["reachable"]:
+        return {"key": "monitor", "label": "监控端连接", "severity": "ok",
+                "summary": f"{base} 可达（{probe['detail']}）", "detail": ""}
+    return {
+        "key": "monitor", "label": "监控端连接", "severity": "warning",
+        "summary": f"{base} 不可达：{probe['detail']}——拉取导入/回写不可用（训练不受影响）",
+        "detail": "修复：系统页「监控端连接」→ 修正监控端地址，或确认 vision-monitor 已启动",
+    }
+
+
 def run_selfcheck(cfg: dict | None = None) -> dict:
     """跑全套自检；返回逐项结果与汇总。单项异常不外抛（自检本身不能把平台拖死）。"""
     from ..config import load_config
 
     cfg = cfg or load_config()
     items = []
-    for fn in (_check_training_python, _check_entry_files, _check_dirs, _check_llm):
+    for fn in (_check_training_python, _check_entry_files, _check_dirs, _check_llm, _check_monitor):
         try:
             items.append(fn(cfg))
         except Exception as exc:  # noqa: BLE001

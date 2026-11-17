@@ -18,7 +18,7 @@
 | GET | `/api/v1/operations` | 进行中操作登记表全量快照（阶段 1c）：`{running:[按登记序], last:最近终态\|null}`；`operation.updated` 只在登记/换阶段/终态发，细粒度进度消费方逢事件读本端点刷新 |
 | POST | `/api/v1/system/open-dir` | 服务端文件管理器打开目录（阶段 1c）：body `{path}`；fire-and-forget（xdg-open），目录不存在 400 `invalid_args`，无桌面环境 500 |
 | GET | `/api/v1/system/logs` | 运行日志尾部读取（票 107 日志页）：query `tail`(1–5000, 默认 300)/`level`(DEBUG\|INFO\|WARNING\|ERROR, ==匹配)/`q`(子串，大小写不敏感)；返回 `{path, tail, level, q, lines[], matched, total}`——筛选后取最近 N 条，堆栈续行随前一行入选，文件缺失返回空集 |
-| GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地） |
+| GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地；monitor 节为兜底默认，运行期生效值见 `GET /system/monitor`，票 122） |
 | PUT | `/api/v1/config` | 白名单部分更新。body: `{server?:{host,port}, llm?:{base_url,api_key,model}, training?:{python,trainer_entry,export_entry,datasets_dir,runs_dir,model_lib_dir,check_occupancy}}`（节/键均可省略）；返回 `{config, restart_required}`——llm 即存即生效，server/training 改动须重启（设置页，2026-09-20） |
 | POST | `/api/v1/config/llm-test` | LLM 连通性测试（阶段 1c）：按当前 [llm] 发一条探测消息，返回 `{reply}`；未配置/不可达 502 `llm_unavailable`；多模态链路可达数十秒（长操作，登记 `llm:test`） |
 
@@ -103,7 +103,17 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/selfcheck` | 按需自检（M6 07）：训练 python（子进程探针）/入口文件/三目录可写/LLM 完整性，`{items[], ok, problems, error_count}`；severity ∈ ok/warning/error，error 项带修复指引 detail |
+| GET | `/api/v1/selfcheck` | 按需自检（M6 07）：训练 python（子进程探针）/入口文件/三目录可写/LLM 完整性/监控端可达性（票 122，`key=monitor`，不可达为 warning 带原因——拉取导入/回写不可用，训练不受影响），`{items[], ok, problems, error_count}`；severity ∈ ok/warning/error，error 项带修复指引 detail |
+
+### 系统域票 122 增补（监控端连接，2026-11-18）
+
+监控端（vision-monitor，工位）连接配置：运行期真源 = SQLite `runtime_settings`（Alembic b0002），config.toml `[monitor] base_url` 同名键只作兜底默认（不进 `PUT /config` 白名单——文件改动须重启，与本配置「改后即生效」语义冲突，Web 修改走本组端点）。探测 = HTTP GET `{base}/api/health`（vision-monitor 侧契约），短超时（2s）、失败带原因。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/system/monitor` | 读监控端连接地址：`{base_url, source, updated_at}`——source ∈ `runtime`（运行期已改）/ `config`（文件兜底默认，updated_at 为 null） |
+| PUT | `/api/v1/system/monitor` | 写运行期地址（upsert runtime_settings，改后即生效无需重启）。body `{base_url}`；返回同 GET（source 恒 `runtime`）；非 http(s) 或空串 400 `invalid_value`；config.toml 不被写 |
+| POST | `/api/v1/system/monitor/probe` | 可达性探测：返回 `{base_url, reachable, detail}`——detail 人读（`HTTP 200` 或异常类型+原因）。body 可缺省 `{base_url?}`：带则探未保存草稿值（不落库），缺省探当前生效地址；草稿非法 400 `invalid_value` |
 
 ### 任务域 M8 增补（错误分析 / 试跑 / 模型库，2026-09-21）
 

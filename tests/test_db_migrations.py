@@ -24,6 +24,18 @@ def _table_schemas(db_path: Path) -> dict[str, set[str]]:
     return {t: {c["name"] for c in insp.get_columns(t)} for t in sorted(insp.get_table_names())}
 
 
+def _create_prealembic(engine) -> None:
+    """造 pre-Alembic 基线形状库：metadata 全表 minus post-baseline 迁移新增表。
+
+    create_all 跟着当前 metadata 走，会把 post-baseline 表（票 122 runtime_settings）
+    一并建出来——旧库模拟须剔除，否则 stamp 接入后的 upgrade head 重复建表。
+    """
+    post_baseline = {"runtime_settings"}
+    for name, table in Base.metadata.tables.items():
+        if name not in post_baseline:
+            table.create(engine)
+
+
 def test_fresh_init_db_matches_metadata(tmp_path):
     """新库 init_db 的表集合 == models metadata（结构唯一真相源走 Alembic）。"""
     init_db(f"sqlite:///{tmp_path}/a.db")
@@ -43,7 +55,7 @@ def test_prealembic_schema6_stamps_and_keeps_data(tmp_path):
     db = tmp_path / "old6.db"
     url = f"sqlite:///{db}"
     engine = create_engine(url, connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)  # pre-Alembic 形状：create_all 不建 alembic_version
+    _create_prealembic(engine)  # pre-Alembic 形状：不建 alembic_version，也不含 post-baseline 新表
     with engine.begin() as conn:
         conn.execute(Task.__table__.insert().values(
             uid="t1" * 4, name="demo", base_model="yolo11n", train_args={}, dataset="demo", format_id="yolo"))
@@ -98,7 +110,7 @@ def test_init_db_idempotent_after_stamp(tmp_path):
     db = tmp_path / "twice.db"
     url = f"sqlite:///{db}"
     engine = create_engine(url, connect_args={"check_same_thread": False})
-    Base.metadata.create_all(engine)
+    _create_prealembic(engine)
     engine.dispose()
     init_db(url)
     heads_before = _table_schemas(db)

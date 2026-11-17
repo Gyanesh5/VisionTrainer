@@ -21,11 +21,17 @@ def _cfg(tmp_path: Path, python: str | None = None, **extra) -> dict:
     return {"training": training}
 
 
-def test_selfcheck_all_ok(tmp_path):
+def test_selfcheck_all_ok(tmp_path, monkeypatch):
     from visiontrainer.core.selfcheck import run_selfcheck
 
     cfg = _cfg(tmp_path)
     cfg["llm"] = {"base_url": "https://api.example.com/v1", "model": "glm-5.3-flash", "api_key": "x"}
+    # 票 122：自检含监控端探测项——全绿场景把探测钉成可达（不真连外网）
+    from visiontrainer.core import monitor as monitor_mod
+
+    monkeypatch.setattr(monitor_mod, "probe_monitor",
+                        lambda base_url=None, timeout=2.0, cfg=None:
+                        {"base_url": base_url or "", "reachable": True, "detail": "HTTP 200"})
     result = run_selfcheck(cfg)
     assert result["ok"] and result["problems"] == 0, result
     by_key = {i["key"]: i for i in result["items"]}
