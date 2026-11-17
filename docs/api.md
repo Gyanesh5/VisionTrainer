@@ -192,7 +192,7 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| POST | `/api/v1/runs/{uid}/release` | 发起发布（同步）：打包落盘 + 登记记录，返回 `{release_id, run_uid, fingerprint, version, release_dir, bundle_path, download_url, url_expires_at, ...元数据}`；发布目录含 `best.pt`/`metadata.json`/`classes.txt`/`bundle.zip`。资格同部署：仅 done 且 best.pt 在盘（否则 409/400）；长操作登记 `run:{uid}:release` |
+| POST | `/api/v1/runs/{uid}/release` | 发起发布（同步）：打包落盘 + 登记记录，返回 `{release_id, run_uid, fingerprint, version, release_dir, bundle_path, download_url, url_expires_at, ...元数据}`；发布目录含 `best.pt`/`metadata.json`/`classes.txt`/`bundle.zip`。资格（review 修复）：权重文件在盘即可，状态不限——cancelled 但权重在盘的 Run 可发布（与票 121 真源清单「缺失如实标注」同口径）；权重缺失 400。长操作登记 `run:{uid}:release` |
 | GET | `/api/v1/releases` | 发布记录清单（只增不改账目，新在前）：`{release_id, run_uid, task_id, task_name, round_no, fingerprint, version, release_dir, primary_metric, created_at, url_expires_at, url_expired, recommended_conf, classes}`；`url_expired` 读时计算（过期只影响拉取，记录留档）；票 126 增 `invalidated`（所属 Run 被放行删除的记录留账，`run_uid` 取冗余列可对账，task 信息可能为 null） |
 | GET | `/api/v1/releases/download?rid=&t=` | 凭限时签名 URL 拉取发布包 `bundle.zip`（`application/zip`，含 best.pt + metadata.json + classes.txt）；验签失败/过期 403，记录不存在或发布包已被清理 404（派生产物可重新发布重建） |
 

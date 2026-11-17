@@ -119,6 +119,12 @@ function deployable(w: RunWeightItem): boolean {
   return w.weight_present && w.status === "done";
 }
 
+/** 权重行的发布资格（票 123「对任意 Run 权重发起发布」，review 修复）：权重文件在盘即可，
+ * 状态不限——cancelled 但权重在盘的 Run 可发布（缺失后端如实 400，前端先行免错） */
+function releaseable(w: RunWeightItem): boolean {
+  return w.weight_present;
+}
+
 export function ModelsPage() {
   const queryClient = useQueryClient();
   const [opLines, setOpLines] = useState<Record<string, OpLine>>({});
@@ -415,32 +421,32 @@ export function ModelsPage() {
                       )}
                     </td>
                     <td>
+                      {releaseable(w) && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          data-testid={`weight-release-${w.run_uid}`}
+                          title="打包 best.pt + 元数据进发布目录，配限时签名 URL 供监控端拉取（票 123）"
+                          onClick={() => {
+                            setReleaseError(null);
+                            setReleaseTarget(w);
+                          }}
+                        >
+                          发布
+                        </button>
+                      )}
                       {deployable(w) && (
-                        <>
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            data-testid={`weight-release-${w.run_uid}`}
-                            title="打包 best.pt + 元数据进发布目录，配限时签名 URL 供监控端拉取（票 123）"
-                            onClick={() => {
-                              setReleaseError(null);
-                              setReleaseTarget(w);
-                            }}
-                          >
-                            发布
-                          </button>
-                          <button
-                            type="button"
-                            className="btn btn-ghost"
-                            data-testid={`weight-deploy-${w.run_uid}`}
-                            onClick={() => {
-                              setDeployError(null);
-                              setDeployTarget(w);
-                            }}
-                          >
-                            部署
-                          </button>
-                        </>
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          data-testid={`weight-deploy-${w.run_uid}`}
+                          onClick={() => {
+                            setDeployError(null);
+                            setDeployTarget(w);
+                          }}
+                        >
+                          部署
+                        </button>
                       )}
                     </td>
                   </tr>
@@ -467,7 +473,7 @@ export function ModelsPage() {
           <p className="placeholder-note">读取发布记录…</p>
         ) : releases.length === 0 ? (
           <div className="empty-state" data-testid="release-empty-first">
-            <p>还没有发布记录——对任意已完成 Run 的权重发起发布，监控端即可凭签名 URL 拉取。</p>
+            <p>还没有发布记录——对权重在盘的 Run 发起发布（状态不限，票 123），监控端即可凭签名 URL 拉取。</p>
           </div>
         ) : (
           <table className="data-table">

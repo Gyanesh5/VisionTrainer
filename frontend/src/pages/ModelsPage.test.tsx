@@ -120,6 +120,21 @@ const sampleWeights: RunWeightsResult = {
       ],
       releases: [],
     },
+    {
+      run_uid: "dddd4444",
+      task_id: 14,
+      task_name: "裂纹检测",
+      round_no: 1,
+      status: "cancelled", // 已取消但权重文件在盘（review 修复：发布资格看权重在盘，不看状态）
+      created_at: "2026-11-16T09:00:00",
+      weight_path: "/runs/task-14/r1/weights/best.pt",
+      weight_present: true,
+      fingerprint: "c3d4e5f6",
+      classes: ["crack"],
+      primary_metric: 0.61,
+      deployments: [],
+      releases: [],
+    },
   ],
 };
 
@@ -444,6 +459,16 @@ describe("ModelsPage 发布动作（票 123，与部署分立）", () => {
     const rows = await screen.findByTestId("weights-rows");
     expect(within(rows).queryByTestId("weight-release-eeee5555")).not.toBeInTheDocument();
     expect(within(rows).queryByTestId("weight-release-ffff6666")).not.toBeInTheDocument();
+  });
+
+  it("releases_cancelled_run_when_weight_on_disk_without_deploy_action", async () => {
+    // review 修复（票 123「对任意 Run 权重发起发布」）：发布资格看权重在盘，不看状态——
+    // cancelled 但权重在盘的 Run 可发布；部署维持自身资格（done）不变。
+    mockDefault();
+    renderModelsPage();
+    const rows = await screen.findByTestId("weights-rows");
+    await waitFor(() => expect(screen.getByTestId("weight-release-dddd4444")).toBeEnabled());
+    expect(within(rows).queryByTestId("weight-deploy-dddd4444")).not.toBeInTheDocument();
   });
 
   it("renders_release_record_card_with_url_status_badges", async () => {

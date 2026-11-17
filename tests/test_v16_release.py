@@ -144,19 +144,25 @@ def test_release_records_append_only_and_row_history(release_client):
     assert all(h["fingerprint"] == STUB_FP for h in hist)
 
 
-def test_release_rejects_unfinished_or_missing_weight(release_client):
-    """发布资格：未完成 Run 409；权重文件缺失 400（同部署口径，不兜底造假）。"""
+def test_release_eligibility_by_weight_on_disk(release_client):
+    """发布资格（票 123「对任意 Run 权重发起发布」，review 修复）：权重文件在盘即可发布，
+    状态不限——cancelled 但权重在盘的 Run 可发布；权重缺失如实 400（同 #121 真源清单
+    「缺失如实标注」口径，不兜底造假）。"""
     c, tmp_path, app = release_client
     uid = _train_one(c)
 
-    # 未完成的 Run（queued）
-    other = c.post("/api/v1/tasks", json={"name": "not-done", "base_model": "yolo11n",
-                                          "dataset": "plate", "epochs": 100}).json()["id"]
-    time.sleep(0.5)
-    r = c.post(f"/api/v1/runs/{_run_uid(c, other)}/release")
-    assert r.status_code == 409
+    # cancelled 但权重文件在盘：可发布
+    with app.state.manager.Session() as s:
+        from visiontrainer.db.models import Run
 
-    # done 但权重文件被删
+        run = s.query(Run).filter(Run.uid == uid).one()
+        run.status = "cancelled"
+        s.commit()
+    r = c.post(f"/api/v1/runs/{uid}/release")
+    assert r.status_code == 200, r.text
+    assert r.json()["run_uid"] == uid and r.json()["fingerprint"] == STUB_FP
+
+    # 权重文件被删（状态不限）：如实拒绝
     with app.state.manager.Session() as s:
         from visiontrainer.db.models import Run
 
@@ -164,6 +170,13 @@ def test_release_rejects_unfinished_or_missing_weight(release_client):
         Path(run.best_pt).unlink()
         s.commit()
     r = c.post(f"/api/v1/runs/{uid}/release")
+    assert r.status_code == 400
+
+    # 训练中（queued/running）权重尚未落盘：缺失如实拒绝（放最后：长任务占队列）
+    other = c.post("/api/v1/tasks", json={"name": "not-done", "base_model": "yolo11n",
+                                          "dataset": "plate", "epochs": 100}).json()["id"]
+    time.sleep(0.5)
+    r = c.post(f"/api/v1/runs/{_run_uid(c, other)}/release")
     assert r.status_code == 400
 
 

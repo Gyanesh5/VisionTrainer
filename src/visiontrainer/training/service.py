@@ -1450,6 +1450,8 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
     发布 = best 权重 + 类别表 + 阈值探索器建议置信度 + 模型指纹打包进发布目录（派生产物，
     可清理重建，不动模型真源）；签名 URL 复用缩略图签名管线模式（限时 + 不带凭据）。
     发布记录只增不改：重复发布同一 Run 生成新目录（序号递增）与新记录。
+    发布资格（票 123「对任意 Run 权重发起发布」）：权重文件在盘即可，状态不限——cancelled
+    但权重在盘的 Run 可发布；缺失如实 400（与票 121 真源清单「缺失如实标注」同口径）。
     建议置信度口径同 deploy_run（M8 04）：阈值探索器 recommended_conf 优先，回退 train_args.conf。
     """
     import shutil
@@ -1466,8 +1468,6 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         run = s.query(Run).filter(Run.uid == uid).one_or_none()
         if run is None:
             raise _http_err("not_found", f"Run 不存在：{uid}", 404)
-        if run.status != "done":
-            raise _http_err("state_conflict", "仅已完成的运行可发布", 409)
         best_pt = run.best_pt
         if not best_pt and run.run_dir:  # 历史数据兜底：DB 字段缺失但产物在盘
             cand = Path(run.run_dir) / "weights" / "best.pt"
