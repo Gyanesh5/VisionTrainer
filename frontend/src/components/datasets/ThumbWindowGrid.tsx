@@ -18,6 +18,8 @@ export interface GridItem {
   image: string;
   name: string;
   split?: string;
+  /** 卡注一行（试跑结果的「N 检出 · 类别 置信」串等）；溢出截断，title 补全 */
+  note?: string;
 }
 
 const CARD_STEP = 176;
@@ -30,14 +32,18 @@ export function ThumbWindowGrid({
   onOpen,
   selectLabel = "选择",
   emptyHint = "滚近加载",
+  box = 260,
 }: {
   items: GridItem[];
-  selected: ReadonlySet<string>;
-  onToggle: (image: string, checked: boolean) => void;
+  /** 勾选态（审查流专利 1）：不传即纯展示网格（试跑结果等只读场景，无写回通道） */
+  selected?: ReadonlySet<string>;
+  onToggle?: (image: string, checked: boolean) => void;
   /** 点卡片：查看原图（大图查看器由调用方实现） */
   onOpen: (item: GridItem) => void;
   selectLabel?: string;
   emptyHint?: string;
+  /** 签名档位：默认 260 审查卡；试跑结果/产物画廊同 512 档（旧 UI thumb_url 口径） */
+  box?: number;
 }) {
   const nBatches = Math.max(1, Math.ceil(items.length / VIEW_BATCH));
   const [mat, setMat] = useState<boolean[]>(() => new Array(nBatches).fill(false));
@@ -125,7 +131,7 @@ export function ThumbWindowGrid({
             data-batch={bi}
           >
             {mat[bi] ? (
-              <BatchCards chunk={chunk} selected={selected} onToggle={onToggle} onOpen={onOpen} selectLabel={selectLabel} />
+              <BatchCards chunk={chunk} selected={selected} onToggle={onToggle} onOpen={onOpen} selectLabel={selectLabel} box={box} />
             ) : (
               <div
                 className="thumb-spacer"
@@ -149,22 +155,24 @@ function BatchCards({
   onToggle,
   onOpen,
   selectLabel,
+  box,
 }: {
   chunk: GridItem[];
-  selected: ReadonlySet<string>;
-  onToggle: (image: string, checked: boolean) => void;
+  selected?: ReadonlySet<string>;
+  onToggle?: (image: string, checked: boolean) => void;
   onOpen: (item: GridItem) => void;
   selectLabel: string;
+  box: number;
 }) {
   const [urls, setUrls] = useState<Record<string, string>>({});
   useEffect(() => {
     let alive = true;
-    signThumbUrls(chunk.map((it) => ({ path: it.image, box: 260 })))
+    signThumbUrls(chunk.map((it) => ({ path: it.image, box })))
       .then((map) => {
         if (!alive) return;
         const next: Record<string, string> = {};
         for (const it of chunk) {
-          const u = map.get(`${it.image}:260`);
+          const u = map.get(`${it.image}:${box}`);
           if (u) next[it.image] = u.url;
         }
         setUrls(next);
@@ -173,7 +181,7 @@ function BatchCards({
     return () => {
       alive = false;
     };
-  }, [chunk]);
+  }, [chunk, box]);
 
   return (
     <div className="thumb-cards" data-testid="thumb-cards">
@@ -191,17 +199,24 @@ function BatchCards({
             )}
           </div>
           <div className="thumb-row">
-            <input
-              type="checkbox"
-              aria-label={`${selectLabel} ${it.name}`}
-              checked={selected.has(it.image)}
-              onChange={(e) => onToggle(it.image, e.target.checked)}
-            />
+            {onToggle && (
+              <input
+                type="checkbox"
+                aria-label={`${selectLabel} ${it.name}`}
+                checked={selected?.has(it.image) ?? false}
+                onChange={(e) => onToggle(it.image, e.target.checked)}
+              />
+            )}
             <span className="thumb-name" onClick={() => onOpen(it)} title={it.name}>
               {it.name}
             </span>
             {it.split && <span className="badge is-unregistered">{it.split}</span>}
           </div>
+          {it.note && (
+            <span className="thumb-note tnum" title={it.note}>
+              {it.note}
+            </span>
+          )}
         </div>
       ))}
     </div>

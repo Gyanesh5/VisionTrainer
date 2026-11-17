@@ -717,6 +717,22 @@ export interface RunArtifactImage {
   path: string;
 }
 
+/** 试跑结果单图（POST /runs/{uid}/test-infer 的 images[] 项；annotated 为叠框图路径，展示经签名） */
+export interface TestInferImage {
+  image: string;
+  annotated: string;
+  /** "image" | "frame"（视频抽帧） */
+  source: string;
+  boxes: { cls: string; conf: number; xyxy: number[] }[];
+}
+
+/** 试跑结果（M8 05；dir_total 仅目录来源且超前 30 张截断时提供） */
+export interface TestInferResult {
+  onnx: string | null;
+  images: TestInferImage[];
+  dir_total?: number;
+}
+
 export const runsApi = {
   get: (uid: string) => request<RunDetail>(`/api/v1/runs/${encodeURIComponent(uid)}`),
   gpu: (uid: string) =>
@@ -744,6 +760,13 @@ export const runsApi = {
       `/api/v1/runs/${encodeURIComponent(uid)}/clear-last-pt`,
       { method: "POST" },
     ),
+  /** 训后试跑（M8 05）：受管 best.pt 对单图/目录（前 30 张）/视频推理叠框；长操作登记 run:{uid}:test_infer，结果只展示不写回数据集 */
+  testInfer: (uid: string, body: { image: string; conf?: number }) =>
+    request<TestInferResult>(`/api/v1/runs/${encodeURIComponent(uid)}/test-infer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
 };
 
 // ---------------------------------------------------------------- Agent 调参域

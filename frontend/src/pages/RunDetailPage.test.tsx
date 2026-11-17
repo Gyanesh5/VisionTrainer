@@ -22,6 +22,7 @@ vi.mock("../api/client", async (importOriginal) => {
       retry: vi.fn(),
       delete: vi.fn(),
       clearLastPt: vi.fn(),
+      testInfer: vi.fn(),
     },
     signThumbUrls: vi.fn(),
   };
@@ -209,6 +210,32 @@ describe("RunDetailPage System 卡与产物区", () => {
 });
 
 describe("RunDetailPage 动作", () => {
+  it("done_run_with_best_pt_opens_test_infer_entry", async () => {
+    mockRun(); // done + best_pt 在
+    const user = userEvent.setup();
+    renderRun();
+    const btn = await screen.findByTestId("run-test-infer");
+    expect(btn).toBeEnabled();
+    await user.click(btn);
+    expect(screen.getByTestId("test-infer-dialog")).toBeInTheDocument();
+    expect(screen.getByTestId("ti-submit")).toBeInTheDocument();
+  });
+
+  it("done_run_without_best_pt_disables_test_infer_entry", async () => {
+    mockRun({
+      artifacts: { best_pt: null, last_pt: null, training_log: "/tmp/runs/t/training.log", results_csv: "/tmp/runs/t/results.csv" },
+    });
+    renderRun();
+    expect(await screen.findByTestId("run-test-infer")).toBeDisabled();
+  });
+
+  it("non_done_run_hides_test_infer_entry", async () => {
+    mockRun({ status: "running" });
+    renderRun();
+    await screen.findByTestId("run-stop");
+    expect(screen.queryByTestId("run-test-infer")).not.toBeInTheDocument();
+  });
+
   it("done_run_offers_analysis_entry_and_non_done_does_not", async () => {
     mockRun(); // done
     const user = userEvent.setup();

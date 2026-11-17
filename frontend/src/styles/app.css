@@ -1279,6 +1279,16 @@ body {
   color: var(--chrome-text-dim);
 }
 
+/* 卡注一行（试跑结果「N 检出 · 类别 置信」串）：溢出截断，title 补全 */
+.thumb-note {
+  font-size: 11px;
+  color: var(--chrome-text-dim);
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thumb-spacer {
   width: 100%;
   display: flex;
@@ -1705,6 +1715,15 @@ body {
 
 .run-log-terminal {
   max-height: 320px;
+}
+
+/* 试跑结果（G1）：ONNX 缓存路径一行账目，长路径换行不撑宽弹层 */
+.onnx-line {
+  word-break: break-all;
+}
+
+.ti-result {
+  margin-top: var(--space-2);
 }
 
 /* ---------------------------------------------------------------- 对比页（票 110 批 4，H 族 read · tufte） */

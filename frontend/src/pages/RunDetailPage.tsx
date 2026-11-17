@@ -7,6 +7,7 @@ import { fmtMetric, formatDuration, formatRunTs, runStatusMeta } from "../compon
 import { buildLossOption, buildLrOption, buildMetricOption, METRIC_SHORT, metricKeysOf, niceMax } from "../components/training/chartOptions";
 import { OperChart } from "../components/charts/OperChart";
 import { ConfirmDialog } from "../components/ConfirmDialog";
+import { TestInferDialog } from "../components/training/TestInferDialog";
 
 /**
  * Run 详情页（票 110 批 3，D 族 operate）：固定量程曲线 + System 卡 + 产物区。
@@ -30,6 +31,7 @@ export function RunDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteFiles, setDeleteFiles] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
+  const [tiOpen, setTiOpen] = useState(false);
   const [bigImage, setBigImage] = useState<ThumbUrl | null>(null);
   // run.metrics 逐 epoch 一发：门铃节流 1s
   const lastMetricBell = useRef(0);
@@ -301,9 +303,23 @@ export function RunDetailPage() {
         <GpuTable samples={gpuQ.data?.samples ?? []} />
       </div>
 
-      {/* ── 产物区：权重/CSV/日志 + PNG 归档 */}
+      {/* ── 产物区：权重/CSV/日志 + PNG 归档 + 试跑入口（G1） */}
       <div className="card" data-testid="run-artifacts">
-        <h2 className="card-title">产物</h2>
+        <div className="dialog-head">
+          <h2 className="card-title">产物</h2>
+          {status === "done" && (
+            <button
+              type="button"
+              className="btn"
+              data-testid="run-test-infer"
+              title={run.artifacts.best_pt ? "受管 best.pt 对本地图片/目录/视频推理叠框（结果只展示，不写回数据集）" : "best.pt 不在，无法试跑"}
+              disabled={!run.artifacts.best_pt}
+              onClick={() => setTiOpen(true)}
+            >
+              试跑
+            </button>
+          )}
+        </div>
         <div className="artifact-rows">
           <ArtifactRow label="运行目录" path={run.run_dir} openDir />
           <ArtifactRow label="best.pt" path={run.artifacts.best_pt} />
@@ -438,6 +454,9 @@ export function RunDetailPage() {
           </div>
         </div>
       )}
+
+      {/* ── 试跑弹层（G1：受管 PT 对临时图片推理，结果不写回数据集） */}
+      {tiOpen && <TestInferDialog uid={uid} onClose={() => setTiOpen(false)} />}
     </div>
   );
 }
