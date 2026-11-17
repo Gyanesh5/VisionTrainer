@@ -129,13 +129,14 @@ const sampleReleases: ReleasesResult = {
     {
       release_id: 2,
       run_uid: "bbbb2222",
-      task_id: 12,
-      task_name: "焊缝检测",
-      round_no: 3,
+      task_id: null,
+      task_name: null,
+      round_no: null,
       fingerprint: "a1b2c3d4",
       version: "a1b2c3d4",
       release_dir: "/home/u/releases/yolo11n_detect_bbbb2222_1",
-      primary_metric: 0.4,
+      primary_metric: null,
+      invalidated: true, // 票 126：所属 Run 被放行删除，记录留档失效标注（run_uid 冗余可对账）
       created_at: "2026-11-17T10:30:00",
       url_expires_at: "2026-11-15T10:30:00",
       url_expired: true,
@@ -152,6 +153,7 @@ const sampleReleases: ReleasesResult = {
       version: "e68b5135",
       release_dir: "/home/u/releases/yolo11n_detect_aaaa1111_1",
       primary_metric: 0.85,
+      invalidated: false,
       created_at: "2026-11-17T09:00:00",
       url_expires_at: "2026-11-19T09:00:00",
       url_expired: false,
@@ -171,16 +173,18 @@ const sampleDeps: DeploymentsResult = {
       model_lib_dir: "/home/u/x-anylabeling-models/yolo11n_detect_aaaa1111",
       verified: true,
       verification: { verified: true, detail: "" },
+      invalidated: false,
       created_at: "2026-11-15T12:00:00",
     },
     {
       deployment_id: 2,
       run_uid: "bbbb2222",
-      task_id: 12,
-      task_name: "焊缝检测",
+      task_id: null,
+      task_name: null,
       model_lib_dir: "/home/u/x-anylabeling-models/yolov8s_detect_bbbb2222",
       verified: false,
       verification: { status: "exporting" },
+      invalidated: true, // 票 126：所属 Run 被放行删除，记录留档失效标注
       created_at: "2026-11-17T10:30:00",
     },
   ],
@@ -220,7 +224,7 @@ function mockDefault({ lru = false }: { lru?: boolean } = {}) {
   );
   getModelLibrary.mockResolvedValue(sampleLib);
   deployRun.mockResolvedValue({ deployment_id: 9, target: "/tmp/t", status: "exporting" });
-  deleteModelDir.mockResolvedValue({ deleted: "x", removed_deployments: 1 });
+  deleteModelDir.mockResolvedValue({ deleted: "x", kept_deployments: 1 });
   getReleases.mockResolvedValue(sampleReleases);
   releaseRun.mockResolvedValue({
     release_id: 2, run_uid: "aaaa1111", fingerprint: "e68b5135", version: "e68b5135",
@@ -374,6 +378,11 @@ describe("ModelsPage 派生分区与记录展示（票 121）", () => {
     const b2 = screen.getByTestId("dep-verify-2");
     expect(b2).toHaveClass("is-running");
     expect(b2.textContent).toContain("导出中");
+
+    // 票 126 失效标注：所属 Run 被放行删除的部署记录留账可查
+    const invalid = screen.getByTestId("dep-invalid-2");
+    expect(invalid.textContent).toContain("已失效");
+    expect(screen.queryByTestId("dep-invalid-1")).not.toBeInTheDocument();
   });
 
   it("shows_lru_hint_when_backend_provides", async () => {
@@ -454,6 +463,11 @@ describe("ModelsPage 发布动作（票 123，与部署分立）", () => {
     // 记录带指纹与 version 对账键
     expect(within(rows).getByText("e68b5135")).toBeInTheDocument();
     expect(within(rows).getByText("a1b2c3d4")).toBeInTheDocument();
+
+    // 票 126 失效标注：所属 Run 被放行删除的记录留账可查（徽章 + 冗余 run_uid 仍在列）
+    const invalid = screen.getByTestId("release-invalid-2");
+    expect(invalid.textContent).toContain("已失效");
+    expect(screen.queryByTestId("release-invalid-1")).not.toBeInTheDocument();
   });
 });
 

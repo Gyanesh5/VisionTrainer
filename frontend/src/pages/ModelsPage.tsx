@@ -488,8 +488,19 @@ export function ModelsPage() {
                 return (
                   <tr key={m.release_id}>
                     <td className="tnum">{formatTs(m.created_at)}</td>
-                    <td>{m.task_name}</td>
-                    <td className="mono">{m.run_uid}</td>
+                    <td>{m.task_name ?? "—"}</td>
+                    <td className="mono">
+                      {m.run_uid}
+                      {m.invalidated && (
+                        <span
+                          className="badge is-neutral"
+                          data-testid={`release-invalid-${m.release_id}`}
+                          title="所属训练记录已被放行删除：记录留档失效标注，发布包留在发布目录（派生产物）"
+                        >
+                          已失效
+                        </span>
+                      )}
+                    </td>
                     <td>
                       <span className="mono" title={`模型指纹（sha256 前 8 位）· version 标签 ${m.version}`}>
                         {m.fingerprint}
@@ -594,8 +605,19 @@ export function ModelsPage() {
                           {shortPath(d.model_lib_dir)}
                         </span>
                       </td>
-                      <td>{d.task_name}</td>
-                      <td className="mono">{d.run_uid}</td>
+                      <td>{d.task_name ?? "—"}</td>
+                      <td className="mono">
+                        {d.run_uid}
+                        {d.invalidated && (
+                          <span
+                            className="badge is-neutral"
+                            data-testid={`dep-invalid-${d.deployment_id}`}
+                            title="所属训练记录已被放行删除：记录留档失效标注，组装物留在模型库目录（派生产物）"
+                          >
+                            已失效
+                          </span>
+                        )}
+                      </td>
                       <td className="tnum">{formatTs(d.created_at)}</td>
                       <td>
                         <span
@@ -788,7 +810,7 @@ export function ModelsPage() {
               ))}
             </>
           }
-          consequence="删除磁盘目录并同步移除部署记录；Run 权重真源不受影响，需要时可重新部署重建。"
+          consequence="只清理派生目录（部署组装物）：部署/发布账目保留，Run 权重真源不受影响，需要时可重新部署重建。"
           onConfirm={() => void submitPurge()}
           onCancel={() => setPurgeTargets(null)}
         />

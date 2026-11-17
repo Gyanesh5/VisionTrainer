@@ -806,11 +806,15 @@ export const runsApi = {
   /** 失败 Retry（M7）：以该 Run 冻结参数重开新 Task；后端恒钉原 split_uid */
   retry: (uid: string) =>
     request<TaskCreateResult>(`/api/v1/runs/${encodeURIComponent(uid)}/retry`, { method: "POST" }),
-  delete: (uid: string, deleteFiles = false) =>
-    request<{ deleted: string }>(
-      `/api/v1/runs/${encodeURIComponent(uid)}${deleteFiles ? "?delete_files=true" : ""}`,
+  /** 删除单条训练记录；已部署/已发布的 Run 后端默认阻止（delete_conflict），
+   *  force=true 显式放行（票 126）——部署/发布记录随 Run 标注失效，物理拷贝留派生目录 */
+  delete: (uid: string, deleteFiles = false, force = false) => {
+    const q = [deleteFiles && "delete_files=true", force && "force=true"].filter(Boolean).join("&");
+    return request<{ deleted: string; invalidated?: { deployments: number; releases: number } }>(
+      `/api/v1/runs/${encodeURIComponent(uid)}${q ? `?${q}` : ""}`,
       { method: "DELETE" },
-    ),
+    );
+  },
   clearLastPt: (uid: string) =>
     request<{ run_uid: string; removed: boolean; best_pt: string | null }>(
       `/api/v1/runs/${encodeURIComponent(uid)}/clear-last-pt`,
@@ -1136,13 +1140,16 @@ export interface RunWeightsResult {
 /** 单条部署记录：GET /api/v1/deployments（docs/api.md 回注域节）。 */
 export interface DeploymentItem {
   deployment_id: number;
-  run_uid: string;
-  task_id: number;
-  task_name: string;
+  /** 票 126：Run 被放行删除后记录留账，run_uid 取冗余列（可对账） */
+  run_uid: string | null;
+  task_id: number | null;
+  task_name: string | null;
   model_lib_dir: string;
   verified: boolean;
   /** 落定前 `{status:"exporting"}`；进程失败 `{status:"failed",detail}`；完成后只有 `{verified,detail}` */
   verification: Record<string, unknown>;
+  /** 所属 Run 被放行删除（物理拷贝留模型库目录，账目留档失效标注） */
+  invalidated: boolean;
   created_at: string | null;
 }
 
@@ -1222,18 +1229,22 @@ export interface DeployStartResult {
   status: string;
 }
 
-/** 单条发布记录：GET /api/v1/releases（票 123，docs/api.md 模型发布节）。 */
+/** 单条发布记录：GET /api/v1/releases（票 123，docs/api.md 模型发布节）。
+ *  invalidated/run_uid 为票 126 失效标注：所属 Run 被放行删除后记录留账可查，
+ *  run/task 信息取冗余列与 outer join 的并集（Run 在账时取行值，缺失取冗余值）。 */
 export interface ReleaseItem {
   release_id: number;
-  run_uid: string;
-  task_id: number;
-  task_name: string;
-  round_no: number;
+  run_uid: string | null;
+  task_id: number | null;
+  task_name: string | null;
+  round_no: number | null;
   fingerprint: string;
   /** version 标签 = 指纹（监控端 models.yaml 对账键） */
   version: string;
   release_dir: string;
   primary_metric: number | null;
+  /** 所属 Run 被放行删除（物理拷贝留发布目录，账目留档失效标注） */
+  invalidated: boolean;
   created_at: string | null;
   url_expires_at: string;
   /** 签名 URL 是否已过有效期（读时计算，只增不改账目不受影响） */
@@ -1258,9 +1269,10 @@ export interface ReleaseStartResult {
   url_expires_at: string;
 }
 
+/** 模型库目录清理（票 126 对齐派生语义）：只删派生物，部署记录保留计数返回 */
 export interface ModelDirDeleteResult {
   deleted: string;
-  removed_deployments: number;
+  kept_deployments: number;
 }
 
 export const api = {

@@ -197,6 +197,9 @@ def test_migration_creates_model_releases_on_stamp_path(tmp_path):
         source VARCHAR(16), status VARCHAR(16), base_model VARCHAR(255), train_args JSON,
         agent_config JSON, dataset VARCHAR(255), split_uid VARCHAR(32), format_id VARCHAR(32),
         created_at DATETIME, updated_at DATETIME);
+    CREATE TABLE deployments (id INTEGER PRIMARY KEY, run_id INTEGER,
+        model_lib_dir VARCHAR(1024), onnx_path VARCHAR(1024), verified BOOLEAN,
+        verification JSON, created_at DATETIME);
     INSERT INTO runs (uid, task_id, round_no, status, pruned) VALUES ('ca11ed00', 1, 1, 'done', 0);
     INSERT INTO tasks (uid, name, source, status, base_model, train_args, dataset, format_id)
         VALUES ('t0000001', 'legacy', 'manual', 'done', 'yolo11n', '{}', 'plate', 'yolo');

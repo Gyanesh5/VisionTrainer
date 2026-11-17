@@ -102,10 +102,14 @@ class Deployment(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), index=True)
+    # 冗余 run_uid（票 126）：Run 行被放行删除后记录仍可对账（失效标注可查）
+    run_uid: Mapped[str | None] = mapped_column(String(16), nullable=True)
     model_lib_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
     onnx_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     verification: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 失效标注（票 126）：所属 Run 被放行删除的时刻；None=在账有效
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -204,11 +208,15 @@ class ModelRelease(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), index=True)
+    # 冗余 run_uid（票 126）：Run 行被放行删除后记录仍可对账（失效标注可查）
+    run_uid: Mapped[str | None] = mapped_column(String(16), nullable=True)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     release_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
     bundle_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     url_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    # 失效标注（票 126）：所属 Run 被放行删除的时刻；None=在账有效
+    invalidated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

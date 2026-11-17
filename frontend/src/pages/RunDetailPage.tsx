@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useQuery, useQueryClient, keepPreviousData } from "@tanstack/react-query";
-import { api, runsApi, signThumbUrls, type RunProgress, type ThumbUrl } from "../api/client";
+import { api, runsApi, signThumbUrls, ApiRequestError, type RunProgress, type ThumbUrl } from "../api/client";
 import { useEvents } from "../ws/useEvents";
 import { fmtMetric, formatDuration, formatRunTs, runStatusMeta } from "../components/training/domain";
 import { buildLossOption, buildLrOption, buildMetricOption, METRIC_SHORT, metricKeysOf, niceMax } from "../components/training/chartOptions";
@@ -30,6 +30,10 @@ export function RunDetailPage() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteFiles, setDeleteFiles] = useState(false);
+  // 删除冲突门（票 126）：已部署/已发布的 Run 默认被后端阻止（409 delete_conflict）——
+  // 对话框转述记录要点，确认按钮变「仍要删除（放行）」；再次确认带 force=true 显式放行
+  const [deleteConflict, setDeleteConflict] = useState<string | null>(null);
+  const [deleteForce, setDeleteForce] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
   const [releaseOpen, setReleaseOpen] = useState(false);
   const [tiOpen, setTiOpen] = useState(false);
@@ -238,6 +242,8 @@ export function RunDetailPage() {
               <button type="button" className="btn btn-danger" data-testid="run-delete"
                 onClick={() => {
                   setDeleteFiles(false);
+                  setDeleteConflict(null);
+                  setDeleteForce(false);
                   setDeleteOpen(true);
                 }}>
                 删除本轮
@@ -388,14 +394,14 @@ export function RunDetailPage() {
         )}
       </div>
 
-      {/* ── 删除确认门：意图清单 + 磁盘处置勾选 */}
+      {/* ── 删除确认门：意图清单 + 磁盘处置勾选；冲突时转述后端要点并提供显式放行 */}
       {deleteOpen && (
         <ConfirmDialog
           title={`删除训练记录 ${run.uid}？`}
-          confirmLabel="删除"
+          confirmLabel={deleteConflict ? "仍要删除（放行）" : "删除"}
           danger
           busy={false}
-          error={null}
+          error={deleteConflict}
           intent={
             <>
               <li>
@@ -418,13 +424,29 @@ export function RunDetailPage() {
           }
           consequence="仅终态可删；任务被删空时连任务移除。"
           onConfirm={() => {
-            setDeleteOpen(false);
-            void act(async () => {
-              await runsApi.delete(uid, deleteFiles);
+            void (async () => {
+              try {
+                await runsApi.delete(uid, deleteFiles, deleteForce);
+              } catch (e) {
+                if (e instanceof ApiRequestError && e.code === "delete_conflict") {
+                  // 留在确认门：转述部署/发布记录要点 + 放行入口（下次确认带 force=true）
+                  setDeleteConflict(e.message);
+                  setDeleteForce(true);
+                  return;
+                }
+                setDeleteOpen(false);
+                setActionError(`删除失败：${e instanceof Error ? e.message : "未知错误"}`);
+                return;
+              }
+              setDeleteOpen(false);
               navigate("/training");
-            }, "删除失败");
+            })();
           }}
-          onCancel={() => setDeleteOpen(false)}
+          onCancel={() => {
+            setDeleteOpen(false);
+            setDeleteConflict(null);
+            setDeleteForce(false);
+          }}
         />
       )}
 
