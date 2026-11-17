@@ -28,3 +28,8 @@ model = "glm-5.3-flash"
 
 # 回注部署（09 号票）：标注端模型库位置（训练 venv 需含 onnxruntime 才能做导出验证）
 model_lib_dir = "~/Documents/x-anylabeling-models"
+
+[monitor]
+# 监控端（vision-monitor，工位）连接地址（票 122）：本文件只作兜底默认。
+# 运行期真源在 SQLite runtime_settings（系统页「监控端连接」Web 可改、改后即生效）。
+base_url = "http://127.0.0.1:8610"

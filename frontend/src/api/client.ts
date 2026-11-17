@@ -78,6 +78,20 @@ export interface SelfcheckResult {
   error_count: number;
 }
 
+/** 监控端连接配置（票 122）：source=config 为文件兜底默认，runtime 为运行期已改（SQLite） */
+export interface MonitorConfig {
+  base_url: string;
+  source: "runtime" | "config";
+  updated_at: string | null;
+}
+
+/** 探测结果（GET {base}/api/health）：失败原因在 detail，不外抛 */
+export interface MonitorProbeResult {
+  base_url: string;
+  reachable: boolean;
+  detail: string;
+}
+
 // ---------------------------------------------------------------- 数据集域
 
 /** 任务类型（GLOSSARY：检测/分割/旋转框/姿态/分类）；服务端 scan_entries 同枚举 */
@@ -1162,6 +1176,20 @@ export const api = {
   },
   getSelfcheck: () => request<SelfcheckResult>("/api/v1/selfcheck"),
   getConfig: () => request<Record<string, unknown>>("/api/v1/config"),
+  /** 监控端连接（票 122）：读生效地址；写落 SQLite 改后即生效；探测 GET /api/health */
+  getMonitorConfig: () => request<MonitorConfig>("/api/v1/system/monitor"),
+  putMonitorConfig: (base_url: string) =>
+    request<MonitorConfig>("/api/v1/system/monitor", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ base_url }),
+    }),
+  probeMonitor: (base_url?: string) =>
+    request<MonitorProbeResult>("/api/v1/system/monitor/probe", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(base_url === undefined ? {} : { base_url }),
+    }),
   /** 白名单部分更新（server/llm/training 节；llm 即存即生效）→ {config, restart_required} */
   updateConfig: (body: { llm?: { base_url: string; api_key: string; model: string } }) =>
     request<{ config: Record<string, unknown>; restart_required: boolean }>("/api/v1/config", {
