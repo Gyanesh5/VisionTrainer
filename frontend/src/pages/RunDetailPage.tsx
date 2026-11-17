@@ -214,10 +214,17 @@ export function RunDetailPage() {
               </button>
             )}
             {status === "done" && (
-              <button type="button" className="btn btn-primary" data-testid="run-deploy"
-                onClick={() => setDeployOpen(true)}>
-                部署到标注端
-              </button>
+              <>
+                <Link className="btn" data-testid="run-analysis"
+                  title="best.pt 对 val 逐图推理，逐框记 TP/FP/FN——回答「错在哪」"
+                  to={`/training/runs/${uid}/analysis`}>
+                  错误分析
+                </Link>
+                <button type="button" className="btn btn-primary" data-testid="run-deploy"
+                  onClick={() => setDeployOpen(true)}>
+                  部署到标注端
+                </button>
+              </>
             )}
             {terminal && (
               <button type="button" className="btn btn-danger" data-testid="run-delete"

@@ -1745,3 +1745,23 @@ body {
   color: var(--state-ok);
   font-weight: 600;
 }
+
+/* ---------------------------------------------------------------- 错误分析页（票 111 批 1，B 族只读叠加 + F 明细表） */
+
+/* 逐框记录类型：混淆（类别错）走数据分类色紫（配 ⇄ 文字标记双编码，不占语义色板） */
+.badge.is-confusion {
+  color: var(--cat-4);
+}
+
+/* 长图片路径列：收窄省略，完整路径在 title 悬停 */
+.img-path {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 明细表横向溢出兜底（长 val 清单窄窗不破格） */
+.table-scroll {
+  overflow-x: auto;
+}

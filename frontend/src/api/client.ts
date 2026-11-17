@@ -745,6 +745,105 @@ export const runsApi = {
     ),
 };
 
+// ---------------------------------------------------------------- 错误分析（专利 7/11）
+
+/** 分析汇总（summary.json summary；conf=本次分析口径，低于它的预测框视同未检出） */
+export interface AnalysisSummary {
+  counts: { tp: number; fp: number; fn: number; confusion: number };
+  precision: number | null;
+  recall: number | null;
+  f1: number | null;
+  top_confusions: { gt: string; pred: string; count: number }[];
+  per_class?: Record<string, { fn: number; fp: number; tp: number }>;
+  classes?: string[];
+  small_objects?: { share: number; count: number; total: number } | null;
+  iou_th?: number;
+  conf?: number;
+}
+
+/** 阈值扫描曲线点（后验口径：恒基于全量匹配，不随分析 conf 截断） */
+export interface SweepPoint {
+  conf: number;
+  precision: number;
+  recall: number;
+  f1: number;
+}
+
+export interface AnalysisSweep {
+  curve: SweepPoint[];
+  recommended_conf: number | null;
+  recommended_f1: number | null;
+  note?: string;
+}
+
+/** 逐图错误明细行（错框数降序，服务端排好；overlay=服务端渲染叠加图路径可缺） */
+export interface AnalysisPerImage {
+  image: string;
+  fp: number;
+  fn: number;
+  confusion: number;
+  tp: number;
+  score: number;
+  overlay: string | null;
+}
+
+/** 混淆矩阵（行 GT × 列 Pred，含背景行列） */
+export interface AnalysisMatrix {
+  axis: string[];
+  cells: number[][];
+}
+
+export interface ErrorAnalysisResult {
+  run_uid: string;
+  summary: AnalysisSummary;
+  sweep: AnalysisSweep;
+  per_image: AnalysisPerImage[];
+  matrix: AnalysisMatrix;
+  n_records: number;
+}
+
+/** 格内逐框记录（GET /analysis/cell；kind ∈ tp/fp/fn/confusion，box 含 gt/pred 坐标） */
+export interface AnalysisCellEntry {
+  image: string;
+  kind: "tp" | "fp" | "fn" | "confusion";
+  cls_gt: string | null;
+  cls_pred: string | null;
+  conf: number | null;
+  iou: number | null;
+  box: { gt?: [number, number, number, number] | null; pred?: [number, number, number, number] | null };
+}
+
+export interface RelabelExportResult {
+  path: string;
+  entries: { image: string; kind: string; cls: string | null; conf: number | null }[];
+}
+
+export const analysisApi = {
+  /** 未分析 null（M8 01：读 summary.json + DB 逐框聚合） */
+  get: (uid: string) =>
+    request<ErrorAnalysisResult | null>(`/api/v1/runs/${encodeURIComponent(uid)}/analysis`),
+  /** 跑/重算：body {conf}；同 Run 已推理过则复用 predictions.jsonl 仅平台侧重算（秒级） */
+  run: (uid: string, conf: number) =>
+    request<ErrorAnalysisResult>(`/api/v1/runs/${encodeURIComponent(uid)}/analysis`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ conf }),
+    }),
+  /** 点格下钻：该 (GT,Pred) 格逐框记录（明细表整表切换为此数据） */
+  cell: (uid: string, gt: string, pred: string) =>
+    request<{ entries: AnalysisCellEntry[] }>(
+      `/api/v1/runs/${encodeURIComponent(uid)}/analysis/cell?gt=${encodeURIComponent(gt)}&pred=${encodeURIComponent(pred)}`,
+    ),
+  /** 格内单图聚焦叠加：只画本格记录；返回路径再经 signThumbUrls 签名展示 */
+  cellOverlay: (uid: string, gt: string, pred: string, image: string) =>
+    request<{ path: string }>(
+      `/api/v1/runs/${encodeURIComponent(uid)}/analysis/cell/overlay?gt=${encodeURIComponent(gt)}&pred=${encodeURIComponent(pred)}&image=${encodeURIComponent(image)}`,
+    ),
+  /** 导出 FN/FP 改标清单 markdown 至 Run 目录 */
+  exportRelabel: (uid: string) =>
+    request<RelabelExportResult>(`/api/v1/runs/${encodeURIComponent(uid)}/analysis/export`, { method: "POST" }),
+};
+
 // ---------------------------------------------------------------- 对比复盘（H 族 read）
 
 /** 主指标曲线点（对比视图统一形状；primary 缺 epoch 无数据） */

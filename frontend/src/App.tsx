@@ -4,6 +4,7 @@ import { DatasetsPage } from "./pages/DatasetsPage";
 import { DatasetDetailPage } from "./pages/DatasetDetailPage";
 import { TrainingPage } from "./pages/TrainingPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
+import { RunAnalysisPage } from "./pages/RunAnalysisPage";
 import { ComparePage } from "./pages/ComparePage";
 import { DeployPage } from "./pages/DeployPage";
 import { AgentPage } from "./pages/AgentPage";
@@ -21,6 +22,7 @@ export default function App() {
           <Route path="/datasets/:name" element={<DatasetDetailPage />} />
           <Route path="/training" element={<TrainingPage />} />
           <Route path="/training/runs/:uid" element={<RunDetailPage />} />
+          <Route path="/training/runs/:uid/analysis" element={<RunAnalysisPage />} />
           <Route path="/training/compare" element={<ComparePage />} />
           <Route path="/deploy" element={<DeployPage />} />
           <Route path="/agent" element={<AgentPage />} />
