@@ -209,8 +209,7 @@ export interface OperationsSnapshot {
 /**
  * 详情组合视图（GET /datasets/{name}）：managed 走服务层 _compose_managed 读时现算，
  * external 只有 name/task_type/form/path/has_data_yaml——组合字段全部可缺省。
- */
-export interface DatasetDetail extends DatasetBrief {
+ */export interface DatasetDetail extends DatasetBrief {
   classes?: string[];
   source_dir?: string | null;
   excluded?: { file: string; at: string | null; reason: string }[];
@@ -220,6 +219,48 @@ export interface DatasetDetail extends DatasetBrief {
   validation_summary?: ValidationSummary | null;
   tiling?: { rows?: number; cols?: number; overlap?: number; source?: string; groups?: Record<string, string[]> };
   review?: { counts: Record<ReviewState, number>; done: number; total: number; unlabeled: number };
+}
+
+/** 切分历史条目（GET /datasets/{name}/splits；created_at 倒序） */
+export interface SplitBrief {
+  uid: string;
+  memo?: string;
+  created_at?: string;
+  params?: { seed?: number; ratio?: number; stratify?: boolean; mode?: string };
+  counts?: { train?: number; val?: number };
+}
+
+/** 新建切分请求体（preview / create 同 body，docs/api.md v1.4） */
+export interface SplitPlanBody {
+  mode: "inherit" | "fresh";
+  parent_uid?: string | null;
+  seed: number;
+  ratio: number;
+  stratify: boolean;
+  approved_only: boolean;
+  memo?: string;
+}
+
+/** 新建切分预览（POST /splits/preview；含可比性警示与泄漏组数，前端直显不判布尔） */
+export interface SplitPreview {
+  uid: string;
+  counts: { train: number; val: number };
+  params?: Record<string, unknown>;
+  grouped?: string | null;
+  memo?: string;
+  overlap: { val_shared: number; val_total: number };
+  comparable: boolean;
+  leak_groups: number | null;
+  effective: { counts?: { train?: number; val?: number } };
+  reuses_existing: boolean;
+  incomparable_warning: string;
+  dup_leak_groups: number | null;
+}
+
+/** 实效集预览（GET /splits/{uid}/effective；与出队门同口径） */
+export interface SplitEffective {
+  counts: { train: number; val: number };
+  dropped: { missing: string[]; excluded: string[] };
 }
 
 export const datasetsApi = {
@@ -348,15 +389,42 @@ export const datasetsApi = {
   },
   /** 切分历史（created_at 倒序；外部数据集 400） */
   listSplits: (name: string) =>
-    request<
+    request<SplitBrief[]>(`/api/v1/datasets/${encodeURIComponent(name)}/splits`),
+  /** 新建切分预览（零写入；数字与落盘同口径，含可比性警示与跨切分泄漏组数） */
+  splitsPreview: (name: string, body: SplitPlanBody) =>
+    request<SplitPreview>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/splits/preview`,
       {
-        uid: string;
-        memo?: string;
-        created_at?: string;
-        params?: { seed?: number; ratio?: number; stratify?: boolean; mode?: string };
-        counts?: { train?: number; val?: number };
-      }[]
-    >(`/api/v1/datasets/${encodeURIComponent(name)}/splits`),
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  /** 新建切分落盘（同划分命中既有 uid 直接复用；不随任务取消回滚） */
+  splitsCreate: (name: string, body: SplitPlanBody) =>
+    request<SplitBrief>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/splits`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  /** 切分备注（memo 是切分唯一可变字段） */
+  splitsSetMemo: (name: string, uid: string, memo: string) =>
+    request<SplitBrief>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/splits/${encodeURIComponent(uid)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memo }),
+      },
+    ),
+  /** 实效集预览（清单 N，实效 M：缺 a / 排除 b，与出队同口径） */
+  splitsEffective: (name: string, uid: string) =>
+    request<SplitEffective>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/splits/${encodeURIComponent(uid)}/effective`,
+    ),
   /** 切片预览（dry-run 零写入，数字与执行同口径） */
   tilePreview: (name: string, body: { rows: number; cols: number; overlap: number; keep_empty: boolean }) =>
     request<{
@@ -528,8 +596,70 @@ export const datasetsApi = {
     }),
 };
 
-/** 图片展示唯一通道：先批量签发签名 URL（HMAC 密钥只在服务端），再进 img.src */
-export async function signThumbUrls(items: { path: string; box?: number }[]): Promise<Map<string, ThumbUrl>> {
+// ---------------------------------------------------------------- 训练域元数据与提交
+
+/** 训练参数白名单元数据项（GET /training/params；对齐 ultralytics 官方参数面） */
+export interface TrainingParamMeta {
+  key: string;
+  type: string;
+  default: unknown;
+  label: string;
+  min?: number;
+  max?: number;
+  options?: string[];
+}
+
+export interface TrainingParamsResult {
+  groups: Record<string, TrainingParamMeta[]>;
+}
+
+/** 时长预估（M7 02：历史 done Run 每 epoch 秒数中位数；无样本 null） */
+export interface TrainingEstimate {
+  seconds_per_epoch: number;
+  samples: number;
+}
+
+/** 任务创建回执（POST /tasks brief：含实效集回显，剔除计数只提示不拒训） */
+export interface TaskCreateResult {
+  id: number;
+  uid: string;
+  name: string;
+  status: string;
+  dataset: string;
+  split_uid: string | null;
+  counts?: { train?: number; val?: number };
+  effective?: { counts?: { train?: number; val?: number }; dropped?: { missing: string[]; excluded: string[] } };
+  dropped?: { missing: string[]; excluded: string[] };
+}
+
+/** 任务创建请求体（format_id 由后端注册表定，不可选择） */
+export interface TaskCreateBody {
+  name: string;
+  base_model: string;
+  dataset: string;
+  split_uid?: string | null;
+  epochs: number;
+  imgsz: number;
+  batch: number;
+  patience?: number | null;
+  device: string;
+  workers: number;
+  seed: number;
+  extra_args?: Record<string, unknown>;
+}
+
+export const trainingApi = {
+  params: () => request<TrainingParamsResult>("/api/v1/training/params"),
+  estimate: () => request<TrainingEstimate | null>("/api/v1/training/estimate"),
+  createTask: (body: TaskCreateBody) =>
+    request<TaskCreateResult>("/api/v1/tasks", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+};
+
+/** 图片展示唯一通道：先批量签发签名 URL（HMAC 密钥只在服务端），再进 img.src */export async function signThumbUrls(items: { path: string; box?: number }[]): Promise<Map<string, ThumbUrl>> {
   if (items.length === 0) return new Map();
   const res = await request<{ urls: ThumbUrl[] }>("/api/v1/thumb/sign", {
     method: "POST",

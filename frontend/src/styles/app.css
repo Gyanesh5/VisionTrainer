@@ -1426,3 +1426,136 @@ body {
 .run-row:hover .run-link {
   color: var(--chrome-accent);
 }
+
+/* ---------------------------------------------------------------- 训练提交向导（票 110 批 2，G 族） */
+
+/* 页头动作区：标题行右侧按钮 */
+.page-head .page-actions {
+  margin-left: auto;
+}
+
+.wizard-section {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: var(--space-1) 12px;
+  margin: 0 0 var(--space-1);
+}
+
+.wizard-section legend {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+  padding: 0 6px;
+}
+
+/* 参数域：控件 + 已修改徽章 + hint 纵排 */
+.param-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.param-field input,
+.param-field select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.param-field input:disabled,
+.param-field select:disabled {
+  background: var(--chrome-bg);
+  color: var(--chrome-text-dim);
+}
+
+.param-field input[type="checkbox"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.badge.is-modified {
+  color: var(--chrome-accent);
+}
+
+.is-clamp-note {
+  color: var(--alarm-warning);
+}
+
+/* 表单双列（数值参数成对排布） */
+.form-pair {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.form-pair > .form-row {
+  flex: 1;
+  min-width: 220px;
+}
+
+/* 三态分段/两模式分段：沿用 level-btn，行内排布 */
+.segment-row {
+  display: flex;
+  gap: 8px;
+  margin: var(--space-1) 0;
+}
+
+/* 高级参数分组 */
+.param-group {
+  border: none;
+  border-top: 1px solid var(--chrome-border);
+  margin: var(--space-1) 0 0;
+  padding: var(--space-1) 0 0;
+}
+
+.param-group legend {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+  padding: 0 0 4px;
+}
+
+/* 新建切分预览块（常驻，可折叠） */
+.split-preview {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: var(--space-1) 0;
+}
+
+.split-preview summary {
+  cursor: pointer;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.split-preview-body p {
+  margin: 4px 0;
+}
+
+/* 意图清单里的改动项（旧值 → 新值） */
+.confirm-change {
+  display: inline-block;
+  margin-right: 4px;
+}
+
+.wizard-footer {
+  justify-content: flex-end;
+}
+
+.wizard-footer .form-hint {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}

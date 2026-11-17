@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type RunBrief, type TaskBrief } from "../api/client";
 import { useEvents } from "../ws/useEvents";
 import { fmtMetric, formatRunTs, modelShort, runStatusMeta, SOURCE_ZH } from "../components/training/domain";
+import { TrainingWizard } from "../components/training/TrainingWizard";
 
 /**
  * 训练页（票 110 批 1，表面族 D 监控 + F 表格）：队列总貌卡 + 训练记录单表。
@@ -72,6 +73,7 @@ function buildRows(tasks: TaskBrief[], openGroups: Record<string, boolean>): Dis
 export function TrainingPage() {
   const queryClient = useQueryClient();
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(loadOpenGroups);
+  const [wizardOpen, setWizardOpen] = useState(false);
   // run.metrics 逐 epoch 一发（stub 链路 0.3s/轮）：门铃节流 2s，防刷新风暴
   const lastBell = useRef(0);
 
@@ -136,6 +138,16 @@ export function TrainingPage() {
     <div className="page-body">
       <div className="page-head">
         <h1>训练</h1>
+        <div className="page-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            data-testid="open-wizard"
+            onClick={() => setWizardOpen(true)}
+          >
+            新建训练
+          </button>
+        </div>
       </div>
 
       {tasksQ.isError && (
@@ -244,6 +256,8 @@ export function TrainingPage() {
           </table>
         )}
       </div>
+
+      {wizardOpen && <TrainingWizard onClose={() => setWizardOpen(false)} />}
     </div>
   );
 }
