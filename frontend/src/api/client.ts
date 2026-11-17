@@ -659,6 +659,92 @@ export const trainingApi = {
     }),
 };
 
+// ---------------------------------------------------------------- Run 详情与操作
+
+/** 逐 epoch 指标记录（GET /runs/{uid} 的 metrics 数组项；键为 ultralytics 原名） */
+export interface EpochRec {
+  epoch: number;
+  metrics?: Record<string, number>;
+  loss?: Record<string, number>;
+  lr?: number[];
+}
+
+/** batch 级进度（run.progress 事件与 GET /runs/{uid} 的 progress 同形） */
+export interface RunProgress {
+  epoch?: number;
+  epochs_total?: number;
+  batch?: number;
+  batches_total?: number;
+  eta_sec?: number;
+}
+
+/** Run 详情（GET /runs/{uid}；metrics 全量=断线补齐源，snapshot M6 冻结三段） */
+export interface RunDetail {
+  uid: string;
+  task_id: number;
+  task_name: string;
+  task_type: TaskType | null;
+  dataset: string | null;
+  split_uid: string | null;
+  round_no: number;
+  status: string;
+  pruned: boolean;
+  /** 失败原因（failed 终态行内展示；其余为 null） */
+  error: string | null;
+  primary_metric: number | null;
+  metrics: EpochRec[];
+  run_dir: string | null;
+  started_at: string | null;
+  eta_seconds: number | null;
+  progress: RunProgress | null;
+  snapshot: Record<string, unknown> | null;
+  artifacts: { best_pt: string | null; last_pt: string | null; training_log: string | null; results_csv: string | null };
+}
+
+/** GPU 采样点（GET /runs/{uid}/gpu；t 首样本归零秒） */
+export interface GpuSample {
+  t: number;
+  util: number;
+  mem_used: number;
+  mem_total: number;
+  temp: number;
+}
+
+/** 产物图条目（GET /runs/{uid}/artifacts；展示经 POST /thumb/sign 签名） */
+export interface RunArtifactImage {
+  name: string;
+  path: string;
+}
+
+export const runsApi = {
+  get: (uid: string) => request<RunDetail>(`/api/v1/runs/${encodeURIComponent(uid)}`),
+  gpu: (uid: string) =>
+    request<{ samples: GpuSample[] }>(`/api/v1/runs/${encodeURIComponent(uid)}/gpu`),
+  artifacts: (uid: string) =>
+    request<{ images: RunArtifactImage[] }>(`/api/v1/runs/${encodeURIComponent(uid)}/artifacts`),
+  logs: (uid: string, tail = 200) =>
+    request<{ lines: string[] }>(`/api/v1/runs/${encodeURIComponent(uid)}/logs?tail=${tail}`),
+  stop: (uid: string) =>
+    request<{ run_uid: string; state: string }>(`/api/v1/runs/${encodeURIComponent(uid)}/stop`, { method: "POST" }),
+  forceStop: (uid: string) =>
+    request<{ run_uid: string; state: string }>(`/api/v1/runs/${encodeURIComponent(uid)}/force-stop`, { method: "POST" }),
+  resume: (uid: string) =>
+    request<{ new_run_uid: string }>(`/api/v1/runs/${encodeURIComponent(uid)}/resume`, { method: "POST" }),
+  /** 失败 Retry（M7）：以该 Run 冻结参数重开新 Task；后端恒钉原 split_uid */
+  retry: (uid: string) =>
+    request<TaskCreateResult>(`/api/v1/runs/${encodeURIComponent(uid)}/retry`, { method: "POST" }),
+  delete: (uid: string, deleteFiles = false) =>
+    request<{ deleted: string }>(
+      `/api/v1/runs/${encodeURIComponent(uid)}${deleteFiles ? "?delete_files=true" : ""}`,
+      { method: "DELETE" },
+    ),
+  clearLastPt: (uid: string) =>
+    request<{ run_uid: string; removed: boolean; best_pt: string | null }>(
+      `/api/v1/runs/${encodeURIComponent(uid)}/clear-last-pt`,
+      { method: "POST" },
+    ),
+};
+
 /** 图片展示唯一通道：先批量签发签名 URL（HMAC 密钥只在服务端），再进 img.src */export async function signThumbUrls(items: { path: string; box?: number }[]): Promise<Map<string, ThumbUrl>> {
   if (items.length === 0) return new Map();
   const res = await request<{ urls: ThumbUrl[] }>("/api/v1/thumb/sign", {

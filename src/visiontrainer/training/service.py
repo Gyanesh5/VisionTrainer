@@ -306,6 +306,7 @@ def get_run(manager, uid: str) -> dict:
                 "dataset": task.dataset if task else None,
                 "split_uid": ((snap or {}).get("split") or {}).get("uid") or (task.split_uid if task else None),
                 "round_no": r.round_no, "status": r.status, "pruned": bool(r.pruned),
+                "error": r.error,
                 "primary_metric": r.primary_metric,
                 "metrics": metrics, "run_dir": r.run_dir,
                 "started_at": r.started_at.isoformat(timespec="seconds") if r.started_at else None,
@@ -400,6 +401,28 @@ def retry_run(manager, uid: str) -> dict:
 
     return create_task(manager, name=f"{task_name}·重开", base_model=base_model, dataset=dataset,
                        split_uid=split_uid, agent=None, extra_args=applied or None, **first)
+
+
+def run_artifacts(manager, uid: str) -> list[dict]:
+    """Run 顶层产物图清单（阶段 3c 票 110）：run_dir 顶层的 PNG/JPG
+    （混淆矩阵 / PR 曲线等 ultralytics 归档，spec §2.4「不自绘」口径）。
+
+    旧 NiceGUI 产物图区直读磁盘，React 侧改走本端点列名 + `POST /thumb/sign`
+    签名展示；只列清单不判可读性（签名 GET 404 由媒体管线兜底）。
+    """
+    from visiontrainer.db.models import Run
+
+    with manager.Session() as s:
+        r = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if r is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        run_dir = Path(r.run_dir) if r.run_dir else None
+    if run_dir is None or not run_dir.is_dir():
+        return []
+    exts = {".png", ".jpg", ".jpeg"}
+    images = sorted((p for p in run_dir.iterdir() if p.is_file() and p.suffix.lower() in exts),
+                    key=lambda p: p.name)
+    return [{"name": p.name, "path": str(p)} for p in images]
 
 
 def estimate_training_time(manager) -> dict | None:

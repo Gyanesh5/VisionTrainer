@@ -125,6 +125,7 @@ M8 同批契约变化：`GET /tasks/{id}/comparison` 与 `GET /compare` 增加 m
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | GET | `/api/v1/runs/{uid}/gpu` | GPU 采样序列（M7 01）：`{samples: [{t(首样本归零秒), util, mem_used, mem_total, temp}]}`；无采样返回空列表 |
+| GET | `/api/v1/runs/{uid}/artifacts` | 产物图清单（阶段 3c 票 110）：run_dir 顶层 PNG/JPG 列表 `{images: [{name, path}]}`（混淆矩阵/PR 曲线等 ultralytics 归档，spec §2.4「不自绘」）；展示经 `POST /thumb/sign` 签名；无 run_dir 返回空列表 |
 | POST | `/api/v1/runs/{uid}/retry` | 失败 Retry（M7 03）：以该 Run 运行快照参数从头重开新 Task（仅 failed/cancelled，其余 409；区别于 resume=last.pt 续训）；新 Task 继承快照的 `(dataset, split_uid, format_id)` 三列而非重选「最近」；返回新 Task brief |
 
 M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`（烂轮早停标记，状态仍为 cancelled/stopping 落定）；`GET /tasks/{id}/comparison` 增加 `gpu_curves`（各轮显存曲线，有采样才带）与 `param_importance`（同数据集+同预训练权重历史 Run 的 Spearman 统计，样本不足为 null）；`POST /tasks` 的 agent 配置增加 `prune` / `prune_delta`（任务级覆盖）；config 白名单新增 `[notifications].desktop` 与 `[agent].prune_enabled / prune_delta`；DB schema v3（gpu_samples 表 + runs.pruned 列）。
@@ -142,7 +143,7 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 | POST | `/api/v1/tasks/{id}/preapproval` | 批量预审授权（ADR 0007）：body `{rounds: N}`——接下来 N 轮一次放行，流水留档可审计 |
 | DELETE | `/api/v1/tasks/{id}/preapproval` | 撤销批量预审：下一轮立即回到逐轮审批 |
 | POST | `/api/v1/tasks/{id}/agent-mode` | 自主档位切换（ADR 0007）：body `{approval: "autonomous" \| "supervised"}`，下一轮生效 |
-| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照，v1.4 冻结三段：`split{uid,params,memo,grouped}` / `effective{train[],val[],dropped{missing[],excluded[]}}` / `format{format_id,converter_version,projection_version,class_map,entry_path}`，连同当轮参数、权重标识、类别表哈希与标签聚合哈希 `labels`；早于该功能的 Run 为 null）；出队新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
+| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照，v1.4 冻结三段：`split{uid,params,memo,grouped}` / `effective{train[],val[],dropped{missing[],excluded[]}}` / `format{format_id,converter_version,projection_version,class_map,entry_path}`，连同当轮参数、权重标识、类别表哈希与标签聚合哈希 `labels`；早于该功能的 Run 为 null）；失败原因在 `error` 字段行内展示（阶段 3c）；出队新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
 | DELETE | `/api/v1/runs/{uid}?delete_files=` | 删除单条训练记录（2026-10-31）：仅终态（done/failed/cancelled）可删，queued/running/stopping 409；只删该轮，其余轮次不受影响；子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策/部署登记）一并清理；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；`delete_files=true` 另删该轮 run_dir（删空任务时整任务目录）；磁盘默认保留 |
 | GET | `/api/v1/runs/{uid}/logs?tail=200` | 日志尾读（配合日志页轮询） |
 | POST | `/api/v1/runs/{uid}/stop` | 优雅停止：SIGTERM → trainer.stop → killpg（04） |

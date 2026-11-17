@@ -53,3 +53,54 @@ def test_queue_state_empty_then_after_enqueue(datasets_root, detect_source, clie
     assert snap["running_uid"] is None
     assert len(snap["queued_uids"]) == 1
     assert snap["block_reason"] is None
+
+
+# ---------------------------------------------------------------- GET /runs/{uid}/artifacts（阶段 3c 票 110）
+
+def test_run_artifacts_lists_run_dir_images_or_empty(datasets_root, detect_source, tmp_path, monkeypatch):
+    """产物图清单：有 run_dir 列顶层 PNG/JPG；无 run_dir（排队未启动）返回空列表；404 契约保持。"""
+    import sys
+    import time
+    from pathlib import Path
+
+    from fastapi.testclient import TestClient
+
+    from visiontrainer.main import create_app
+
+    from conftest import isolated_cfg, _prepare_roots  # noqa: PLC0415 — 测试内装配与 conftest 同源
+
+    cfg = isolated_cfg(tmp_path)
+    _prepare_roots(cfg)
+    cfg["training"].update({
+        "python": sys.executable,
+        "trainer_entry": str(Path(__file__).parent / "stub_trainer.py"),
+        "runs_dir": str(tmp_path / "runs"),
+        "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
+        "check_occupancy": False,
+    })
+    build_dataset("art", "detect", str(detect_source))
+    with TestClient(create_app(cfg=cfg, with_ui=False)) as c:
+        r = c.post("/api/v1/tasks", json={"name": "art-demo", "base_model": "stub",
+                                          "dataset": "art", "epochs": 1})
+        uid = c.get("/api/v1/tasks").json()[0]["runs"][0]["uid"]
+
+        # 排队未启动：无 run_dir → 空清单
+        assert c.get(f"/api/v1/runs/{uid}/artifacts").json() == {"images": []}
+
+        # stub 跑完后往 run_dir 造两张产物图 → 只列顶层 PNG/JPG
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if c.get(f"/api/v1/runs/{uid}").json()["status"] == "done":
+                break
+            time.sleep(0.2)
+        run_dir = Path(c.get(f"/api/v1/runs/{uid}").json()["run_dir"])
+        (run_dir / "confusion_matrix.png").write_bytes(b"PNG")
+        (run_dir / "PR_curve.jpg").write_bytes(b"JPG")
+        (run_dir / "results.csv").write_text("epoch,loss\n1,2\n")
+
+        images = c.get(f"/api/v1/runs/{uid}/artifacts").json()["images"]
+        assert [i["name"] for i in images] == ["PR_curve.jpg", "confusion_matrix.png"]
+        assert all(Path(i["path"]).is_file() for i in images)
+
+        # 不存在的 Run → 404 信封
+        assert c.get("/api/v1/runs/nonexistent/artifacts").status_code == 404

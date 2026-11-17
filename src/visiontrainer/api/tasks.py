@@ -211,6 +211,14 @@ def run_gpu(uid: str, request: Request):
     return {"samples": tsvc.run_gpu_samples(_manager(request), uid)}
 
 
+@router.get("/runs/{uid}/artifacts")
+@_maps_errors
+def run_artifacts(uid: str, request: Request):
+    """产物图清单（阶段 3c 票 110）：run_dir 顶层 PNG/JPG 列表 `{images:[{name,path}]}`；
+    图片展示经 `POST /thumb/sign` 签名。无 run_dir 返回空列表。"""
+    return {"images": tsvc.run_artifacts(_manager(request), uid)}
+
+
 @router.get("/runs/{uid}/analysis")
 @_maps_errors
 def get_analysis(uid: str, request: Request):
