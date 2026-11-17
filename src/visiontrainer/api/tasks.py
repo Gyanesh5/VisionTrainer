@@ -313,6 +313,12 @@ def list_deployments(request: Request):
     return tsvc.list_deployments(_manager(request))
 
 
+@router.get("/run-weights")
+def run_weights(request: Request):
+    """模型真源清单（票 121）：全部 Run 的权重行（指纹/类别表/主指标/部署历史），缺失如实标注。"""
+    return tsvc.run_weights(_manager(request))
+
+
 @router.post("/runs/{uid}/report")
 @_maps_errors
 def generate_report(uid: str, request: Request):

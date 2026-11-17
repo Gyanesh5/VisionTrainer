@@ -57,7 +57,9 @@ describe("AppShell", () => {
     renderShell();
     expect(screen.getByText("数据集")).toBeInTheDocument();
     expect(screen.getByText("训练")).toBeInTheDocument();
-    expect(screen.getByText("部署")).toBeInTheDocument();
+    // 票 121：导航「部署」改名「模型」（页面以 Run 权重为模型真源）
+    expect(screen.getByText("模型")).toBeInTheDocument();
+    expect(screen.queryByText("部署")).not.toBeInTheDocument();
     expect(screen.getByText("Agent")).toBeInTheDocument();
     expect(screen.getByText("日志")).toBeInTheDocument();
     expect(screen.getByText("系统")).toBeInTheDocument();

@@ -160,6 +160,14 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 | POST | `/api/v1/runs/{uid}/deploy` | 导出 ONNX + 组装模型库目录 + 导出验证（后台任务链）；类别名回查读该 Run 快照的 `format.class_map`，不回读当前类别表 |
 | GET | `/api/v1/deployments` | 已部署清单（含 LRU 提示依据的顺序） |
 
+### 模型页真源化（票 121，2026-11-18）
+
+模型真源 = Run 产物权重（ADR 0015 Decision 2）：模型库目录降为派生产物（部署组装物，可清理重建），账目以 Run 权重为准。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/run-weights` | 模型真源清单：全部 Run 的权重行（未入库未发布、权重缺失的也在列）。行字段：`run_uid`/`task_id`/`task_name`/`round_no`/`status`/`created_at`/`weight_path`/`weight_present`/`fingerprint`/`classes`/`primary_metric`/`deployments`。`fingerprint` = 模型指纹（权重文件 sha256 前 8 位，进程内按 mtime+size 缓存）；权重缺失（cancelled/failed 无 best.pt、文件被删）时 `weight_present=false` 且 `fingerprint=null`；`classes` 读 Run 快照 `format.class_map`（无快照回退当前类别表）；`deployments` = 该 Run 的部署历史（`deployment_id`/`model_lib_dir`/`verified`/`created_at`，新在前） |
+
 ### 训练域元数据（阶段 1c，2026-11-17）
 
 | 方法 | 路径 | 说明 |

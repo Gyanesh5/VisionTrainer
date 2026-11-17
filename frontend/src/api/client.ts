@@ -1039,6 +1039,38 @@ export const operationsApi = {
 
 // ---------------------------------------------------------------- 部署域（回注）
 
+/** 模型真源清单行（GET /api/v1/run-weights，docs/api.md 模型页真源化节；票 121）。 */
+export interface RunWeightDeployment {
+  deployment_id: number;
+  model_lib_dir: string;
+  verified: boolean;
+  created_at: string | null;
+}
+
+export interface RunWeightItem {
+  run_uid: string;
+  task_id: number;
+  task_name: string | null;
+  round_no: number;
+  status: string;
+  created_at: string | null;
+  /** 权重文件在盘才算在账（weight_present=false 时为 null） */
+  weight_path: string | null;
+  /** best.pt 缺失/被删如实标注，不兜底造假 */
+  weight_present: boolean;
+  /** 模型指纹（GLOSSARY 联动域）：权重文件 sha256 前 8 位；权重缺失为 null */
+  fingerprint: string | null;
+  /** 类别表：Run 快照 class_map 优先，无快照回退当前类别表 */
+  classes: string[];
+  primary_metric: number | null;
+  /** 该 Run 的部署历史（新在前） */
+  deployments: RunWeightDeployment[];
+}
+
+export interface RunWeightsResult {
+  weights: RunWeightItem[];
+}
+
 /** 单条部署记录：GET /api/v1/deployments（docs/api.md 回注域节）。 */
 export interface DeploymentItem {
   deployment_id: number;
@@ -1134,6 +1166,7 @@ export interface ModelDirDeleteResult {
 }
 
 export const api = {
+  getRunWeights: () => request<RunWeightsResult>("/api/v1/run-weights"),
   getDeployments: () => request<DeploymentsResult>("/api/v1/deployments"),
   getModelLibrary: () => request<ModelLibraryResult>("/api/v1/model-library"),
   listTasks: () => request<TaskBrief[]>("/api/v1/tasks"),
