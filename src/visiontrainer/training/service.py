@@ -1063,6 +1063,72 @@ def delete_model_dir(manager, name: str, model_lib_dir: str | None = None) -> di
     return {"deleted": name, "removed_deployments": n_dep}
 
 
+# ---------------------------------------------------------------- 票 121：模型真源清单
+
+_FP_CACHE: dict[str, tuple[int, int, str]] = {}  # 权重路径 → (mtime_ns, size, 指纹)
+
+
+def _weight_fingerprint(path: Path) -> str | None:
+    """模型指纹（GLOSSARY 联动域）：权重文件 sha256 前 8 位；按 (mtime_ns, size) 缓存内存。"""
+    import hashlib
+
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    cached = _FP_CACHE.get(str(path))
+    if cached and cached[0] == st.st_mtime_ns and cached[1] == st.st_size:
+        return cached[2]
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    fp = digest.hexdigest()[:8]
+    _FP_CACHE[str(path)] = (st.st_mtime_ns, st.st_size, fp)
+    return fp
+
+
+def run_weights(manager) -> dict:
+    """模型真源清单（票 121）：全部 Run 的权重行——指纹、类别表、主指标、部署历史。
+
+    未入库未发布的也在列；权重缺失（cancelled/failed 无 best.pt、文件被删）如实标注：
+    weight_present=False 且 fingerprint=None，不兜底造假。权重路径从 Run 产物目录读
+    （best_pt 字段 → run_dir/weights/best.pt 兜底，同 deploy_run 规则）。
+    """
+    from visiontrainer.db.models import Deployment, Run, Task
+
+    with manager.Session() as s:
+        runs = s.query(Run).order_by(Run.id.desc()).all()
+        tasks = {t.id: t for t in s.query(Task).all()}
+        deps = s.query(Deployment).order_by(Deployment.id.desc()).all()
+    deps_by_run: dict[int, list[dict]] = {}
+    for d in deps:
+        deps_by_run.setdefault(d.run_id, []).append({
+            "deployment_id": d.id, "model_lib_dir": d.model_lib_dir, "verified": d.verified,
+            "created_at": d.created_at.isoformat(timespec="seconds")})
+    items = []
+    for run in runs:
+        task = tasks.get(run.task_id)
+        best = run.best_pt
+        if not best and run.run_dir:  # 历史数据兜底：DB 字段缺失但产物在盘
+            cand = Path(run.run_dir) / "weights" / "best.pt"
+            best = str(cand) if cand.exists() else None
+        present = bool(best) and Path(best).exists()
+        items.append({
+            "run_uid": run.uid, "task_id": run.task_id,
+            "task_name": task.name if task else None,
+            "round_no": run.round_no, "status": run.status,
+            "created_at": run.created_at.isoformat(timespec="seconds"),
+            "weight_path": best if present else None,
+            "weight_present": present,
+            "fingerprint": _weight_fingerprint(Path(best)) if present else None,
+            "classes": _snapshot_classes_of(run) or _dataset_meta_of_task(task).get("classes") or [],
+            "primary_metric": run.primary_metric,
+            "deployments": deps_by_run.get(run.id, []),
+        })
+    return {"weights": items}
+
+
 def generate_report(manager, uid: str, client=None, cfg: dict | None = None) -> dict:
     """复盘报告（07 号票）：指标 JSON + 渲染图 → LLM → report.md 存 Run 目录。"""
     from ..agent.llm import LLMError, build_client, chat, llm_config, _content_image

@@ -6,12 +6,13 @@ import { TrainingPage } from "./pages/TrainingPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
 import { RunAnalysisPage } from "./pages/RunAnalysisPage";
 import { ComparePage } from "./pages/ComparePage";
-import { DeployPage } from "./pages/DeployPage";
+import { ModelsPage } from "./pages/ModelsPage";
 import { AgentPage } from "./pages/AgentPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SystemPage } from "./pages/SystemPage";
 
-/** 六导航路由（票 107）：/ 回落到数据集；对比页留训练域不升导航（map §5 裁决）。 */
+/** 六导航路由（票 107）：/ 回落到数据集；对比页留训练域不升导航（map §5 裁决）。
+ * 票 121：/deploy 页面升级为模型页（ModelsPage），路由路径保持不变只换门牌。 */
 export default function App() {
   return (
     <BrowserRouter>
@@ -24,7 +25,7 @@ export default function App() {
           <Route path="/training/runs/:uid" element={<RunDetailPage />} />
           <Route path="/training/runs/:uid/analysis" element={<RunAnalysisPage />} />
           <Route path="/training/compare" element={<ComparePage />} />
-          <Route path="/deploy" element={<DeployPage />} />
+          <Route path="/deploy" element={<ModelsPage />} />
           <Route path="/agent" element={<AgentPage />} />
           <Route path="/logs" element={<LogsPage />} />
           <Route path="/system" element={<SystemPage />} />

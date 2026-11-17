@@ -4,17 +4,21 @@ import {
   api,
   type DeploymentItem,
   type ModelLibraryItem,
-  type TaskBrief,
+  type RunWeightItem,
 } from "../api/client";
+import { runStatusMeta } from "../components/training/domain";
 import { useEvents } from "../ws/useEvents";
 
 /**
- * 部署页（票 108，表面族 D · operate）：模型库 + 已部署清单 + 回注动作。
+ * 模型页（票 121，表面族 D · operate；前身部署页/票 108）：模型真源清单 + 部署记录
+ * + 模型库目录（派生）。
  *
- * 数据纪律（map §5/§6）：deployment.updated 事件当门铃、REST 取数据，不轮询；
- * 长操作（部署导出/清理删除）由 API 薄层 opctx 登记，进度经 operation.updated
- * 事件载荷显示（载荷即全量状态，无需读登记表）。状态徽章颜色 + 形状 + 文字三重
- * 编码（DESIGN.md §3），verified/未验证语义色照 §3，数值 tabular-nums。
+ * 真源纪律（ADR 0015 Decision 2）：模型真源 = Run 产物权重（run_uid + 权重文件 +
+ * sha256 前 8 位指纹），全部 Run 都在列（未入库未发布、权重缺失的也如实标注）；
+ * 模型库目录降为派生分区——部署组装物，可清理重建，账目以 Run 权重为准。
+ * 数据纪律（map §5/§6）：事件当门铃、REST 取数据，不轮询；长操作（部署导出/
+ * 清理删除）由 API 薄层 opctx 登记，进度经 operation.updated 事件载荷显示。
+ * 状态徽章颜色 + 形状 + 文字三重编码（DESIGN.md §3），数值 tabular-nums。
  */
 
 export type VerifyKind = "exporting" | "failed" | "verified" | "unverified";
@@ -82,6 +86,15 @@ function fmtMetric(v: number | null | undefined): string {
   return typeof v === "number" ? v.toFixed(3) : "—";
 }
 
+/** 类别表摘要（票 121）：≤3 类全列，更多收尾「N 类 · a、b、c 等」，全名单进悬停 */
+export function classesSummary(classes: string[]): string {
+  if (classes.length === 0) return "—";
+  const head = classes.slice(0, 3).join("、");
+  return classes.length <= 3
+    ? `${classes.length} 类 · ${head}`
+    : `${classes.length} 类 · ${head} 等`;
+}
+
 type DepFilter = "all" | "verified" | "unverified";
 const FILTER_LABEL: Record<DepFilter, string> = { all: "全部", verified: "已验证", unverified: "未验证" };
 
@@ -93,13 +106,14 @@ interface OpLine {
   total: number | null;
 }
 
-export function DeployPage() {
+/** 权重行的部署动作资格：文件在账 + Run 已完成（后端 deploy_run 同规则，前端先行免错） */
+function deployable(w: RunWeightItem): boolean {
+  return w.weight_present && w.status === "done";
+}
+
+export function ModelsPage() {
   const queryClient = useQueryClient();
   const [opLines, setOpLines] = useState<Record<string, OpLine>>({});
-
-  // 部署入口选择（派生兜底：数据刷新后选择失效自动落回首个可部署项）
-  const [taskPick, setTaskPick] = useState<number | null>(null);
-  const [runPick, setRunPick] = useState<string>("");
   // 已部署清单过滤（过滤空与首用空两种文案，专利 10）
   const [filter, setFilter] = useState<DepFilter>("all");
   // 模型库勾选与清理动作
@@ -107,31 +121,33 @@ export function DeployPage() {
   const [purgeTargets, setPurgeTargets] = useState<string[] | null>(null);
   const [purgeBusy, setPurgeBusy] = useState(false);
   const [purgeError, setPurgeError] = useState<string | null>(null);
-  // 部署提交与行内动作
-  const [deployDialog, setDeployDialog] = useState(false);
+  // 部署提交（挂权重行）与行内动作
+  const [deployTarget, setDeployTarget] = useState<RunWeightItem | null>(null);
   const [deployBusy, setDeployBusy] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
+  const weightsQ = useQuery({ queryKey: ["run-weights"], queryFn: api.getRunWeights });
   const depsQ = useQuery({ queryKey: ["deployments"], queryFn: api.getDeployments });
   const libQ = useQuery({ queryKey: ["model-library"], queryFn: api.getModelLibrary });
-  const tasksQ = useQuery({ queryKey: ["tasks"], queryFn: api.listTasks });
 
-  // WS 门铃：deployment.updated → 清单与模型库 REST 补齐；run/task 状态变化 →
-  // 部署入口的可部署轮会变；operation.updated → 进度行直接用事件载荷
+  // WS 门铃：deployment.updated → 真源行部署历史/部署清单/派生库 REST 补齐；
+  // run/task 状态变化 → 真源清单补齐（新 Run 上表、状态与权重落定）；
+  // operation.updated → 进度行直接用事件载荷
   useEvents({
     onResync: () => {
+      void queryClient.invalidateQueries({ queryKey: ["run-weights"] });
       void queryClient.invalidateQueries({ queryKey: ["deployments"] });
       void queryClient.invalidateQueries({ queryKey: ["model-library"] });
-      void queryClient.invalidateQueries({ queryKey: ["tasks"] });
     },
     onEvent: (ev) => {
       const type = typeof ev.type === "string" ? ev.type : "";
       if (type === "deployment.updated") {
+        void queryClient.invalidateQueries({ queryKey: ["run-weights"] });
         void queryClient.invalidateQueries({ queryKey: ["deployments"] });
         void queryClient.invalidateQueries({ queryKey: ["model-library"] });
       } else if (type === "run.status" || type === "task.updated") {
-        void queryClient.invalidateQueries({ queryKey: ["tasks"] });
+        void queryClient.invalidateQueries({ queryKey: ["run-weights"] });
       } else if (type === "operation.updated") {
         const key = typeof ev.key === "string" ? ev.key : null;
         if (!key) return;
@@ -154,20 +170,6 @@ export function DeployPage() {
     },
   });
 
-  // 部署入口：任务按「有已完成轮」过滤，轮选择派生兜底
-  const tasks = tasksQ.data ?? [];
-  const deployable = useMemo(
-    () =>
-      tasks
-        .map((t: TaskBrief) => ({ task: t, doneRuns: t.runs.filter((r) => r.status === "done") }))
-        .filter((x) => x.doneRuns.length > 0),
-    [tasks],
-  );
-  const effTask =
-    deployable.find((x) => x.task.id === taskPick) ?? deployable[0] ?? null;
-  const effRun =
-    effTask?.doneRuns.find((r) => r.uid === runPick) ?? effTask?.doneRuns[0] ?? null;
-
   const deps = depsQ.data?.deployments ?? [];
   const filtered = useMemo(
     () =>
@@ -181,6 +183,7 @@ export function DeployPage() {
   );
   const exportingCount = deps.filter((d) => verifyKind(d) === "exporting").length;
 
+  const weights = weightsQ.data?.weights ?? [];
   const libItems = libQ.data?.items ?? [];
   const selectedNames = useMemo(() => libItems.filter((it) => selected.has(it.name)).map((it) => it.name), [libItems, selected]);
 
@@ -194,13 +197,14 @@ export function DeployPage() {
   }
 
   async function submitDeploy() {
-    if (!effRun) return;
+    if (!deployTarget) return;
     setDeployBusy(true);
     setDeployError(null);
     try {
-      await api.deployRun(effRun.uid);
-      setDeployDialog(false);
+      await api.deployRun(deployTarget.run_uid);
+      setDeployTarget(null);
       await queryClient.invalidateQueries({ queryKey: ["deployments"] });
+      await queryClient.invalidateQueries({ queryKey: ["run-weights"] });
     } catch (e) {
       setDeployError(e instanceof Error ? e.message : "部署失败");
     } finally {
@@ -228,6 +232,7 @@ export function DeployPage() {
       setSelected(new Set());
       await queryClient.invalidateQueries({ queryKey: ["model-library"] });
       await queryClient.invalidateQueries({ queryKey: ["deployments"] });
+      await queryClient.invalidateQueries({ queryKey: ["run-weights"] });
     }
     setActionError(failed.length ? `删除失败：${failed.join("、")}` : null);
   }
@@ -245,7 +250,7 @@ export function DeployPage() {
   return (
     <div className="page-body">
       <div className="page-head">
-        <h1>部署</h1>
+        <h1>模型</h1>
       </div>
 
       {runningOps.length > 0 && (
@@ -274,66 +279,133 @@ export function DeployPage() {
         </div>
       )}
 
-      {/* ── 回注入口：选已完成 Run 发起部署（pending → confirmed 状态机走徽章落定） */}
-      <div className="card" id="deploy-form" data-testid="deploy-form">
-        <h2 className="card-title">部署新模型</h2>
-        {tasksQ.isError ? (
+      {/* ── 模型真源：全部 Run 的权重行（ADR 0015 Decision 2，票 121） */}
+      <div className="card" id="weights-card" data-testid="weights-card">
+        <h2 className="card-title">模型真源</h2>
+        <p className="placeholder-note">
+          以 Run 产物权重为准：每个训练轮的权重都在列（权重缺失如实标注）；模型库目录只是部署组装物。
+        </p>
+        {weightsQ.isError ? (
           <div>
-            <p className="error-note">任务列表读取失败：{tasksQ.error.message}</p>
-            <button type="button" className="btn" onClick={() => void tasksQ.refetch()}>重试</button>
+            <p className="error-note">模型真源清单读取失败：{weightsQ.error.message}</p>
+            <button type="button" className="btn" onClick={() => void weightsQ.refetch()}>重试</button>
           </div>
-        ) : deployable.length === 0 ? (
-          <p className="placeholder-note">
-            还没有已完成的训练 Run——训练完成后在这里选择轮次部署，模型会回注标注端模型库。
-          </p>
+        ) : weightsQ.isPending ? (
+          <p className="placeholder-note">读取模型真源清单…</p>
+        ) : weights.length === 0 ? (
+          <div className="empty-state" data-testid="weights-empty">
+            <p>还没有训练 Run——训练完成后每个轮次的权重会作为模型真源出现在这里。</p>
+          </div>
         ) : (
-          <div className="deploy-toolbar">
-            <label>
-              任务
-              <select
-                aria-label="部署任务"
-                value={effTask?.task.id ?? ""}
-                onChange={(e) => {
-                  setTaskPick(Number(e.target.value));
-                  setRunPick("");
-                }}
-              >
-                {deployable.map(({ task }) => (
-                  <option key={task.id} value={task.id}>{task.name}</option>
-                ))}
-              </select>
-            </label>
-            <label>
-              Run
-              <select
-                aria-label="部署 Run"
-                value={effRun?.uid ?? ""}
-                onChange={(e) => setRunPick(e.target.value)}
-              >
-                {effTask?.doneRuns.map((r) => (
-                  <option key={r.uid} value={r.uid}>
-                    轮 {r.round_no} · {r.uid} · 主指标 {fmtMetric(r.primary_metric)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button
-              type="button"
-              className="btn btn-primary"
-              data-testid="deploy-submit"
-              disabled={!effRun || deployBusy}
-              onClick={() => {
-                setDeployError(null);
-                setDeployDialog(true);
-              }}
-            >
-              部署到标注端
-            </button>
-          </div>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Run</th>
+                <th>任务</th>
+                <th>状态</th>
+                <th>模型指纹</th>
+                <th>类别表</th>
+                <th className="num">主指标</th>
+                <th>权重</th>
+                <th>部署历史</th>
+                <th aria-label="操作" />
+              </tr>
+            </thead>
+            <tbody data-testid="weights-rows">
+              {weights.map((w) => {
+                const sm = runStatusMeta(w.status);
+                const latestDep = w.deployments[0];
+                return (
+                  <tr key={w.run_uid}>
+                    <td>
+                      <span className="mono">{w.run_uid}</span>
+                      <span className="tnum"> · 轮 {w.round_no}</span>
+                    </td>
+                    <td>{w.task_name ?? "—"}</td>
+                    <td>
+                      <span className={`badge ${sm.cls}`} data-testid={`weight-status-${w.run_uid}`}>
+                        <span aria-hidden="true">{sm.mark}</span> {sm.label}
+                      </span>
+                    </td>
+                    <td>
+                      <span
+                        className="mono"
+                        data-testid={`weight-fp-${w.run_uid}`}
+                        title={w.fingerprint ? `模型指纹：权重文件 sha256 前 8 位（${w.run_uid}）` : "权重缺失，无指纹"}
+                      >
+                        {w.fingerprint ?? "—"}
+                      </span>
+                    </td>
+                    <td>
+                      <span title={w.classes.length ? w.classes.join("、") : "无类别表记录"}>
+                        {classesSummary(w.classes)}
+                      </span>
+                    </td>
+                    <td className="num tnum">{fmtMetric(w.primary_metric)}</td>
+                    <td>
+                      {w.weight_present ? (
+                        <span
+                          className="badge is-ok"
+                          data-testid={`weight-presence-${w.run_uid}`}
+                          title={w.weight_path ?? undefined}
+                        >
+                          <span aria-hidden="true">✓</span> 在库
+                        </span>
+                      ) : (
+                        <span
+                          className="badge is-neutral"
+                          data-testid={`weight-presence-${w.run_uid}`}
+                          title="权重文件缺失：未产出或已被清理；部署与指纹不可用"
+                        >
+                          <span aria-hidden="true">−</span> 缺失
+                        </span>
+                      )}
+                    </td>
+                    <td data-testid={`weight-deps-${w.run_uid}`}>
+                      {latestDep ? (
+                        <>
+                          <span className="mono" title={latestDep.model_lib_dir}>
+                            {shortPath(latestDep.model_lib_dir)}
+                          </span>
+                          <span
+                            className={`badge ${latestDep.verified ? "is-ok" : "is-unverified"}`}
+                            title={`部署于 ${formatTs(latestDep.created_at)}${w.deployments.length > 1 ? `，共 ${w.deployments.length} 次` : ""}`}
+                          >
+                            <span aria-hidden="true">{latestDep.verified ? "✓" : "−"}</span>{" "}
+                            {latestDep.verified ? "已验证" : "未验证"}
+                          </span>
+                          {w.deployments.length > 1 && (
+                            <span className="tnum"> 共 {w.deployments.length} 次</span>
+                          )}
+                        </>
+                      ) : (
+                        "—"
+                      )}
+                    </td>
+                    <td>
+                      {deployable(w) && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          data-testid={`weight-deploy-${w.run_uid}`}
+                          onClick={() => {
+                            setDeployError(null);
+                            setDeployTarget(w);
+                          }}
+                        >
+                          部署
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         )}
       </div>
 
-      {/* ── 已部署清单 */}
+      {/* ── 部署记录（跨 Run 流水，逐 Run 历史见上表部署历史列） */}
       <div className="card" data-testid="deployments-card">
         <h2 className="card-title">已部署清单</h2>
         {depsQ.isError ? (
@@ -345,11 +417,11 @@ export function DeployPage() {
           <p className="placeholder-note">读取部署清单…</p>
         ) : deps.length === 0 ? (
           <div className="empty-state" data-testid="dep-empty-first">
-            <p>还没有部署记录——部署一个已完成的训练 Run，模型会出现在标注端模型库里。</p>
+            <p>还没有部署记录——部署一个已完成 Run 的权重，模型会出现在标注端模型库里。</p>
             <button
               type="button"
               className="btn"
-              onClick={() => document.getElementById("deploy-form")?.scrollIntoView()}
+              onClick={() => document.getElementById("weights-card")?.scrollIntoView()}
             >
               发起部署
             </button>
@@ -439,9 +511,12 @@ export function DeployPage() {
         )}
       </div>
 
-      {/* ── 模型库目录（总貌档）：勾选 + 批量清理（专利 9） */}
+      {/* ── 模型库目录（派生分区，票 121）：部署组装物的管理入口，清理重建不动真源账目 */}
       <div className="card" data-testid="library-card">
-        <h2 className="card-title">模型库</h2>
+        <h2 className="card-title">模型库目录（派生）</h2>
+        <p className="placeholder-note">
+          派生产物：部署时按 Run 组装；清理重建不影响真源账目（模型真源以 Run 权重为准，见上表）。
+        </p>
         {libQ.isError ? (
           <div>
             <p className="error-note">模型库读取失败：{libQ.error.message}</p>
@@ -533,7 +608,7 @@ export function DeployPage() {
       </div>
 
       {/* ── 确认门（DESIGN.md §7：意图清单，确认对象是清单不是按钮） */}
-      {deployDialog && effRun && effTask && (
+      {deployTarget && (
         <ConfirmDialog
           title="部署到标注端？"
           confirmLabel="部署"
@@ -542,8 +617,10 @@ export function DeployPage() {
           intent={
             <>
               <li>
-                部署对象：{effTask.task.name} · Run {effRun.uid}
-                （主指标 <span className="tnum">{fmtMetric(effRun.primary_metric)}</span>）
+                部署对象：{deployTarget.task_name ?? deployTarget.task_id} · Run {deployTarget.run_uid}
+                （主指标 <span className="tnum">{fmtMetric(deployTarget.primary_metric)}</span>，
+                <span className="tnum">{deployTarget.classes.length}</span> 类，指纹{" "}
+                <span className="mono">{deployTarget.fingerprint ?? "—"}</span>）
               </li>
               <li>目标：模型库根目录按 Run 新建目录，旧版本保留。</li>
               <li>后果：导出 ONNX 并组装进标注端模型库，导出验证自动执行。</li>
@@ -551,7 +628,7 @@ export function DeployPage() {
           }
           consequence="部署完成后在桌面端模型下拉 → Custom → 加载 config.yaml 一次性登记。"
           onConfirm={() => void submitDeploy()}
-          onCancel={() => setDeployDialog(false)}
+          onCancel={() => setDeployTarget(null)}
         />
       )}
 
@@ -569,7 +646,7 @@ export function DeployPage() {
               ))}
             </>
           }
-          consequence="删除磁盘目录并同步移除部署记录；桌面端已加载模型不受影响。"
+          consequence="删除磁盘目录并同步移除部署记录；Run 权重真源不受影响，需要时可重新部署重建。"
           onConfirm={() => void submitPurge()}
           onCancel={() => setPurgeTargets(null)}
         />
