@@ -1245,6 +1245,8 @@ export interface ReleaseItem {
   primary_metric: number | null;
   /** 所属 Run 被放行删除（物理拷贝留发布目录，账目留档失效标注） */
   invalidated: boolean;
+  /** 发布目录派生物已清（平台清理入口，review 修复）：记录留档标注可查 */
+  dir_cleared: boolean;
   created_at: string | null;
   url_expires_at: string;
   /** 签名 URL 是否已过有效期（读时计算，只增不改账目不受影响） */
@@ -1275,6 +1277,29 @@ export interface ModelDirDeleteResult {
   kept_deployments: number;
 }
 
+/** 发布目录条目：GET /api/v1/release-library（review 修复，docs/api.md 模型发布节）。 */
+export interface ReleaseDirItem {
+  name: string;
+  path: string;
+  size_mb: number;
+  mtime: string;
+  run_uid: string | null;
+  task_name: string | null;
+  /** 关联发布记录 ID（按 release_dir 匹配 model_releases，重复发布序号递增） */
+  release_ids: number[];
+}
+
+export interface ReleaseLibraryResult {
+  root: string;
+  items: ReleaseDirItem[];
+}
+
+/** 发布目录清理（review 修复，票 126 对齐派生语义）：只删物理产物，发布记录留档标注 */
+export interface ReleaseDirDeleteResult {
+  deleted: string;
+  kept_releases: number;
+}
+
 export const api = {
   getRunWeights: () => request<RunWeightsResult>("/api/v1/run-weights"),
   getDeployments: () => request<DeploymentsResult>("/api/v1/deployments"),
@@ -1292,6 +1317,11 @@ export const api = {
     }),
   deleteModelDir: (name: string) =>
     request<ModelDirDeleteResult>(`/api/v1/model-library/${encodeURIComponent(name)}`, {
+      method: "DELETE",
+    }),
+  getReleaseLibrary: () => request<ReleaseLibraryResult>("/api/v1/release-library"),
+  clearReleaseDir: (name: string) =>
+    request<ReleaseDirDeleteResult>(`/api/v1/release-library/${encodeURIComponent(name)}`, {
       method: "DELETE",
     }),
   openDir: (path: string) =>

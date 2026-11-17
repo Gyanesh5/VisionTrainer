@@ -325,6 +325,25 @@ def list_releases(request: Request):
     return tsvc.list_releases(_manager(request))
 
 
+@router.get("/release-library")
+def release_library(request: Request):
+    """发布目录视图（review 修复）：发布派生物的管理数据面，与 model-library 同款读法。"""
+    cfg = getattr(request.app.state, "cfg", {}) or {}
+    return tsvc.release_library(_manager(request),
+                                cfg.get("training", {}).get("release_dir"))
+
+
+@router.delete("/release-library/{name}")
+@_maps_errors
+def clear_release_dir(name: str, request: Request):
+    """发布目录清理（review 修复，票 126 派生语义）：只删物理产物，发布记录留档标注
+    （cleared_at）不动账目；重新发布可重建。长操作：登记 `release:purge`。"""
+    cfg = getattr(request.app.state, "cfg", {}) or {}
+    with long_op("release:purge", f"清理发布目录 · {name}"):
+        return tsvc.clear_release_dir(_manager(request), name,
+                                      cfg.get("training", {}).get("release_dir"))
+
+
 @router.post("/runs/{uid}/clear-last-pt")
 @_maps_errors
 def clear_last_pt(uid: str, request: Request):

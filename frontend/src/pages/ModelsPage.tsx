@@ -143,6 +143,10 @@ export function ModelsPage() {
   const [releaseTarget, setReleaseTarget] = useState<RunWeightItem | null>(null);
   const [releaseBusy, setReleaseBusy] = useState(false);
   const [releaseError, setReleaseError] = useState<string | null>(null);
+  // 发布目录清理（review 修复，票 126 派生语义）：挂发布记录行
+  const [clearTarget, setClearTarget] = useState<{ releaseId: number; dirName: string } | null>(null);
+  const [clearBusy, setClearBusy] = useState(false);
+  const [clearError, setClearError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const weightsQ = useQuery({ queryKey: ["run-weights"], queryFn: api.getRunWeights });
@@ -247,6 +251,22 @@ export function ModelsPage() {
       setReleaseError(e instanceof Error ? e.message : "发布失败");
     } finally {
       setReleaseBusy(false);
+    }
+  }
+
+  /** 发布目录清理（review 修复）：同步动作——只删物理产物，账目留档标注，REST 补齐发布记录 */
+  async function submitClearReleaseDir() {
+    if (!clearTarget) return;
+    setClearBusy(true);
+    setClearError(null);
+    try {
+      await api.clearReleaseDir(clearTarget.dirName);
+      setClearTarget(null);
+      await queryClient.invalidateQueries({ queryKey: ["releases"] });
+    } catch (e) {
+      setClearError(e instanceof Error ? e.message : "清理失败");
+    } finally {
+      setClearBusy(false);
     }
   }
 
@@ -506,6 +526,15 @@ export function ModelsPage() {
                           已失效
                         </span>
                       )}
+                      {m.dir_cleared && (
+                        <span
+                          className="badge is-neutral"
+                          data-testid={`release-cleared-${m.release_id}`}
+                          title="发布目录派生物已经平台清理：记录留档标注，签名 URL 拉取如实 404，重新发布可重建"
+                        >
+                          目录已清
+                        </span>
+                      )}
                     </td>
                     <td>
                       <span className="mono" title={`模型指纹（sha256 前 8 位）· version 标签 ${m.version}`}>
@@ -532,6 +561,23 @@ export function ModelsPage() {
                       >
                         打开目录
                       </button>
+                      {!m.dir_cleared && (
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          data-testid={`release-clear-${m.release_id}`}
+                          title="只清发布目录派生物：发布记录留档标注，重新发布可重建（不动账目）"
+                          onClick={() => {
+                            setClearError(null);
+                            setClearTarget({
+                              releaseId: m.release_id,
+                              dirName: shortPath(m.release_dir),
+                            });
+                          }}
+                        >
+                          清理目录
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -799,6 +845,28 @@ export function ModelsPage() {
           consequence="发布目录是派生产物，可清理后重新发布；发布记录只增不改，重复发布生成新记录。"
           onConfirm={() => void submitRelease()}
           onCancel={() => setReleaseTarget(null)}
+        />
+      )}
+
+      {clearTarget && (
+        <ConfirmDialog
+          title="清理发布目录？"
+          confirmLabel="清理"
+          danger
+          busy={clearBusy}
+          error={clearError}
+          intent={
+            <>
+              <li>
+                清理对象：发布目录 <span className="mono">{clearTarget.dirName}</span>
+                （发布记录 <span className="tnum">#{clearTarget.releaseId}</span>）
+              </li>
+              <li>范围：只删该目录下的发布包派生物（best.pt、metadata.json、bundle.zip）。</li>
+            </>
+          }
+          consequence="只清理派生产物：发布记录留档并标注目录已清，签名 URL 拉取如实 404；重新发布生成新目录可重建，发布记录只增不改。"
+          onConfirm={() => void submitClearReleaseDir()}
+          onCancel={() => setClearTarget(null)}
         />
       )}
 

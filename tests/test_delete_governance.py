@@ -217,3 +217,64 @@ def test_release_dir_cleanup_spares_records_and_rebuild_traces(gov_client):
     out2 = c.post(f"/api/v1/runs/{uid}/release").json()
     assert Path(out2["release_dir"]).is_dir() and out2["release_dir"] != out["release_dir"]
     assert len(c.get("/api/v1/releases").json()["releases"]) == 2
+
+
+def test_release_library_list_and_clear_via_platform(gov_client):
+    """发布目录平台清理入口（review 修复）：GET /release-library 列目录、DELETE 清理
+    派生物——物理产物清、账目不动（dir_cleared 标注留档），重建可追溯；
+    语义对齐模型库清理（票 126：清理派生物不动真源账目）。"""
+    c, tmp_path, app = gov_client
+    uid = _train_one(c)
+    out = c.post(f"/api/v1/runs/{uid}/release").json()
+    release_dir = Path(out["release_dir"])
+
+    # 列发布目录：目录在列，关联发布记录可对账
+    r = c.get("/api/v1/release-library")
+    assert r.status_code == 200, r.text
+    lib = r.json()
+    assert lib["root"] == str(tmp_path / "releases")
+    item = next(it for it in lib["items"] if it["name"] == release_dir.name)
+    assert item["path"] == str(release_dir)
+    assert item["run_uid"] == uid
+    assert item["release_ids"] == [out["release_id"]]
+
+    # 平台清理：物理产物清，账目留档标注（kept_releases 报在账记录数）
+    r = c.delete(f"/api/v1/release-library/{release_dir.name}")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"deleted": release_dir.name, "kept_releases": 1}
+    assert not release_dir.exists()
+
+    # 账目不受影响：记录在账（invalidated 不变——Run 还在账），目录已清标注可查
+    rels = c.get("/api/v1/releases").json()["releases"]
+    assert len(rels) == 1
+    assert rels[0]["invalidated"] is False and rels[0]["dir_cleared"] is True
+    # 权重行发布历史不受影响（真源账目挂 Run 权重，不挂派生目录）
+    wrows = {w["run_uid"]: w for w in c.get("/api/v1/run-weights").json()["weights"]}
+    assert len(wrows[uid]["releases"]) == 1
+    # 拉取入口如实 404（包已清，派生产物可重新发布重建）
+    assert c.get(out["download_url"]).status_code == 404
+
+    # 重建可追溯：重新发布生成新目录新记录（序号递增），旧记录留档
+    out2 = c.post(f"/api/v1/runs/{uid}/release").json()
+    assert Path(out2["release_dir"]).is_dir() and out2["release_dir"] != out["release_dir"]
+    assert len(c.get("/api/v1/releases").json()["releases"]) == 2
+    # 新目录回到列且未清标注
+    rels2 = c.get("/api/v1/releases").json()["releases"]
+    assert rels2[0]["dir_cleared"] is False and rels2[1]["dir_cleared"] is True
+
+
+def test_release_library_clear_guards(gov_client):
+    """清理防越界（同模型库清理口径）：非法名 400（服务层直调——`..` 经 HTTP 客户端
+    规范化到上级路径，到不了路由）、目录不存在 404。"""
+    c, tmp_path, app = gov_client
+    import pytest as _pytest
+
+    from visiontrainer.training.service import TaskError, clear_release_dir
+
+    with _pytest.raises(TaskError) as ei:
+        clear_release_dir(app.state.manager, "..", str(tmp_path / "releases"))
+    assert ei.value.status == 400
+    with _pytest.raises(TaskError) as ei:
+        clear_release_dir(app.state.manager, ".hidden", str(tmp_path / "releases"))
+    assert ei.value.status == 400
+    assert c.delete("/api/v1/release-library/no-such-dir").status_code == 404

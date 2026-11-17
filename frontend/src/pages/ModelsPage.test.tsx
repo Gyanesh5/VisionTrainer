@@ -25,6 +25,7 @@ vi.mock("../api/client", async (importOriginal) => {
       openDir: vi.fn(),
       getReleases: vi.fn(),
       releaseRun: vi.fn(),
+      clearReleaseDir: vi.fn(),
     },
   };
 });
@@ -36,6 +37,7 @@ const deployRun = vi.mocked(api.deployRun);
 const deleteModelDir = vi.mocked(api.deleteModelDir);
 const getReleases = vi.mocked(api.getReleases);
 const releaseRun = vi.mocked(api.releaseRun);
+const clearReleaseDir = vi.mocked(api.clearReleaseDir);
 
 /** 页面内 useEvents 直连 WS：jsdom 无 WebSocket 实现，stub 掉（同 useEvents.test） */
 class FakeWebSocket {
@@ -152,6 +154,7 @@ const sampleReleases: ReleasesResult = {
       release_dir: "/home/u/releases/yolo11n_detect_bbbb2222_1",
       primary_metric: null,
       invalidated: true, // 票 126：所属 Run 被放行删除，记录留档失效标注（run_uid 冗余可对账）
+      dir_cleared: true, // review 修复：发布目录派生物已清，记录留档标注可查
       created_at: "2026-11-17T10:30:00",
       url_expires_at: "2026-11-15T10:30:00",
       url_expired: true,
@@ -169,6 +172,7 @@ const sampleReleases: ReleasesResult = {
       release_dir: "/home/u/releases/yolo11n_detect_aaaa1111_1",
       primary_metric: 0.85,
       invalidated: false,
+      dir_cleared: false, // 发布目录派生物在账未清（review 修复：平台清理入口标注）
       created_at: "2026-11-17T09:00:00",
       url_expires_at: "2026-11-19T09:00:00",
       url_expired: false,
@@ -240,6 +244,7 @@ function mockDefault({ lru = false }: { lru?: boolean } = {}) {
   getModelLibrary.mockResolvedValue(sampleLib);
   deployRun.mockResolvedValue({ deployment_id: 9, target: "/tmp/t", status: "exporting" });
   deleteModelDir.mockResolvedValue({ deleted: "x", kept_deployments: 1 });
+  clearReleaseDir.mockResolvedValue({ deleted: "x", kept_releases: 1 });
   getReleases.mockResolvedValue(sampleReleases);
   releaseRun.mockResolvedValue({
     release_id: 2, run_uid: "aaaa1111", fingerprint: "e68b5135", version: "e68b5135",
@@ -493,6 +498,38 @@ describe("ModelsPage 发布动作（票 123，与部署分立）", () => {
     const invalid = screen.getByTestId("release-invalid-2");
     expect(invalid.textContent).toContain("已失效");
     expect(screen.queryByTestId("release-invalid-1")).not.toBeInTheDocument();
+  });
+
+  it("clears_release_dir_from_record_card_with_confirm_then_refetches", async () => {
+    // review 修复：发布记录卡平台清理入口——确认门复述「只清物理产物、账目留档」后调 DELETE
+    mockDefault();
+    const user = userEvent.setup();
+    renderModelsPage();
+    await waitFor(() => expect(screen.getByTestId("release-clear-1")).toBeEnabled());
+
+    await user.click(screen.getByTestId("release-clear-1"));
+    const dialog = screen.getByTestId("confirm-dialog");
+    // 意图清单：清理对象（发布目录名）+ 后果复述（账目保留、重新发布可重建）
+    expect(dialog.textContent).toContain("yolo11n_detect_aaaa1111_1");
+    expect(dialog.textContent).toContain("发布记录");
+
+    await user.click(within(dialog).getByRole("button", { name: "清理" }));
+    await waitFor(() => expect(clearReleaseDir).toHaveBeenCalledWith("yolo11n_detect_aaaa1111_1"));
+    // 清理后发布记录走 REST 补齐（dir_cleared 标注随清单刷新）
+    await waitFor(() => expect(getReleases).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument());
+  });
+
+  it("marks_cleared_release_dir_with_badge_and_hides_clear_action", async () => {
+    mockDefault();
+    renderModelsPage();
+    const rows = await screen.findByTestId("release-rows");
+    const cleared = within(rows).getByTestId("release-cleared-2");
+    expect(cleared.textContent).toContain("目录已清");
+    // 已清记录不再提供清理入口（无可再清），未清记录有
+    expect(within(rows).queryByTestId("release-clear-2")).not.toBeInTheDocument();
+    expect(within(rows).getByTestId("release-clear-1")).toBeInTheDocument();
+    expect(screen.queryByTestId("release-cleared-1")).not.toBeInTheDocument();
   });
 });
 

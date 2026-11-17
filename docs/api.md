@@ -193,8 +193,10 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | POST | `/api/v1/runs/{uid}/release` | 发起发布（同步）：打包落盘 + 登记记录，返回 `{release_id, run_uid, fingerprint, version, release_dir, bundle_path, download_url, url_expires_at, ...元数据}`；发布目录含 `best.pt`/`metadata.json`/`classes.txt`/`bundle.zip`。资格（review 修复）：权重文件在盘即可，状态不限——cancelled 但权重在盘的 Run 可发布（与票 121 真源清单「缺失如实标注」同口径）；权重缺失 400。长操作登记 `run:{uid}:release` |
-| GET | `/api/v1/releases` | 发布记录清单（只增不改账目，新在前）：`{release_id, run_uid, task_id, task_name, round_no, fingerprint, version, release_dir, primary_metric, created_at, url_expires_at, url_expired, recommended_conf, classes}`；`url_expired` 读时计算（过期只影响拉取，记录留档）；票 126 增 `invalidated`（所属 Run 被放行删除的记录留账，`run_uid` 取冗余列可对账，task 信息可能为 null） |
+| GET | `/api/v1/releases` | 发布记录清单（只增不改账目，新在前）：`{release_id, run_uid, task_id, task_name, round_no, fingerprint, version, release_dir, primary_metric, created_at, url_expires_at, url_expired, recommended_conf, classes}`；`url_expired` 读时计算（过期只影响拉取，记录留档）；票 126 增 `invalidated`（所属 Run 被放行删除的记录留账，`run_uid` 取冗余列可对账，task 信息可能为 null）；review 修复增 `dir_cleared`（发布目录派生物已经平台清理的留档标注） |
 | GET | `/api/v1/releases/download?rid=&t=` | 凭限时签名 URL 拉取发布包 `bundle.zip`（`application/zip`，含 best.pt + metadata.json + classes.txt）；验签失败/过期 403，记录不存在或发布包已被清理 404（派生产物可重新发布重建） |
+| GET | `/api/v1/release-library` | 发布目录视图（review 修复，与 `/model-library` 同款读法）：`{root, items:[{name, path, size_mb, mtime, run_uid, task_name, release_ids}]}`——发布派生物的管理数据面，`release_ids` 按 `release_dir` 关联在账记录可对账 |
+| DELETE | `/api/v1/release-library/{name}` | 发布目录清理（review 修复，票 126 派生语义）：只删物理产物，`model_releases` 账目不动——匹配记录写 `cleared_at` 留档标注，返回 `{deleted, kept_releases}`；签名 URL 拉取如实 404，重新发布生成新目录新记录（序号递增）可重建。非法名 400、目录不存在 404；长操作登记 `release:purge` |
 
 ### 模型页真源化（票 121，2026-11-18）
 
@@ -210,7 +212,7 @@ ADR 0015 Decision 2 后果：部署/发布记录挂 Run 权重是产线账目，
 
 - **删除冲突门**：`DELETE /runs/{uid}` 与 `DELETE /tasks/{id}` 遇已部署/已发布对象默认 409 `delete_conflict`，可读提示列出记录要点（部署目录名、发布指纹、条数）与放行路径；`force=true` 显式放行。
 - **放行后的账目处置**：部署/发布记录保留并写 `invalidated_at`（失效标注），`run_uid` 冗余列随记录留档（Run 行删除后仍可对账）；发布/部署的物理拷贝留在派生目录不动；清单（`/deployments`、`/releases`）经 outerjoin 如实列出失效记录（task 信息可能为 null）。DB 迁移 b0004 为两表补列并回填历史行 run_uid。
-- **派生清理**：`DELETE /model-library/{name}` 只删派生目录、保留部署记录（返回 `kept_deployments`，事件 `dir_removed`）；发布目录无账目入口，物理包被清后记录照常在账、拉取入口如实 404（可重新发布重建，新目录新记录序号递增，旧记录留档可追溯）。
+- **派生清理**：`DELETE /model-library/{name}` 只删派生目录、保留部署记录（返回 `kept_deployments`，事件 `dir_removed`）；`DELETE /release-library/{name}` 同语义清发布目录（review 修复补齐此前只能手工删盘的缺口）：保留发布记录并写 `cleared_at` 标注（返回 `kept_releases`），拉取入口如实 404，可重新发布重建（新目录新记录序号递增，旧记录留档可追溯）。DB 迁移 b0005 为 model_releases 补 `cleared_at` 列。
 
 ### 训练域元数据（阶段 1c，2026-11-17）
 
