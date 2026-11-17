@@ -68,14 +68,19 @@ def build_bundle(samples: list[dict], classes: list[str]) -> bytes:
 
 
 def sample_entry(sample_id: str, status: str, *, checked=True, vt_review="confirmed",
-                 shapes=None, label=None) -> dict:
-    """manifest 样本清单条目 + 包内 LabelMe JSON（correction 形态见监控端 exporter）。"""
+                 shapes=None, label=None, idx: int = 0) -> dict:
+    """manifest 样本清单条目 + 包内 LabelMe JSON（correction 形态见监控端 exporter）。
+
+    idx = 包内图片序号（build_bundle 按 enumerate 落盘 ``{sample_id}_1_{i:06d}``），
+    manifest images path 与之对齐——真实导出器二者一致，票 125 归因按 path 匹配真源文件名。
+    """
+    stem = f"{sample_id}_1_{idx:06d}"
     return {
         "sample_id": sample_id, "status": status, "created_ts": 1760000000.0,
         "site": SITE, "task_id": TASK, "task_type": "zone_occupancy",
         "frame_number": 12, "model_id": "m1", "model_sha8": "deadbeef",
-        "images": [{"path": f"images/{sample_id}_1_000000.jpg"}],
-        "labelme": _labelme_json(f"{sample_id}_1_000000.jpg", shapes=shapes,
+        "images": [{"path": f"images/{stem}.jpg"}],
+        "labelme": _labelme_json(f"{stem}.jpg", shapes=shapes,
                                  vt_review=vt_review, label=label),
     }
 
