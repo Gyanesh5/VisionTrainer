@@ -63,7 +63,10 @@ export function shortPath(p: string): string {
 /** ISO 时间戳 → 当天 HH:MM:SS、跨天 MM-DD HH:MM:SS（DESIGN.md §4，禁「N 分钟前」） */
 export function formatTs(iso: string | null): string {
   if (!iso) return "—";
-  const d = new Date(iso);
+  // 库内 created_at 全系 server_default CURRENT_TIMESTAMP（UTC-naive，无时区后缀）；
+  // JS Date 对无后缀串按本地时区解析会偏移——补 Z 按 UTC 读入，本地渲染即正确。
+  const normalized = /[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`;
+  const d = new Date(normalized);
   if (Number.isNaN(d.getTime())) return iso;
   const pad = (n: number) => String(n).padStart(2, "0");
   const now = new Date();
