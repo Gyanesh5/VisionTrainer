@@ -1061,6 +1061,17 @@ export interface RunWeightDeployment {
   created_at: string | null;
 }
 
+/** 权重行的发布历史条目（票 123：发布记录只增不改，新在前） */
+export interface RunWeightRelease {
+  release_id: number;
+  fingerprint: string;
+  /** version 标签 = 指纹（监控端 models.yaml 对账键） */
+  version: string;
+  created_at: string | null;
+  /** 签名 URL 是否已过有效期（读时计算） */
+  url_expired: boolean;
+}
+
 export interface RunWeightItem {
   run_uid: string;
   task_id: number;
@@ -1079,6 +1090,8 @@ export interface RunWeightItem {
   primary_metric: number | null;
   /** 该 Run 的部署历史（新在前） */
   deployments: RunWeightDeployment[];
+  /** 该 Run 的发布历史（新在前，票 123） */
+  releases: RunWeightRelease[];
 }
 
 export interface RunWeightsResult {
@@ -1174,6 +1187,42 @@ export interface DeployStartResult {
   status: string;
 }
 
+/** 单条发布记录：GET /api/v1/releases（票 123，docs/api.md 模型发布节）。 */
+export interface ReleaseItem {
+  release_id: number;
+  run_uid: string;
+  task_id: number;
+  task_name: string;
+  round_no: number;
+  fingerprint: string;
+  /** version 标签 = 指纹（监控端 models.yaml 对账键） */
+  version: string;
+  release_dir: string;
+  primary_metric: number | null;
+  created_at: string | null;
+  url_expires_at: string;
+  /** 签名 URL 是否已过有效期（读时计算，只增不改账目不受影响） */
+  url_expired: boolean;
+  recommended_conf: number | null;
+  classes: string[];
+}
+
+export interface ReleasesResult {
+  releases: ReleaseItem[];
+}
+
+/** 发布动作返回：POST /api/v1/runs/{uid}/release（票 123）。 */
+export interface ReleaseStartResult {
+  release_id: number;
+  run_uid: string;
+  fingerprint: string;
+  version: string;
+  release_dir: string;
+  bundle_path: string;
+  download_url: string;
+  url_expires_at: string;
+}
+
 export interface ModelDirDeleteResult {
   deleted: string;
   removed_deployments: number;
@@ -1187,6 +1236,11 @@ export const api = {
   getQueue: () => request<QueueSnapshot>("/api/v1/queue"),
   deployRun: (uid: string) =>
     request<DeployStartResult>(`/api/v1/runs/${encodeURIComponent(uid)}/deploy`, {
+      method: "POST",
+    }),
+  getReleases: () => request<ReleasesResult>("/api/v1/releases"),
+  releaseRun: (uid: string) =>
+    request<ReleaseStartResult>(`/api/v1/runs/${encodeURIComponent(uid)}/release`, {
       method: "POST",
     }),
   deleteModelDir: (name: string) =>

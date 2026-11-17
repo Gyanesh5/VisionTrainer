@@ -7,6 +7,7 @@ import {
   api,
   type DeploymentsResult,
   type ModelLibraryResult,
+  type ReleasesResult,
   type RunWeightsResult,
 } from "../api/client";
 
@@ -22,6 +23,8 @@ vi.mock("../api/client", async (importOriginal) => {
       deployRun: vi.fn(),
       deleteModelDir: vi.fn(),
       openDir: vi.fn(),
+      getReleases: vi.fn(),
+      releaseRun: vi.fn(),
     },
   };
 });
@@ -31,6 +34,8 @@ const getDeployments = vi.mocked(api.getDeployments);
 const getModelLibrary = vi.mocked(api.getModelLibrary);
 const deployRun = vi.mocked(api.deployRun);
 const deleteModelDir = vi.mocked(api.deleteModelDir);
+const getReleases = vi.mocked(api.getReleases);
+const releaseRun = vi.mocked(api.releaseRun);
 
 /** 页面内 useEvents 直连 WS：jsdom 无 WebSocket 实现，stub 掉（同 useEvents.test） */
 class FakeWebSocket {
@@ -76,6 +81,7 @@ const sampleWeights: RunWeightsResult = {
       classes: ["car", "person"],
       primary_metric: 0.85,
       deployments: [],
+      releases: [],
     },
     {
       run_uid: "eeee5555",
@@ -90,6 +96,7 @@ const sampleWeights: RunWeightsResult = {
       classes: [],
       primary_metric: null,
       deployments: [],
+      releases: [],
     },
     {
       run_uid: "ffff6666",
@@ -111,6 +118,45 @@ const sampleWeights: RunWeightsResult = {
           created_at: "2026-11-15T12:00:00",
         },
       ],
+      releases: [],
+    },
+  ],
+};
+
+// ── 发布记录样例（票 123：只增不改账目，新在前；URL 状态读时计算）
+const sampleReleases: ReleasesResult = {
+  releases: [
+    {
+      release_id: 2,
+      run_uid: "bbbb2222",
+      task_id: 12,
+      task_name: "焊缝检测",
+      round_no: 3,
+      fingerprint: "a1b2c3d4",
+      version: "a1b2c3d4",
+      release_dir: "/home/u/releases/yolo11n_detect_bbbb2222_1",
+      primary_metric: 0.4,
+      created_at: "2026-11-17T10:30:00",
+      url_expires_at: "2026-11-15T10:30:00",
+      url_expired: true,
+      recommended_conf: 0.55,
+      classes: ["seam", "burn"],
+    },
+    {
+      release_id: 1,
+      run_uid: "aaaa1111",
+      task_id: 11,
+      task_name: "钢板缺陷",
+      round_no: 2,
+      fingerprint: "e68b5135",
+      version: "e68b5135",
+      release_dir: "/home/u/releases/yolo11n_detect_aaaa1111_1",
+      primary_metric: 0.85,
+      created_at: "2026-11-17T09:00:00",
+      url_expires_at: "2026-11-19T09:00:00",
+      url_expired: false,
+      recommended_conf: 0.25,
+      classes: ["car", "person"],
     },
   ],
 };
@@ -175,6 +221,12 @@ function mockDefault({ lru = false }: { lru?: boolean } = {}) {
   getModelLibrary.mockResolvedValue(sampleLib);
   deployRun.mockResolvedValue({ deployment_id: 9, target: "/tmp/t", status: "exporting" });
   deleteModelDir.mockResolvedValue({ deleted: "x", removed_deployments: 1 });
+  getReleases.mockResolvedValue(sampleReleases);
+  releaseRun.mockResolvedValue({
+    release_id: 2, run_uid: "aaaa1111", fingerprint: "e68b5135", version: "e68b5135",
+    release_dir: "/tmp/releases/yolo11n_detect_aaaa1111_1", bundle_path: "/tmp/.../bundle.zip",
+    download_url: "/api/v1/releases/download?rid=2&t=abc", url_expires_at: "2026-11-18T09:00:00",
+  });
 }
 
 function renderModelsPage() {
@@ -350,6 +402,58 @@ describe("ModelsPage 事件门铃", () => {
       ws.onmessage?.({ data: JSON.stringify({ type: "run.status", uid: "aaaa1111" }) });
     });
     await waitFor(() => expect(getRunWeights).toHaveBeenCalledTimes(3));
+  });
+});
+
+
+describe("ModelsPage 发布动作（票 123，与部署分立）", () => {
+  it("releases_from_weight_row_with_intent_confirm_then_refetches", async () => {
+    mockDefault();
+    const user = userEvent.setup();
+    renderModelsPage();
+    await waitFor(() => expect(screen.getByTestId("weight-release-aaaa1111")).toBeEnabled());
+
+    await user.click(screen.getByTestId("weight-release-aaaa1111"));
+    // 确认门是意图清单：发布对象（Run/指纹）+ 打包内容 + 后果复述
+    const dialog = screen.getByTestId("confirm-dialog");
+    expect(dialog.textContent).toContain("Run aaaa1111");
+    expect(dialog.textContent).toContain("e68b5135");
+    expect(dialog.textContent).toContain("发布包");
+    expect(dialog.textContent).toContain("签名");
+
+    await user.click(within(dialog).getByRole("button", { name: "发布" }));
+    await waitFor(() => expect(releaseRun).toHaveBeenCalledWith("aaaa1111"));
+    // 提交后发布记录卡与真源清单走 REST 补齐（发布为同步动作，无新事件类型）
+    await waitFor(() => expect(getReleases).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(getRunWeights).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument());
+  });
+
+  it("hides_release_action_for_missing_weights", async () => {
+    mockDefault();
+    renderModelsPage();
+    const rows = await screen.findByTestId("weights-rows");
+    expect(within(rows).queryByTestId("weight-release-eeee5555")).not.toBeInTheDocument();
+    expect(within(rows).queryByTestId("weight-release-ffff6666")).not.toBeInTheDocument();
+  });
+
+  it("renders_release_record_card_with_url_status_badges", async () => {
+    mockDefault();
+    renderModelsPage();
+    const rows = await screen.findByTestId("release-rows");
+    expect(within(rows).getByText("bbbb2222")).toBeInTheDocument();
+    expect(within(rows).getByText("aaaa1111")).toBeInTheDocument();
+
+    // 三重编码：URL 有效/过期 = 语义色 class + 形状标记 + 文字；只增不改账目可见
+    const fresh = screen.getByTestId("release-url-1");
+    expect(fresh).toHaveClass("is-ok");
+    expect(fresh.textContent).toContain("URL 有效");
+    const stale = screen.getByTestId("release-url-2");
+    expect(stale).toHaveClass("is-unverified");
+    expect(stale.textContent).toContain("URL 过期");
+    // 记录带指纹与 version 对账键
+    expect(within(rows).getByText("e68b5135")).toBeInTheDocument();
+    expect(within(rows).getByText("a1b2c3d4")).toBeInTheDocument();
   });
 });
 

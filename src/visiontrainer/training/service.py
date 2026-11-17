@@ -1089,23 +1089,32 @@ def _weight_fingerprint(path: Path) -> str | None:
 
 
 def run_weights(manager) -> dict:
-    """模型真源清单（票 121）：全部 Run 的权重行——指纹、类别表、主指标、部署历史。
+    """模型真源清单（票 121）：全部 Run 的权重行——指纹、类别表、主指标、部署历史、发布历史。
 
     未入库未发布的也在列；权重缺失（cancelled/failed 无 best.pt、文件被删）如实标注：
     weight_present=False 且 fingerprint=None，不兜底造假。权重路径从 Run 产物目录读
     （best_pt 字段 → run_dir/weights/best.pt 兜底，同 deploy_run 规则）。
     """
-    from visiontrainer.db.models import Deployment, Run, Task
+    from visiontrainer.db.models import Deployment, ModelRelease, Run, Task
 
     with manager.Session() as s:
         runs = s.query(Run).order_by(Run.id.desc()).all()
         tasks = {t.id: t for t in s.query(Task).all()}
         deps = s.query(Deployment).order_by(Deployment.id.desc()).all()
+        rels = s.query(ModelRelease).order_by(ModelRelease.id.desc()).all()
     deps_by_run: dict[int, list[dict]] = {}
     for d in deps:
         deps_by_run.setdefault(d.run_id, []).append({
             "deployment_id": d.id, "model_lib_dir": d.model_lib_dir, "verified": d.verified,
             "created_at": d.created_at.isoformat(timespec="seconds")})
+    now = datetime.now()
+    rels_by_run: dict[int, list[dict]] = {}
+    for m in rels:  # 发布历史同挂权重行（票 123：与部署记录同页不同动作）
+        rels_by_run.setdefault(m.run_id, []).append({
+            "release_id": m.id, "fingerprint": m.fingerprint,
+            "version": (m.payload or {}).get("version", m.fingerprint),
+            "created_at": m.created_at.isoformat(timespec="seconds"),
+            "url_expired": m.url_expires_at < now})
     items = []
     for run in runs:
         task = tasks.get(run.task_id)
@@ -1125,6 +1134,7 @@ def run_weights(manager) -> dict:
             "classes": _snapshot_classes_of(run) or _dataset_meta_of_task(task).get("classes") or [],
             "primary_metric": run.primary_metric,
             "deployments": deps_by_run.get(run.id, []),
+            "releases": rels_by_run.get(run.id, []),
         })
     return {"weights": items}
 
@@ -1353,3 +1363,117 @@ def list_deployments(manager) -> dict:
         hint = ("已部署超过 5 个模型：最早登记的模型可能被桌面端下拉框 LRU 挤出（文件保留，重新加载一次即可）"
                 if len(items) > 5 else None)
         return {"deployments": items, "lru_hint": hint}
+
+
+# ---------------------------------------------------------------- 票 123：模型发布（与部署分立）
+
+def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
+    """模型发布（票 123，ADR 0015 Decision 1）：打包 + 限时签名 URL + 发布记录，与部署分立。
+
+    发布 = best 权重 + 类别表 + 阈值探索器建议置信度 + 模型指纹打包进发布目录（派生产物，
+    可清理重建，不动模型真源）；签名 URL 复用缩略图签名管线模式（限时 + 不带凭据）。
+    发布记录只增不改：重复发布同一 Run 生成新目录（序号递增）与新记录。
+    建议置信度口径同 deploy_run（M8 04）：阈值探索器 recommended_conf 优先，回退 train_args.conf。
+    """
+    import shutil
+    import zipfile
+
+    from .. import releases as rel
+    from ..config import load_config
+    from visiontrainer.db.models import ModelRelease, Run, Task
+
+    cfg = load_config().get("training", {})
+    root = Path(release_dir or cfg.get("release_dir", "~/visiontrainer/releases")).expanduser()
+
+    with manager.Session() as s:
+        run = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if run is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if run.status != "done":
+            raise _http_err("state_conflict", "仅已完成的运行可发布", 409)
+        best_pt = run.best_pt
+        if not best_pt and run.run_dir:  # 历史数据兜底：DB 字段缺失但产物在盘
+            cand = Path(run.run_dir) / "weights" / "best.pt"
+            best_pt = str(cand) if cand.exists() else None
+        if not best_pt or not Path(best_pt).exists():
+            raise _http_err("invalid_args", "best.pt 不存在，无法发布", 400)
+        task = s.get(Task, run.task_id)
+        ds_meta = _dataset_meta_of_task(task)
+        # 类别表读 Run 快照（票 07 同口径：发布包携带的是本模型预测头的语义）
+        classes = _snapshot_classes_of(run) or ds_meta.get("classes") or []
+        family = parse_model_family(task.base_model)
+        task_type = ds_meta.get("task_type", "detect")
+        fingerprint = _weight_fingerprint(Path(best_pt))
+        # 序号 = 该 Run 既有发布数 + 1：重复发布生成新目录新记录（只增不改，不覆盖旧包）
+        seq = s.query(ModelRelease).filter(ModelRelease.run_id == run.id).count() + 1
+        target = root / f"{family}_{task_type}_{run.uid}_{seq}"
+
+        conf = (task.train_args or {}).get("conf", 0.25)
+        rec_source = "train_args"
+        try:
+            _ana = get_error_analysis(manager, uid)
+            rec = ((_ana or {}).get("sweep") or {}).get("recommended_conf")
+        except Exception:  # noqa: BLE001 — 发布不被分析读取失败拖死
+            rec = None
+        if rec:
+            conf = rec
+            rec_source = "threshold_sweep"
+
+        root.mkdir(parents=True, exist_ok=True)
+        target.mkdir(parents=True, exist_ok=False)
+        shutil.copy2(best_pt, target / "best.pt")
+        meta = {
+            "version": fingerprint,  # version 标签 = 指纹：监控端 models.yaml 对账键
+            "fingerprint": fingerprint,
+            "run_uid": uid,
+            "task_name": task.name if task else None,
+            "round_no": run.round_no,
+            "primary_metric": run.primary_metric,
+            "base_model": task.base_model if task else None,
+            "task_type": task_type,
+            "classes": classes,
+            "recommended_conf": conf,
+            "recommended_conf_source": rec_source,
+            "released_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        (target / "metadata.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        (target / "classes.txt").write_text(
+            "\n".join(classes) + ("\n" if classes else ""), encoding="utf-8")
+        bundle = target / "bundle.zip"
+        with zipfile.ZipFile(bundle, "w", zipfile.ZIP_STORED) as z:  # .pt 已压缩，STORED 快
+            z.write(target / "best.pt", "best.pt")
+            z.write(target / "metadata.json", "metadata.json")
+            z.write(target / "classes.txt", "classes.txt")
+
+        record = ModelRelease(run_id=run.id, fingerprint=fingerprint, release_dir=str(target),
+                              bundle_path=str(bundle), url_expires_at=rel.expiry(), payload=meta)
+        s.add(record)
+        s.commit()
+        rid = record.id
+
+    return {"release_id": rid, "run_uid": uid, "fingerprint": fingerprint, "version": fingerprint,
+            "release_dir": str(target), "bundle_path": str(bundle),
+            "download_url": rel.release_url(rid), **meta}
+
+
+def list_releases(manager) -> dict:
+    """发布记录清单（票 123）：只增不改账目，新在前；URL 状态读时计算（过期标记）。"""
+    from visiontrainer.db.models import ModelRelease, Run, Task
+
+    with manager.Session() as s:
+        rows = (s.query(ModelRelease, Run, Task)
+                .join(Run, ModelRelease.run_id == Run.id)
+                .join(Task, Run.task_id == Task.id)
+                .order_by(ModelRelease.id.desc()).all())
+    now = datetime.now()
+    items = [{"release_id": m.id, "run_uid": r.uid, "task_id": t.id, "task_name": t.name,
+              "round_no": r.round_no, "fingerprint": m.fingerprint,
+              "version": (m.payload or {}).get("version", m.fingerprint),
+              "release_dir": m.release_dir, "primary_metric": r.primary_metric,
+              "created_at": m.created_at.isoformat(timespec="seconds"),
+              "url_expires_at": m.url_expires_at.isoformat(timespec="seconds"),
+              "url_expired": m.url_expires_at < now,
+              "recommended_conf": (m.payload or {}).get("recommended_conf"),
+              "classes": (m.payload or {}).get("classes") or []} for m, r, t in rows]
+    return {"releases": items}

@@ -192,6 +192,26 @@ class AgentExperience(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class ModelRelease(Base):
+    """模型发布记录（票 123，ADR 0015 Decision 1）：只增不改——重复发布同一 Run 生成新记录。
+
+    发布 = best 权重 + 类别表 + 建议置信度 + 指纹打包进发布目录（派生产物，可清理重建）；
+    本表是账目（时间、指纹、run 标识、拉取 URL 状态），物理包丢失不删记录。
+    payload 为打包元数据快照（classes/recommended_conf/version/task_name/…），读取侧免回查。
+    """
+
+    __tablename__ = "model_releases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("runs.id"), index=True)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    release_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
+    bundle_path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    url_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class RuntimeSetting(Base):
     """运行期可变设置键值表（票 122）：Web 可改、改后即生效的设置落这里。
 

@@ -4,13 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RunDetailPage } from "./RunDetailPage";
-import { runsApi, signThumbUrls, type RunDetail } from "../api/client";
+import { api, runsApi, signThumbUrls, type RunDetail } from "../api/client";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
   return {
     ...actual,
-    api: { ...actual.api, deployRun: vi.fn(), openDir: vi.fn() },
+    api: { ...actual.api, deployRun: vi.fn(), openDir: vi.fn(), releaseRun: vi.fn() },
     runsApi: {
       get: vi.fn(),
       gpu: vi.fn(),
@@ -269,6 +269,30 @@ describe("RunDetailPage 动作", () => {
     await waitFor(() => expect(retry).toHaveBeenCalledWith("aaaa1111"));
     // 钉原 split_uid 的语义在后端（快照还原）；前端只转发 uid 并回训练记录页
     await waitFor(() => expect(screen.getByText("training-list")).toBeInTheDocument());
+  });
+
+  it("done_run_offers_release_with_intent_confirm_then_calls_api", async () => {
+    mockRun(); // done + best_pt 在
+    const user = userEvent.setup();
+    renderRun();
+    const btn = await screen.findByTestId("run-release");
+    expect(btn).toBeEnabled();
+    await user.click(btn);
+    // 确认门是意图清单：发布对象 + 发布包内容 + 限时签名 URL
+    const dialog = screen.getByTestId("confirm-dialog");
+    expect(dialog.textContent).toContain("Run aaaa1111");
+    expect(dialog.textContent).toContain("发布包");
+    expect(dialog.textContent).toContain("签名");
+    await user.click(within(dialog).getByRole("button", { name: "发布" }));
+    await waitFor(() => expect(api.releaseRun).toHaveBeenCalledWith("aaaa1111"));
+    await waitFor(() => expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument());
+  });
+
+  it("non_done_run_hides_release_entry", async () => {
+    mockRun({ status: "running" });
+    renderRun();
+    await screen.findByTestId("run-stop");
+    expect(screen.queryByTestId("run-release")).not.toBeInTheDocument();
   });
 
   it("delete_flow_confirms_with_intent_then_calls_delete_default_keep_files", async () => {

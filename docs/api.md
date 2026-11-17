@@ -170,13 +170,23 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 | POST | `/api/v1/runs/{uid}/deploy` | 导出 ONNX + 组装模型库目录 + 导出验证（后台任务链）；类别名回查读该 Run 快照的 `format.class_map`，不回读当前类别表 |
 | GET | `/api/v1/deployments` | 已部署清单（含 LRU 提示依据的顺序） |
 
-### 模型页真源化（票 121，2026-11-18）
+### 模型发布（票 123，2026-11-18）
 
-模型真源 = Run 产物权重（ADR 0015 Decision 2）：模型库目录降为派生产物（部署组装物，可清理重建），账目以 Run 权重为准。
+发布（ADR 0015 Decision 1）与部署是两个动作：发布 = best 权重 + 类别表 + 阈值探索器建议置信度 + 模型指纹打包进发布目录（派生产物，可清理重建，不动模型真源）+ 限时签名 URL 供监控端免凭据拉取；部署维持「导出 ONNX 组装进标注端」。发布记录只增不改（时间、指纹、run 标识、拉取 URL 状态），重复发布同一 Run 生成新目录（`{family}_{task_type}_{run_uid}_{seq}` 序号递增）与新记录。签名 URL 复用缩略图签名管线模式（HMAC 限时 + 不带凭据，密钥同源 `server.thumb_secret`），24 小时有效，过期/篡改一律 403。建议置信度口径同部署（M8 04）：阈值探索器 `recommended_conf`（F1 最大点）优先，无分析回退 `train_args.conf`。`version` 标签 = 指纹（监控端 models.yaml 对账键）。发布目录配置键 `training.release_dir`（缺省 `~/visiontrainer/releases`，设置页可改）。
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/run-weights` | 模型真源清单：全部 Run 的权重行（未入库未发布、权重缺失的也在列）。行字段：`run_uid`/`task_id`/`task_name`/`round_no`/`status`/`created_at`/`weight_path`/`weight_present`/`fingerprint`/`classes`/`primary_metric`/`deployments`。`fingerprint` = 模型指纹（权重文件 sha256 前 8 位，进程内按 mtime+size 缓存）；权重缺失（cancelled/failed 无 best.pt、文件被删）时 `weight_present=false` 且 `fingerprint=null`；`classes` 读 Run 快照 `format.class_map`（无快照回退当前类别表）；`deployments` = 该 Run 的部署历史（`deployment_id`/`model_lib_dir`/`verified`/`created_at`，新在前） |
+| POST | `/api/v1/runs/{uid}/release` | 发起发布（同步）：打包落盘 + 登记记录，返回 `{release_id, run_uid, fingerprint, version, release_dir, bundle_path, download_url, url_expires_at, ...元数据}`；发布目录含 `best.pt`/`metadata.json`/`classes.txt`/`bundle.zip`。资格同部署：仅 done 且 best.pt 在盘（否则 409/400）；长操作登记 `run:{uid}:release` |
+| GET | `/api/v1/releases` | 发布记录清单（只增不改账目，新在前）：`{release_id, run_uid, task_id, task_name, round_no, fingerprint, version, release_dir, primary_metric, created_at, url_expires_at, url_expired, recommended_conf, classes}`；`url_expired` 读时计算（过期只影响拉取，记录留档） |
+| GET | `/api/v1/releases/download?rid=&t=` | 凭限时签名 URL 拉取发布包 `bundle.zip`（`application/zip`，含 best.pt + metadata.json + classes.txt）；验签失败/过期 403，记录不存在或发布包已被清理 404（派生产物可重新发布重建） |
+
+### 模型页真源化（票 121，2026-11-18）
+
+模型真源 = Run 产物权重（ADR 0015 Decision 2）：模型库目录与发布目录降为派生产物（部署组装物/发布打包物，可清理重建），账目以 Run 权重为准。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/run-weights` | 模型真源清单：全部 Run 的权重行（未入库未发布、权重缺失的也在列）。行字段：`run_uid`/`task_id`/`task_name`/`round_no`/`status`/`created_at`/`weight_path`/`weight_present`/`fingerprint`/`classes`/`primary_metric`/`deployments`/`releases`。`fingerprint` = 模型指纹（权重文件 sha256 前 8 位，进程内按 mtime+size 缓存）；权重缺失（cancelled/failed 无 best.pt、文件被删）时 `weight_present=false` 且 `fingerprint=null`；`classes` 读 Run 快照 `format.class_map`（无快照回退当前类别表）；`deployments` = 该 Run 的部署历史（`deployment_id`/`model_lib_dir`/`verified`/`created_at`，新在前）；`releases` = 该 Run 的发布历史（票 123：`release_id`/`fingerprint`/`version`/`created_at`/`url_expired`，新在前） |
 
 ### 训练域元数据（阶段 1c，2026-11-17）
 
