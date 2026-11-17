@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { datasetsApi, type SplitBrief, type SplitPreview } from "../../api/client";
 import { formatTs } from "../datasets/domain";
 
@@ -229,6 +229,7 @@ function NewSplitPanel({
 }) {
   const haveRef = splits.length > 0;
   const mode2 = haveRef ? plan.mode : "fresh"; // 无参照（首次训练）强制全部重洗
+  const queryClient = useQueryClient();
   const [preview, setPreview] = useState<SplitPreview | null>(null);
   const [previewError, setPreviewError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
@@ -264,6 +265,11 @@ function NewSplitPanel({
     setCreateError(null);
     try {
       const s = await datasetsApi.splitsCreate(dataset, body);
+      // 落盘即时刷新（票 119）：新切分种入缓存 + 失效重取，「沿用最近」行立即显示新值；
+      // 数据集详情一并失效（健康报告等按最近切分算口径）
+      queryClient.setQueryData<SplitBrief[]>(["splits", dataset], (old) => [s, ...(old ?? [])]);
+      void queryClient.invalidateQueries({ queryKey: ["splits", dataset] });
+      void queryClient.invalidateQueries({ queryKey: ["dataset", dataset] });
       onCreated(s.uid);
     } catch (e) {
       setCreateError(e instanceof Error ? e.message : "新建切分失败");

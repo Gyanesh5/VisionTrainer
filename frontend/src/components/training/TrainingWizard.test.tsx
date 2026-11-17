@@ -161,6 +161,29 @@ describe("TrainingWizard 切分步（三态）", () => {
     );
   });
 
+  it("latest_row_refreshes_right_after_split_persisted", async () => {
+    // 落盘即时刷新（票 119）：新切分种入缓存 + 失效重取，「沿用最近」行立即显示新值
+    mockAll();
+    const user = userEvent.setup();
+    renderWizard();
+    await pickPlate(user);
+
+    await user.click(screen.getByRole("tab", { name: "新建" }));
+    await screen.findByTestId("split-preview");
+    // 落盘后重取返回新切分在前的历史列表（服务端 created_at 最新在前）
+    dsListSplits.mockResolvedValue([{ ...splits[0], uid: "newu9999" }, ...splits]);
+    await user.click(screen.getByTestId("split-confirm"));
+
+    await waitFor(() =>
+      expect((screen.getByTestId("split-latest-line") as HTMLInputElement).value).toContain("newu9999"),
+    );
+    expect(dsListSplits).toHaveBeenCalledTimes(2); // 缓存失效确实触发了重取
+    // 钉住新 uid 的既有行为不回退：确认门携带新切分
+    await user.click(screen.getByTestId("wiz-create"));
+    const dialog = await screen.findByTestId("confirm-dialog");
+    expect(within(dialog).getByTestId("confirm-split").textContent).toContain("newu9999");
+  });
+
   it("first_training_without_splits_forces_fresh_only_and_gates_until_split_landed", async () => {
     mockAll({ dsListSplitsRet: [] });
     const user = userEvent.setup();
