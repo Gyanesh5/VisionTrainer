@@ -62,7 +62,8 @@ SPLIT_MODES = split_lib.SPLIT_MODES  # 新建切分两模式：fresh（全部重
 
 # dataset.json 的落盘字段集（spec §3.1 唯一键集；票 05 起不再有清单两字段）
 _META_KEYS = ("name", "task_type", "form", "created_at", "origin", "validation_summary",
-              "tiling", "flip_idx")
+              "tiling", "flip_idx",
+              "monitor_imports")  # 票 124：导出包 manifest 四要素落账（逐次拉取一条记录）
 
 
 class DatasetError(Exception):

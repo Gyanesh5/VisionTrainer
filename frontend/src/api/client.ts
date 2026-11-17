@@ -174,6 +174,27 @@ export interface ProbeClassesResult {
   images: number;
 }
 
+/** POST /datasets/monitor-pull：从 vision-monitor 拉取导入（票 124，联动域） */
+export interface MonitorPullFilters {
+  task?: string | null;
+  status?: "confirmed" | "corrected" | null;
+  created_from?: number | null;
+  created_to?: number | null;
+}
+
+export interface MonitorPullResult {
+  name: string;
+  mode: "create" | "add";
+  pulled: number;
+  added: number;
+  skipped_existing: number;
+  site?: string | null;
+  models?: { model_id?: string; model_sha8?: string }[] | null;
+  time_window?: Record<string, unknown> | null;
+  writeback: { ok: boolean; detail: string; sample_ids: string[] };
+  validation_summary?: ValidationSummary;
+}
+
 export interface CreateDatasetResult {
   name: string;
   task_type: TaskType;
@@ -614,6 +635,20 @@ export const datasetsApi = {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ src_dir: srcDir, task_type: taskType }),
+    }),
+  /** 从 vision-monitor 拉取导入（票 124）：过滤拉取 → 托管导入链 → manifest 落账 → ingested 回写 */
+  monitorPull: (body: {
+    mode: "create" | "add";
+    name: string;
+    task_type?: TaskType;
+    classes?: string[];
+    base_url?: string | null;
+    filters: MonitorPullFilters;
+  }) =>
+    request<MonitorPullResult>("/api/v1/datasets/monitor-pull", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
     }),
 };
 

@@ -115,6 +115,16 @@
 | PUT | `/api/v1/system/monitor` | 写运行期地址（upsert runtime_settings，改后即生效无需重启）。body `{base_url}`；返回同 GET（source 恒 `runtime`）；非 http(s) 或空串 400 `invalid_value`；config.toml 不被写 |
 | POST | `/api/v1/system/monitor/probe` | 可达性探测：返回 `{base_url, reachable, detail}`——detail 人读（`HTTP 200` 或异常类型+原因）。body 可缺省 `{base_url?}`：带则探未保存草稿值（不落库），缺省探当前生效地址；草稿非法 400 `invalid_value` |
 
+### 数据集域票 124 增补（从 vision-monitor 拉取导入，2026-11-18）
+
+联动域主动学习环的样本回流入口（ADR 0015 Decision 3/4）：后端按过滤条件调监控端导出 API（地址取系统域连接配置，票 122），解包 → 审查键归一（监控端 LabelMe JSON 的 `vt_review` 为字符串态生命周期状态，平台按 ADR 0003 字典态消费——归一剥除非字典态 `vt_review`，`checked: true` 经 XAL 互认口径继承为 approved）→ 走既有托管导入链（新建/加图，与手工导入同质量同路径）→ 导出包 manifest 四要素（工位 site、模型指纹 models[].model_sha8、时间窗 time_window、样本清单 samples）追加进 dataset meta 的 `monitor_imports`（逐次拉取一条记录，逐条样本不建独立表）→ 回写监控端样本状态 ingested。重复拉取同批：add 模式按文件名与既有真源去重（同批重复 added=0）。临时包用完即焚，失败不留半成品。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/v1/datasets/monitor-pull` | 拉取导入（长操作，登记 `ds:{name}:monitor-pull`，相：拉取导出包/解包归一/入图/校验标注/回写状态）。body: `{mode:create\|add, name, task_type?(create), classes?(create，缺省由导出包派生), base_url?(本次覆盖，不落库), filters:{task?, status?:confirmed\|corrected, created_from?, created_to?}}`；返回 `{name, mode, pulled, added, skipped_existing, site, models, time_window, writeback:{ok,detail,sample_ids}, validation_summary}`。错误：502 `monitor_unreachable`（连不上）/ `monitor_http_error`（导出 API 非 2xx）/ `monitor_bad_bundle`（坏 ZIP 或 manifest 缺四要素），404 `monitor_empty`（204 无样本）与 add 目标不存在 `not_found`，400 `invalid_args`；导入链阻断（表外类别 409、同名冲突 409）按票 03/04 契约原样返回 |
+
+**出站回写契约**（监控端样本状态 API，监控端侧待实现、本仓先钉形状）：导入成功后平台发起 `POST {monitor基址}/api/samples/status`，body `{"status": "ingested", "sample_ids": [manifest 样本清单的逐条 sample_id]}`。回写失败告警降级不阻断导入主流程（与通知域一致口径）：响应 `writeback.ok=false` 带 detail，操作仍 done；重复拉取同一批（全量去重）也会再发回写，可补前次失败。
+
 ### 任务域 M8 增补（错误分析 / 试跑 / 模型库，2026-09-21）
 
 | 方法 | 路径 | 说明 |
