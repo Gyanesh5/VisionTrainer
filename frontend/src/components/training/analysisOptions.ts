@@ -121,7 +121,15 @@ export function buildMatrixOption(matrix: AnalysisMatrix) {
         name: "框数",
         type: "heatmap" as const,
         data,
-        label: { show: true, fontSize: 11, formatter: "{c}" },
+        // label 只显示框数（data 项 [列 Pred, 行 GT, 值]，"{c}" 会带出整组数组）
+        label: {
+          show: true,
+          fontSize: 11,
+          formatter: (p: unknown) => {
+            const v = (p as { value?: unknown }).value;
+            return Array.isArray(v) ? String(v[2] ?? "") : "";
+          },
+        },
         emphasis: { itemStyle: { borderColor: cssVar("--chrome-accent", "#2f66d0"), borderWidth: 2 } },
       },
     ],

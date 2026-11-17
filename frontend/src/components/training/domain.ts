@@ -63,10 +63,10 @@ export function agentStateMeta(state: string | null | undefined): { label: strin
   return AGENT_STATE_META[state ?? ""] ?? { label: state ?? "—", mark: "○", cls: "is-neutral" };
 }
 
-/** 审批裁决回写标记（agent_config.history[].verdict → 中文） */
+/** 审批裁决回写标记（tuner._mark_history_verdict 写回值 → 中文） */
 export const VERDICT_ZH: Record<string, string> = {
-  approved: "放行",
+  approve: "放行",
   approve_with_changes: "改后放行",
   rejected: "拒绝本轮",
-  auto: "预审自动放行",
+  preapproved: "预审自动放行",
 };
