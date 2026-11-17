@@ -64,8 +64,9 @@ export function buildSweepOption(sweep: AnalysisSweep) {
   };
 }
 
-/** 热力色阶（深底 vp 区）：cat-1 分类色的 alpha 阶梯——从底色到亮色递进，零格近底 */
-function heatRamp(): string[] {
+/** 热力色阶（深底 vp 区）：cat-1 分类色的 alpha 阶梯——从底色到亮色递进，零格近底
+ * （票 118 起健康报告热力图同款复用） */
+export function heatRamp(): string[] {
   const base = catColor(0); // --cat-1 #5e9cf3
   const dim = cssVar("--vp-grid", "#1a2a3a");
   return [dim, `${base.slice(0, 7)}66`, `${base.slice(0, 7)}aa`, base, "#d5e4fb"];

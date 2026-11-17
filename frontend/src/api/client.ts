@@ -379,11 +379,16 @@ export const datasetsApi = {
         h?: number | null;
         cls?: string;
         split?: string | null;
+        /** 归一化标注中心 [[cx, cy]]（中心热力图框选下钻筛图用） */
+        centers?: number[][];
       }[];
       agg?: {
-        obj_hist?: Record<string, number>;
-        by_class?: Record<string, number>;
+        /** [bucket, count] 对数组（后端 sorted(obj_hist.items())），按桶值升序 */
+        obj_hist?: [number, number][];
         obj_size?: { total: number; small: number; medium: number; large: number; small_ratio: number } | null;
+        /** 归一化 20×20 网格（中心 / 尺寸热力图数据源，行=y 列=x） */
+        heatmap?: number[][];
+        size_heat?: number[][];
         [k: string]: unknown;
       };
       by_split?: Record<string, { images: number; background: number; by_class: Record<string, number> }> | null;

@@ -5,7 +5,22 @@ import {
   TASK_TYPE_ZH,
   type DatasetDetail,
 } from "../../api/client";
+import { OperChart } from "../charts/OperChart";
 import { formatTs } from "./domain";
+import {
+  aggregateByClass,
+  buildCenterHeatOption,
+  buildSizeHeatOption,
+  drillDesc,
+  drillRows,
+  HEAT_GRID,
+  isNoDrill,
+  NO_DRILL,
+  parseObjHist,
+  rectFromAreas,
+  type Drill,
+  type NormalizedRect,
+} from "./healthOptions";
 
 /**
  * 切片工作区（ADR 0004）：切小图生成新托管数据集，源集零改动；标注完整落入才归属，
@@ -413,8 +428,10 @@ export function ExportDialog({
 
 /**
  * 健康报告视图（票 06 一行制读时视图）：compose_view 口径选择器（最近切分/全集/历史切分）
- * + 含排除开关 + 点柱筛图（drill：点类别柱/对象数柱筛出图片清单，滚动跟随 start 语义）。
+ * + 含排除开关 + 点柱筛图（drill：点类别柱/对象数柱/点热力图格/工具箱矩形框选筛出图片清单，
+ * class+bucket+rect 三维交集语义照 python _drill_rows，滚动跟随 start 语义）。
  * 排除/恢复/新建切分零重算——控制行常驻，图表区随口径切换读时重建。
+ * 双热力图 + brushEnd 框选下钻见 healthOptions.ts（票 118，语义真源 git 276be37^ ui/pages.py）。
  */
 export function HealthPanel({ meta }: { meta: DatasetDetail }) {
   const [splitUid, setSplitUid] = useState<string | null>(null); // null=最近切分；""=全集；uid=显式
@@ -423,7 +440,7 @@ export function HealthPanel({ meta }: { meta: DatasetDetail }) {
   const [payload, setPayload] = useState<Awaited<ReturnType<typeof datasetsApi.stats>> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [drill, setDrill] = useState<{ kind: "class" | "obj"; key: string } | null>(null);
+  const [drill, setDrill] = useState<Drill>(NO_DRILL);
   const drillRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -449,16 +466,47 @@ export function HealthPanel({ meta }: { meta: DatasetDetail }) {
     void reload();
   }, [reload]);
 
-  // 点柱筛图 → drill 列表滚动跟随（block:start；不挂在守卫后面——同一根柱再点一次也要回看）
+  // 点柱/框选筛图 → drill 列表滚动跟随（block:start；不挂在守卫后面——同一根柱再点一次也要回看）
   useEffect(() => {
-    if (drill) {
+    if (!isNoDrill(drill)) {
       drillRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     }
   }, [drill]);
 
-  function toggleDrill(kind: "class" | "obj", key: string) {
-    setDrill((prev) => (prev && prev.kind === kind && prev.key === key ? null : { kind, key }));
+  /** 点柱切换单维（旧 ui 同款 toggle：再点同柱清该维；其余维保持——三维交集语义） */
+  function toggleCls(label: string) {
+    setDrill((prev) =>
+      prev.cls && prev.cls.label === label && prev.cls.split === null
+        ? { ...prev, cls: null }
+        : { ...prev, cls: { label, split: null } },
+    );
   }
+
+  function toggleBucket(k: number) {
+    setDrill((prev) => (prev.bucket === k ? { ...prev, bucket: null } : { ...prev, bucket: k }));
+  }
+
+  /** brushEnd areas → 归一化矩形（category 轴 coordRange 是格索引，÷HEAT_GRID）；空刷清除该维 */
+  const applyAreas = useCallback((areas: unknown) => {
+    const r = rectFromAreas(areas);
+    const rect: NormalizedRect | null = r
+      ? [r[0] / HEAT_GRID, r[1] / HEAT_GRID, r[2] / HEAT_GRID, r[3] / HEAT_GRID]
+      : null;
+    setDrill((prev) => ({ ...prev, rect }));
+  }, []);
+
+  /** 点热力图格 = 选该格区域（框选的轻量替代，交互更易发现；再点同格清除） */
+  const applyHeatCell = useCallback((params: unknown) => {
+    const v = (params as { value?: unknown }).value;
+    if (!Array.isArray(v) || typeof v[0] !== "number" || typeof v[1] !== "number") return;
+    const [j, i] = v as [number, number];
+    const rect: NormalizedRect = [j / HEAT_GRID, (j + 1) / HEAT_GRID, i / HEAT_GRID, (i + 1) / HEAT_GRID];
+    setDrill((prev) =>
+      prev.rect && prev.rect.every((c, k) => Math.abs(c - rect[k]) < 1e-9)
+        ? { ...prev, rect: null }
+        : { ...prev, rect },
+    );
+  }, []);
 
   if (loading) return <p className="placeholder-note">组成健康报告画像…（读时视图，零扫盘）</p>;
   if (error) {
@@ -481,35 +529,18 @@ export function HealthPanel({ meta }: { meta: DatasetDetail }) {
   }
 
   const s = payload.summary;
-  const byClass =
-    payload.by_split
-      ? Object.fromEntries(
-          Object.entries(
-            Object.values(payload.by_split).reduce<Record<string, number>>((acc, side) => {
-              for (const [c, n] of Object.entries(side.by_class ?? {})) {
-                acc[c] = (acc[c] ?? 0) + n;
-              }
-              return acc;
-            }, {}),
-          ),
-        )
-      : (payload.agg?.by_class ?? {});
-  const objHist = Object.entries(payload.agg?.obj_hist ?? {})
-    .map(([k, v]) => ({ k: Number(k), v }))
-    .sort((a, b) => a.k - b.k);
+  // 类别分布：切分视图并两侧、全集视图 per_image 现算（agg 无 by_class，旧 UI 同口径）
+  const byClass = aggregateByClass(payload.per_image ?? [], payload.task_type, payload.by_split ?? null);
+  // obj_hist 后端是 [bucket, count] 对数组（票 118 实点修正：原按 Record 解析标签错位）
+  const objHist = parseObjHist(payload.agg?.obj_hist);
   const mxClass = Math.max(1, ...Object.values(byClass));
   const mxObj = Math.max(1, ...objHist.map((x) => x.v));
   const annTotal = Object.values(byClass).reduce((a, b) => a + b, 0);
   const selTxt =
     payload.split_uid === null ? "全集" : payload.split_uid === undefined ? "最近切分" : `切分 ${payload.split_uid}`;
 
-  const drillRows = (() => {
-    if (!drill) return [];
-    if (drill.kind === "class") {
-      return payload.per_image.filter((r) => (r.label_counts ?? {})[drill.key] > 0 || (r.labels ?? []).includes(drill.key));
-    }
-    return payload.per_image.filter((r) => (r.n ?? 0) === Number(drill.key));
-  })();
+  const boxable = ["detect", "segment", "obb"].includes(payload.task_type);
+  const filtered = isNoDrill(drill) ? [] : drillRows(payload.per_image ?? [], drill);
 
   return (
     <div data-testid="health-panel">
@@ -550,15 +581,15 @@ export function HealthPanel({ meta }: { meta: DatasetDetail }) {
         {s.background ?? 0} · {selTxt}
       </p>
 
-      {/* 类别分布柱（点柱筛图）：HTML 条形，点柱即 drill（ECharts 待依赖裁决，语义等价） */}
+      {/* 类别分布柱（点柱筛图）：HTML 条形（旧 UI ECharts 柱语义等价，跨切分聚合无 split 维） */}
       <div className="audit-group">
         <span className="form-hint">类别分布（点柱筛图）</span>
         {Object.entries(byClass).map(([c, n]) => (
           <button
             key={c}
             type="button"
-            className={`imbalance-row level-btn ${drill?.kind === "class" && drill.key === c ? "active" : ""}`}
-            onClick={() => toggleDrill("class", c)}
+            className={`imbalance-row level-btn ${drill.cls?.label === c && drill.cls?.split === null ? "active" : ""}`}
+            onClick={() => toggleCls(c)}
           >
             <span className="imbalance-name">{c}</span>
             <span className="imbalance-bar" style={{ width: `${Math.max((n / mxClass) * 100, 1)}%`, background: "var(--chrome-accent)" }} />
@@ -577,8 +608,8 @@ export function HealthPanel({ meta }: { meta: DatasetDetail }) {
             <button
               key={x.k}
               type="button"
-              className={`imbalance-row level-btn ${drill?.kind === "obj" && drill.key === String(x.k) ? "active" : ""}`}
-              onClick={() => toggleDrill("obj", String(x.k))}
+              className={`imbalance-row level-btn ${drill.bucket === x.k ? "active" : ""}`}
+              onClick={() => toggleBucket(x.k)}
             >
               <span className="imbalance-name tnum">{x.k} 个/图</span>
               <span className="imbalance-bar" style={{ width: `${Math.max((x.v / mxObj) * 100, 1)}%`, background: "var(--chrome-accent)" }} />
@@ -588,19 +619,49 @@ export function HealthPanel({ meta }: { meta: DatasetDetail }) {
         </div>
       )}
 
-      {/* 筛图结果（滚动跟随到此处） */}
-      {drill && (
+      {/* 双热力图（票 118，框选任务专用；SVG 渲染器——canvas 渐进分层让 heatmap 空层置顶） */}
+      {boxable && (
+        <div className="chart-grid">
+          <div className="chart-cell">
+            <p className="section-title">标注尺寸热力图（宽×高占整图比例；左下小、右上大）</p>
+            <OperChart
+              option={buildSizeHeatOption(payload.agg?.size_heat ?? [])}
+              height={230}
+              renderer="svg"
+              testId="health-size-heat"
+            />
+          </div>
+          <div className="chart-cell">
+            <p className="section-title">标注中心热力图（点格或右上角矩形工具框选，筛出图片清单）</p>
+            <OperChart
+              option={buildCenterHeatOption(payload.agg?.heatmap ?? [])}
+              height={230}
+              renderer="svg"
+              testId="health-center-heat"
+              onPointClick={applyHeatCell}
+              onBrushEnd={applyAreas}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* 筛图结果（点柱/点格/框选三维交集；滚动跟随到此处） */}
+      {!isNoDrill(drill) && (
         <div className="audit-group" ref={drillRef} data-testid="drill-list">
-          <span>
-            {drill.kind === "class" ? `类别「${drill.key}」` : `${drill.key} 个对象/图`} 共 {drillRows.length} 张
-            {drillRows.length > 50 ? "（前 50）" : ""}
+          <span className="form-hint" data-testid="drill-desc">
+            {drillDesc(drill)} · 命中 {filtered.length} 张{filtered.length > 50 ? "（前 50）" : ""}
           </span>
-          {drillRows.slice(0, 50).map((r) => (
+          <button type="button" className="btn btn-ghost" data-testid="drill-clear" onClick={() => setDrill(NO_DRILL)}>
+            清除筛选
+          </button>
+          {filtered.length === 0 && <span className="placeholder-note">没有命中的图片</span>}
+          {filtered.slice(0, 50).map(({ row: r, why }) => (
             <div key={r.name} className="exclude-row">
               <span className="mono problem-line">{r.name}</span>
               <span className="form-hint">
                 {r.split ? `${r.split} · ` : ""}
                 {r.n ?? 0} 个标注
+                {why.length > 0 ? ` · ${why.join(" · ")}` : ""}
               </span>
               <button
                 type="button"
