@@ -125,6 +125,12 @@
 
 **出站回写契约**（监控端样本状态 API，监控端侧待实现、本仓先钉形状）：导入成功后平台发起 `POST {monitor基址}/api/samples/status`，body `{"status": "ingested", "sample_ids": [manifest 样本清单的逐条 sample_id]}`。回写失败告警降级不阻断导入主流程（与通知域一致口径）：响应 `writeback.ok=false` 带 detail，操作仍 done；重复拉取同一批（全量去重）也会再发回写，可补前次失败。
 
+### 训练域票 125 增补（trained 回写，2026-11-18）
+
+联动域状态回写第二态（ADR 0015 Decision 5，无新增 REST 端点——回写为平台后台出站动作）：消费某数据集的 Run 生命周期终态成功（done，含平台重启后孤儿按产物判定 done）后，按归因交集回写监控端样本状态 trained。归因口径：该数据集 meta `monitor_imports` 样本清单 ∩ 该 Run 实际消费名单（运行快照 `run_manifest.json` 的 `effective` 冻结段，相对 `source/` 文件名）——只有本次训练真正进 train/val 的样本才回写（盘上缺图/排除在册的剔除样本不回写），且只碰该 Run 消费数据集的清单，其他导入批次与其他数据集不受误伤；数据集无联动导入记录或 Run 无实效快照（外部数据集/历史 Run）则不回写。非 done 终态（failed/cancelled/stopping）不回写。回写由后台线程执行，不阻塞训练收尾链路；失败只告警不阻断训练主流程（桌面通知 + 日志 warning，与通知域一致降级口径），可在修复监控端连接后重训补写。
+
+**出站回写契约（trained 态）**：Run 终态成功后平台发起 `POST {monitor基址}/api/samples/status`，body `{"status": "trained", "sample_ids": [归因交集的逐条 sample_id]}`（与 ingested 态同一端点同一形状，`status` 换 `trained`；共享出站实现 `datasets/monitor_writeback.py`）。响应不进入任何 REST 响应面——结果只落日志与告警；样本状态机 `exported → ingested → trained` 中 ingested 见票 124 段。
+
 ### 任务域 M8 增补（错误分析 / 试跑 / 模型库，2026-09-21）
 
 | 方法 | 路径 | 说明 |

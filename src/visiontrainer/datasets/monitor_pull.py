@@ -5,7 +5,9 @@
 托管导入链（`svc.create_dataset` / `svc.add_images`，票 03/04 唯一入口，不另起路径）→
 导出包 manifest 四要素（工位、模型指纹、时间窗、样本清单）追加进 dataset meta 的
 ``monitor_imports``（逐条样本不建独立表）→ ``POST {base}/api/samples/status`` 回写
-ingested。回写失败告警不阻断导入主流程（与通知域一致的降级口径）。
+ingested。回写失败告警不阻断导入主流程（与通知域一致的降级口径）。出站回写（ingested
+与 trained 两态）的共享实现在 `datasets.monitor_writeback`（票 125 提取），trained 态
+由 Run 生命周期终态钩子（`training.manager`）触发。
 
 导出包契约（vision-monitor 侧 exporter，已实查）：``images/{样本id}_{序号}_{词干}.jpg``
 + 同词干 LabelMe JSON + ``classes.txt``（行序即类别 id）+ ``manifest.yaml``；导出请求体
@@ -30,6 +32,7 @@ import httpx
 import yaml
 
 from ..core import monitor
+from . import monitor_writeback
 from . import service as svc
 from .service import DatasetError
 
@@ -37,7 +40,6 @@ _logger = logging.getLogger(__name__)
 
 # 导出请求超时：组包含逐样本取图，慢工位也要等得起；连接失败快速暴露
 EXPORT_TIMEOUT = httpx.Timeout(120.0, connect=5.0)
-WRITEBACK_TIMEOUT = httpx.Timeout(30.0, connect=5.0)
 
 
 # ---------------------------------------------------------------- 出站：导出 API
@@ -204,24 +206,12 @@ def _append_manifest_meta(ds_dir: Path, manifest: dict, *, mode: str, base: str,
 def writeback_ingested(base: str, sample_ids: list[str]) -> dict:
     """回写监控端样本状态 ingested（``POST {base}/api/samples/status``）。
 
-    出站契约（监控端待实现，docs/api.md 留痕）：body ``{"status": "ingested",
-    "sample_ids": [...]}``。失败只告警不阻断导入主流程（通知域同口径降级）：
-    返回 ``{ok, detail, sample_ids}``，ok=False 时 detail 人读、已告警留日志。
+    出站契约与失败降级口径见 `datasets.monitor_writeback`（票 125 提取为共享单一
+    实现，ingested/trained 两态共用）：body ``{"status": "ingested", "sample_ids":
+    [...]}``。失败只告警不阻断导入主流程（通知域同口径降级）：返回
+    ``{ok, detail, sample_ids}``，ok=False 时 detail 人读、已告警留日志。
     """
-    url = base.rstrip("/") + "/api/samples/status"
-    try:
-        with httpx.Client(timeout=WRITEBACK_TIMEOUT, follow_redirects=False) as client:
-            resp = client.post(url, json={"status": "ingested", "sample_ids": sample_ids})
-    except httpx.HTTPError as exc:
-        reason = str(exc) or type(exc).__name__
-        detail = f"监控端不可达：{base}（{type(exc).__name__}: {reason}）"
-        _logger.warning("ingested 回写失败（不阻断导入）：%s", detail)
-        return {"ok": False, "detail": detail, "sample_ids": sample_ids}
-    if not (200 <= resp.status_code < 300):
-        detail = f"监控端状态回写 API 返回 HTTP {resp.status_code}"
-        _logger.warning("ingested 回写失败（不阻断导入）：%s", detail)
-        return {"ok": False, "detail": detail, "sample_ids": sample_ids}
-    return {"ok": True, "detail": f"HTTP {resp.status_code}", "sample_ids": sample_ids}
+    return monitor_writeback.writeback_ingested(base, sample_ids)
 
 
 # ---------------------------------------------------------------- 主流程
