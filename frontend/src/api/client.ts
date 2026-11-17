@@ -30,10 +30,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     let code = "";
     let detail: Record<string, unknown> = {};
     try {
-      const body = (await response.json()) as { error?: ApiError };
-      if (body.error?.message) message = body.error.message;
-      if (body.error?.code) code = body.error.code;
-      if (body.error?.detail) detail = body.error.detail;
+      // 信封两种落点：直挂 body.error，或 FastAPI HTTPException 包一层 body.detail.error
+      const body = (await response.json()) as { error?: ApiError; detail?: { error?: ApiError } };
+      const env = body.error ?? body.detail?.error;
+      if (env?.message) message = env.message;
+      if (env?.code) code = env.code;
+      if (env?.detail) detail = env.detail;
     } catch {
       // 服务端非 JSON 错误体时保留 HTTP 状态行
     }
