@@ -1765,3 +1765,68 @@ body {
 .table-scroll {
   overflow-x: auto;
 }
+
+/* ---------------------------------------------------------------- Agent 循环页（票 111 批 2，D 族详情档 + 三角色消息分色） */
+
+/* 三角色分色（对方 agent-message role-* 模式移植）：决策 assistant=accent / 取证 tool=manual / 裁决 user=ok。
+   平台形态是调参循环不是聊天框：角色分色只落在决策卡的三段左缘，不做气泡 */
+.agent-tl {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: 8px;
+}
+
+.agent-tl-card {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  background: var(--chrome-surface);
+}
+
+.agent-role {
+  border-left: 3px solid var(--chrome-border);
+  border-radius: 0 4px 4px 0;
+  padding: 8px 12px;
+  margin-top: 8px;
+  background: var(--chrome-bg);
+}
+
+.agent-role.assistant {
+  border-left-color: var(--chrome-accent);
+}
+
+.agent-role.tool {
+  border-left-color: var(--state-manual);
+}
+
+.agent-role.user {
+  border-left-color: var(--state-ok);
+}
+
+.agent-role-title {
+  margin: 0 0 4px;
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+}
+
+.agent-role p {
+  margin: 2px 0;
+  font-size: var(--font-label);
+}
+
+/* 白名单拦截记录：越界即警示（alarm-warning 语义） */
+.agent-clamp {
+  color: var(--alarm-warning);
+}
+
+/* 审批门卡：琥珀左缘（等待语义），暂停态转手动棕 */
+.agent-gate {
+  border-left: 3px solid var(--alarm-warning);
+}
+
+/* 选中行：accent 左缘 + 底色微升（同 nav-item.active 语义） */
+.run-row.is-selected td {
+  background: color-mix(in srgb, var(--chrome-accent) 8%, var(--chrome-surface));
+}

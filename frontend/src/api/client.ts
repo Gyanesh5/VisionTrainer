@@ -632,7 +632,7 @@ export interface TaskCreateResult {
   dropped?: { missing: string[]; excluded: string[] };
 }
 
-/** 任务创建请求体（format_id 由后端注册表定，不可选择） */
+/** 任务创建请求体（format_id 由后端注册表定，不可选择）；agent 配置=调参任务，创建即启动循环 */
 export interface TaskCreateBody {
   name: string;
   base_model: string;
@@ -646,6 +646,7 @@ export interface TaskCreateBody {
   workers: number;
   seed: number;
   extra_args?: Record<string, unknown>;
+  agent?: { max_rounds: number; approval: string; objective: string; prune?: boolean | null };
 }
 
 export const trainingApi = {
@@ -743,6 +744,94 @@ export const runsApi = {
       `/api/v1/runs/${encodeURIComponent(uid)}/clear-last-pt`,
       { method: "POST" },
     ),
+};
+
+// ---------------------------------------------------------------- Agent 调参域
+
+/** 循环状态（GLOSSARY 调参任务/审批门；agent_config.state + task.updated 载荷） */
+export type AgentState = "idle" | "running" | "waiting_approval" | "paused" | "done" | "terminated";
+
+/** 决策归档行（GET /tasks/{id} decisions；input_summary 展开：证据/工具轨迹/重要性快照） */
+export interface AgentDecisionRec {
+  round_no: number;
+  changes: Record<string, number>;
+  clamps: { key: string; requested: unknown; reason: string }[];
+  analysis: string;
+  param_importance?: { keys?: { key: string; rho: number }[] } | null;
+  evidence?: { analyzed?: boolean; top_confusion?: { gt: string; pred: string; n: number }[]; worst_images?: { image: string; score: number }[]; note?: string } | null;
+  tool_traces: { tool: string; args?: Record<string, unknown> }[];
+  at: string | null;
+}
+
+/** Agent 轮决策历史项（agent_config.history[]；verdict 为人工裁决回写） */
+export interface AgentHistoryEntry {
+  at: string;
+  analysis?: string;
+  changes?: Record<string, number>;
+  clamps?: { key: string; requested: unknown; reason: string }[];
+  verdict?: "approved" | "approve_with_changes" | "rejected" | "auto";
+}
+
+/** 任务详情（GET /tasks/{id}；agent_config 整块 + decisions 决策归档） */
+export interface TaskDetail {
+  id: number;
+  uid: string;
+  name: string;
+  source: string;
+  status: string;
+  base_model: string;
+  train_args: Record<string, unknown> | null;
+  agent_config: {
+    state?: AgentState;
+    max_rounds?: number;
+    objective?: string;
+    approval?: string;
+    history?: AgentHistoryEntry[];
+    stop_reason?: string | null;
+    pause_reason?: string | null;
+    token_usage?: number | null;
+    budget_total_tokens?: number | null;
+    budget_round_seconds?: number | null;
+    budget_round_fired?: string | null;
+    preapproval?: { remaining?: number } | null;
+    pruned_rounds?: { round: number; at_epoch: number; value: number; baseline_median: number; delta: number }[];
+  } | null;
+  dataset: string;
+  split_uid: string | null;
+  format_id: string;
+  agent_state: string | null;
+  runs: { uid: string; round_no: number; status: string; pruned: boolean; primary_metric: number | null; error: string | null }[];
+  decisions: AgentDecisionRec[];
+}
+
+export type ApproveAction = "approve" | "approve_with_changes" | "reject" | "stop";
+
+export const tasksApi = {
+  get: (id: number) => request<TaskDetail>(`/api/v1/tasks/${id}`),
+  /** 审批四态（ADR 0007）：approve / approve_with_changes（附调整后超参）/ reject / stop */
+  approve: (id: number, body: { action: ApproveAction; hyperparameters?: Record<string, number> }) =>
+    request<{ task_id: number; action: string }>(`/api/v1/tasks/${id}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  /** 批量预审：接下来 N 轮一次放行（睡前整夜计划），流水留档可审计 */
+  grantPreapproval: (id: number, rounds: number) =>
+    request<Record<string, unknown>>(`/api/v1/tasks/${id}/preapproval`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ rounds }),
+    }),
+  /** 撤销批量预审：下一轮立即回到逐轮审批 */
+  revokePreapproval: (id: number) =>
+    request<Record<string, unknown>>(`/api/v1/tasks/${id}/preapproval`, { method: "DELETE" }),
+  /** 自主档位切换（下一轮生效） */
+  setMode: (id: number, approval: "autonomous" | "supervised") =>
+    request<Record<string, unknown>>(`/api/v1/tasks/${id}/agent-mode`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ approval }),
+    }),
 };
 
 // ---------------------------------------------------------------- 错误分析（专利 7/11）
@@ -1043,6 +1132,15 @@ export const api = {
   },
   getSelfcheck: () => request<SelfcheckResult>("/api/v1/selfcheck"),
   getConfig: () => request<Record<string, unknown>>("/api/v1/config"),
+  /** 白名单部分更新（server/llm/training 节；llm 即存即生效）→ {config, restart_required} */
+  updateConfig: (body: { llm?: { base_url: string; api_key: string; model: string } }) =>
+    request<{ config: Record<string, unknown>; restart_required: boolean }>("/api/v1/config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  /** LLM 连通性测试（多模态链路可达数十秒长操作）；未配置/不可达 502 llm_unavailable */
+  llmTest: () => request<{ reply: string }>("/api/v1/config/llm-test", { method: "POST" }),
 };
 
 /**

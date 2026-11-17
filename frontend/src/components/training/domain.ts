@@ -48,3 +48,25 @@ export function fmtMetric(v: number | null | undefined): string {
 
 /** 开始时间列：同日只给时刻、跨天带日期（复用数据集域口径） */
 export const formatRunTs = formatTs;
+
+/** 循环状态徽章（GLOSSARY 审批门/调参任务；三重编码同 Run 六态口径） */
+export const AGENT_STATE_META: Record<string, { label: string; mark: string; cls: string }> = {
+  idle: { label: "待启动", mark: "○", cls: "is-neutral" },
+  running: { label: "循环中", mark: "◐", cls: "is-running" },
+  waiting_approval: { label: "等待审批", mark: "!", cls: "is-warning" },
+  paused: { label: "已暂停", mark: "◌", cls: "is-manual" },
+  done: { label: "已完成", mark: "✓", cls: "is-ok" },
+  terminated: { label: "已终止", mark: "−", cls: "is-neutral" },
+};
+
+export function agentStateMeta(state: string | null | undefined): { label: string; mark: string; cls: string } {
+  return AGENT_STATE_META[state ?? ""] ?? { label: state ?? "—", mark: "○", cls: "is-neutral" };
+}
+
+/** 审批裁决回写标记（agent_config.history[].verdict → 中文） */
+export const VERDICT_ZH: Record<string, string> = {
+  approved: "放行",
+  approve_with_changes: "改后放行",
+  rejected: "拒绝本轮",
+  auto: "预审自动放行",
+};
