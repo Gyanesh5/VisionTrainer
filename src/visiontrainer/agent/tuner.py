@@ -135,6 +135,7 @@ def approve(manager, task_id: int, action: str, hyperparameters: dict | None = N
     patch: dict = {}
     queued_uids: list[str] = []
     to_archive = False
+    task_status: str | None = None
     with manager.Session() as s:
         from visiontrainer.db.models import Run, Task
 
@@ -144,6 +145,7 @@ def approve(manager, task_id: int, action: str, hyperparameters: dict | None = N
         if t.source != "agent":
             raise ValueError("非 Agent 任务没有审批门")
         state = (t.agent_config or {}).get("state")
+        task_status = t.status
         if norm == "stop":
             if state not in ("waiting_approval", "paused"):
                 raise ValueError(f"当前状态 {state} 不在审批/暂停点")
@@ -177,6 +179,11 @@ def approve(manager, task_id: int, action: str, hyperparameters: dict | None = N
         except Exception:
             pass
     _mutate_agent_config(manager.Session, task_id, lambda cfg, _t: cfg.update(patch))
+    if "state" in patch:  # 票 119：裁决落库即广播（终止态再无循环事件源，不广播只能手动刷新）
+        from ..ws import publish_threadsafe
+
+        publish_threadsafe({"type": "task.updated", "task_id": task_id,
+                            "status": task_status, "agent_state": patch["state"]})
     if queued_uids:  # 走 manager 统一取消链（排队轮的取消要过队列簿记，不直改 DB 状态）
         for uid in queued_uids:
             try:

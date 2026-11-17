@@ -364,3 +364,29 @@ def test_waiting_wake_applies_pending_verdict(factory, tmp_path, monkeypatch):
         assert len(runs) == 3 and runs[2].round_no == 3   # 已建轮
         assert dec[0].changes["lr0"] == 0.1  # 归档含改后参数
         assert ac["state"] in ("terminated", "running")
+
+
+# ---------------------------------------------------------------- 审批广播（票 119）
+
+@pytest.mark.parametrize("action,agent_state", [("approve", "running"), ("stop", "terminated")])
+def test_approve_publishes_task_updated_on_verdict(factory, tmp_path, monkeypatch, action, agent_state):
+    """裁决落库即广播 task.updated（票 119）：载荷形状与既有事件逐字一致（api.md WS 契约）。
+    终止态无后续循环事件源（造数/线程已死时尤甚），不广播则审批横幅只能手动刷新。"""
+    import visiontrainer.ws as ws_mod
+    from visiontrainer.agent import tuner as tuner_mod
+
+    manager = TrainingManager(factory, ManagerSettings(
+        training_python="python", trainer_entry="x", runs_dir=tmp_path / "runs"))
+    with factory() as s:
+        t = Task(uid=f"tkbc{action}", name="审批广播", source="agent", status="running",
+                 base_model="stub", dataset="good", format_id="yolo",
+                 agent_config={"state": "waiting_approval"})
+        s.add(t)
+        s.commit()
+        tid = t.id
+    captured: list[dict] = []
+    monkeypatch.setattr(ws_mod, "publish_threadsafe", captured.append)
+    res = tuner_mod.approve(manager, tid, action)
+    assert res["action"] == action
+    assert captured == [{"type": "task.updated", "task_id": tid,
+                         "status": "running", "agent_state": agent_state}]
