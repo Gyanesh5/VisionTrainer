@@ -34,6 +34,7 @@ const artifacts = vi.mocked(runsApi.artifacts);
 const logs = vi.mocked(runsApi.logs);
 const retry = vi.mocked(runsApi.retry);
 const deleteRun = vi.mocked(runsApi.delete);
+const forceStop = vi.mocked(runsApi.forceStop);
 const signThumbs = vi.mocked(signThumbUrls);
 
 /** jsdom 无 canvas：图表按空块兜底（echarts init 在 OperChart 内 try/catch），
@@ -168,6 +169,19 @@ describe("RunDetailPage 头卡", () => {
       });
     });
     expect(screen.getByTestId("run-progress").textContent).toContain("epoch 9/50");
+  });
+
+  it("stopping_state_shows_enabled_force_stop_button_wired_to_kill_link", async () => {
+    // stopping 窗口实点复核（票 119）：stub 吞 SIGTERM 的卡死形态下「强制终止」可用，
+    // 点击走 POST /runs/{uid}/force-stop（manager killpg SIGKILL 链）；优雅停止入口退位
+    mockRun({ status: "stopping", progress: { epoch: 30, epochs_total: 300, batch: 1, batches_total: 2 } });
+    const user = userEvent.setup();
+    renderRun();
+    const force = await screen.findByTestId("run-force-stop");
+    expect(force).toBeEnabled();
+    expect(screen.queryByTestId("run-stop")).not.toBeInTheDocument();
+    await user.click(force);
+    await waitFor(() => expect(forceStop).toHaveBeenCalledWith("aaaa1111"));
   });
 
   it("cancelled_run_badge_is_neutral_and_retry_offered", async () => {
