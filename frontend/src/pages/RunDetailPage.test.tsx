@@ -112,6 +112,7 @@ function renderRun(uid = "aaaa1111") {
       <MemoryRouter initialEntries={[`/training/runs/${uid}`]}>
         <Routes>
           <Route path="/training/runs/:uid" element={<RunDetailPage />} />
+          <Route path="/training/runs/:uid/analysis" element={<p>analysis-page</p>} />
           <Route path="/training" element={<p>training-list</p>} />
         </Routes>
       </MemoryRouter>
@@ -208,6 +209,16 @@ describe("RunDetailPage System 卡与产物区", () => {
 });
 
 describe("RunDetailPage 动作", () => {
+  it("done_run_offers_analysis_entry_and_non_done_does_not", async () => {
+    mockRun(); // done
+    const user = userEvent.setup();
+    renderRun();
+    const link = await screen.findByTestId("run-analysis");
+    expect(link.closest("a")).toHaveAttribute("href", "/training/runs/aaaa1111/analysis");
+    await user.click(link);
+    expect(screen.getByText("analysis-page")).toBeInTheDocument();
+  });
+
   it("retry_pins_split_via_backend_and_returns_to_records", async () => {
     mockRun({ status: "failed", error: "boom" });
     retry.mockResolvedValue({ id: 9, uid: "t9", name: "重开", status: "queued", dataset: "plate", split_uid: "abc12345" });
