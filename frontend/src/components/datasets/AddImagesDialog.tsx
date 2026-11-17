@@ -107,7 +107,7 @@ export function AddImagesDialog({
       }
     }
     try {
-      const res = await datasetsApi.expandPaths(meta.name, collectPaths(), [...skip]);
+      const res = await datasetsApi.expandPaths(collectPaths(), [...skip]);
       if (res.files.length === 0) {
         onMessage("剔除冲突项后没有要加的文件了", "warn");
         return;

@@ -589,8 +589,8 @@ export const datasetsApi = {
       body: JSON.stringify(body),
     }),
   /** 加图同名冲突的「跳过重试」载体：目录展开成文件清单并按 basename 剔除（零写入） */
-  expandPaths: (name: string, paths: string[], skip: string[]) =>
-    request<{ files: string[] }>(`/api/v1/datasets/${encodeURIComponent(name)}/expand-paths`, {
+  expandPaths: (paths: string[], skip: string[]) =>
+    request<{ files: string[] }>("/api/v1/datasets/expand-paths", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ paths, skip }),

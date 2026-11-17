@@ -379,7 +379,7 @@ describe("AddImagesDialog blocks", () => {
     });
     await user.click(screen.getByRole("button", { name: "跳过这些文件后重试" }));
     await waitFor(() =>
-      expect(expandPaths).toHaveBeenCalledWith("plate", ["/home/u/new"], expect.arrayContaining(["a.jpg", "a.json"])),
+      expect(expandPaths).toHaveBeenCalledWith(["/home/u/new"], expect.arrayContaining(["a.jpg", "a.json"])),
     );
     await waitFor(() =>
       expect(addImages).toHaveBeenLastCalledWith("plate", {

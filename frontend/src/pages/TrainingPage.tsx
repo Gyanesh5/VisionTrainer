@@ -139,6 +139,9 @@ export function TrainingPage() {
       <div className="page-head">
         <h1>训练</h1>
         <div className="page-actions">
+          <Link className="btn" data-testid="open-compare" to="/training/compare">
+            跨任务对比
+          </Link>
           <button
             type="button"
             className="btn btn-primary"
