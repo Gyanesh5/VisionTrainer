@@ -217,6 +217,9 @@ class ModelRelease(Base):
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     # 失效标注（票 126）：所属 Run 被放行删除的时刻；None=在账有效
     invalidated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 目录已清标注（review 修复）：发布目录派生物经平台清理的时刻；None=目录在账未清。
+    # 清理只动物理产物 + 本标注，账目本体（时间/指纹/run 标识）不动——只增不改。
+    cleared_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

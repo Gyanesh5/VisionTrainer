@@ -1450,6 +1450,8 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
     发布 = best 权重 + 类别表 + 阈值探索器建议置信度 + 模型指纹打包进发布目录（派生产物，
     可清理重建，不动模型真源）；签名 URL 复用缩略图签名管线模式（限时 + 不带凭据）。
     发布记录只增不改：重复发布同一 Run 生成新目录（序号递增）与新记录。
+    发布资格（票 123「对任意 Run 权重发起发布」）：权重文件在盘即可，状态不限——cancelled
+    但权重在盘的 Run 可发布；缺失如实 400（与票 121 真源清单「缺失如实标注」同口径）。
     建议置信度口径同 deploy_run（M8 04）：阈值探索器 recommended_conf 优先，回退 train_args.conf。
     """
     import shutil
@@ -1466,8 +1468,6 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         run = s.query(Run).filter(Run.uid == uid).one_or_none()
         if run is None:
             raise _http_err("not_found", f"Run 不存在：{uid}", 404)
-        if run.status != "done":
-            raise _http_err("state_conflict", "仅已完成的运行可发布", 409)
         best_pt = run.best_pt
         if not best_pt and run.run_dir:  # 历史数据兜底：DB 字段缺失但产物在盘
             cand = Path(run.run_dir) / "weights" / "best.pt"
@@ -1552,9 +1552,81 @@ def list_releases(manager) -> dict:
               "version": (m.payload or {}).get("version", m.fingerprint),
               "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
               "invalidated": m.invalidated_at is not None,
+              "dir_cleared": m.cleared_at is not None,
               "created_at": m.created_at.isoformat(timespec="seconds"),
               "url_expires_at": m.url_expires_at.isoformat(timespec="seconds"),
               "url_expired": m.url_expires_at < now,
               "recommended_conf": (m.payload or {}).get("recommended_conf"),
               "classes": (m.payload or {}).get("classes") or []} for m, r, t in rows]
     return {"releases": items}
+
+
+def release_library(manager, release_dir: str | None = None) -> dict:
+    """发布目录视图（review 修复）：子目录 + 体积 + 时间 + 关联发布记录，管理入口的数据面。
+
+    目录与 model_library 同款读法（API 层注入配置优先，回退盘上 config）；
+    关联记录按 release_dir 匹配 model_releases（重复发布序号递增，一目录一记录）。
+    """
+    from ..config import load_config
+    from visiontrainer.db.models import ModelRelease, Run, Task
+
+    root = Path(release_dir or load_config().get("training", {}).get(
+        "release_dir", "~/visiontrainer/releases")).expanduser()
+    with manager.Session() as s:
+        rels = s.query(ModelRelease).order_by(ModelRelease.id).all()
+        run_ids = {m.run_id for m in rels}
+        runs = {r.id: r for r in s.query(Run).filter(Run.id.in_(run_ids)).all()} if run_ids else {}
+        tasks = {t.id: t for t in s.query(Task).filter(
+            Task.id.in_({r.task_id for r in runs.values()})).all()} if runs else {}
+    by_dir: dict[str, list[ModelRelease]] = {}
+    for m in rels:
+        by_dir.setdefault(m.release_dir, []).append(m)
+    items = []
+    if root.is_dir():
+        for d in sorted(root.iterdir()):
+            if not d.is_dir() or d.name.startswith("."):
+                continue
+            size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+            matched = by_dir.get(str(d)) or []
+            first = matched[0] if matched else None
+            run = runs.get(first.run_id) if first else None
+            task = tasks.get(run.task_id) if run else None
+            items.append({"name": d.name, "path": str(d), "size_mb": round(size / (1 << 20), 1),
+                          "mtime": datetime.fromtimestamp(d.stat().st_mtime).isoformat(timespec="seconds"),
+                          "run_uid": run.uid if run else (first.run_uid if first else None),
+                          "task_name": task.name if task else None,
+                          "release_ids": [m.id for m in matched]})
+    return {"root": str(root), "items": items}
+
+
+def clear_release_dir(manager, name: str, release_dir: str | None = None) -> dict:
+    """清理发布目录（review 修复，票 126 派生语义）：只删物理产物，不动 model_releases 账目。
+
+    发布记录是账目（ADR 0015 Decision 1：只增不改）——目录清理后记录保留并写
+    cleared_at 标注（目录已清可查），签名 URL 拉取如实 404；重新发布可重建
+    （新目录新记录序号递增，旧记录留档可追溯）。返回 {"deleted", "kept_releases"}。
+    """
+    import shutil
+
+    from ..config import load_config
+    from visiontrainer.db.models import ModelRelease
+
+    if not name or "/" in name or ".." in name or name.startswith("."):
+        raise _http_err("invalid_args", f"非法目录名：{name!r}", 400)
+    root = Path(release_dir or load_config().get("training", {}).get(
+        "release_dir", "~/visiontrainer/releases")).expanduser()
+    target = root / name
+    if not target.is_dir():
+        raise _http_err("not_found", f"发布目录不存在：{target}", 404)
+    # 防越界：确认解析后仍在发布库内
+    if target.resolve().parent != root.resolve():
+        raise _http_err("invalid_args", "目录不在发布库内，拒绝删除", 400)
+    with manager.Session() as s:
+        matched = s.query(ModelRelease).filter(ModelRelease.release_dir == str(target)).all()
+        now = datetime.now()
+        for m in matched:  # 只写清理标注，账目本体不动（发布记录只增不改）
+            m.cleared_at = now
+        s.commit()
+        kept = len(matched)
+    shutil.rmtree(target, ignore_errors=True)
+    return {"deleted": name, "kept_releases": kept}
