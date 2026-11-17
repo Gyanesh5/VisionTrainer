@@ -87,11 +87,11 @@ function mockAll({ dsListSplitsRet = splits, preview = previewShared } = {}) {
   tCreate.mockResolvedValue({ id: 1, uid: "t1", name: "x", status: "queued", dataset: "plate", split_uid: "abc12345" });
 }
 
-function renderWizard() {
+function renderWizard(initialDataset?: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <TrainingWizard onClose={() => {}} />
+      <TrainingWizard onClose={() => {}} initialDataset={initialDataset} />
     </QueryClientProvider>,
   );
 }
@@ -232,6 +232,34 @@ describe("TrainingWizard 数据与模型", () => {
     // 30s/epoch × 50 = 1500s = 25m
     await waitFor(() => expect(line.textContent).toContain("25m"));
     expect(line.textContent).toContain("3 个 Run 中位 30s/epoch");
+  });
+
+  it("initial_dataset_prefills_selection_with_suggested_model_and_stays_editable", async () => {
+    // 回链预选（票 119）：?dataset= 带入 → 走手选同链路（seg 集带出 yolo11n-seg）；
+    // 预填不是锁死——换选另一数据集即生效
+    mockAll();
+    dsList.mockResolvedValue([seg, plate]);
+    dsGet.mockResolvedValue({ ...seg, classes: [] });
+    const user = userEvent.setup();
+    renderWizard("cells");
+
+    const select = screen.getByTestId("wiz-dataset") as HTMLSelectElement;
+    await waitFor(() => expect(select.value).toBe("cells"));
+    await waitFor(() => expect((screen.getByTestId("wiz-model") as HTMLInputElement).value).toBe("yolo11n-seg"));
+
+    // 预填不是锁死：改选 plate 后模型建议随任务类型走
+    await user.selectOptions(select, "plate");
+    expect(select.value).toBe("plate");
+    await waitFor(() => expect((screen.getByTestId("wiz-model") as HTMLInputElement).value).toBe("yolo11n"));
+  });
+
+  it("initial_dataset_not_in_managed_list_leaves_selection_empty", async () => {
+    // 回链参数指向不存在/外部数据集：不预填幻影值，选择器留在待选态
+    mockAll();
+    renderWizard("ghost");
+    await screen.findByTestId("wiz-dataset");
+    expect((screen.getByTestId("wiz-dataset") as HTMLSelectElement).value).toBe("");
+    expect(screen.getByTestId("wiz-summary").textContent).toContain("未选数据集");
   });
 });
 

@@ -1,5 +1,5 @@
 import { useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type RunBrief, type TaskBrief } from "../api/client";
 import { useEvents } from "../ws/useEvents";
@@ -72,8 +72,11 @@ function buildRows(tasks: TaskBrief[], openGroups: Record<string, boolean>): Dis
 
 export function TrainingPage() {
   const queryClient = useQueryClient();
+  const [searchParams] = useSearchParams();
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(loadOpenGroups);
   const [wizardOpen, setWizardOpen] = useState(false);
+  // 数据集详情「用此数据集训练」跳 /training?dataset=…（票 119）：向导预选该数据集
+  const initialDataset = searchParams.get("dataset") ?? undefined;
   // run.metrics 逐 epoch 一发（stub 链路 0.3s/轮）：门铃节流 2s，防刷新风暴
   const lastBell = useRef(0);
 
@@ -260,7 +263,9 @@ export function TrainingPage() {
         )}
       </div>
 
-      {wizardOpen && <TrainingWizard onClose={() => setWizardOpen(false)} />}
+      {wizardOpen && (
+        <TrainingWizard onClose={() => setWizardOpen(false)} initialDataset={initialDataset} />
+      )}
     </div>
   );
 }

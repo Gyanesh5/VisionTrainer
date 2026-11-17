@@ -6,6 +6,14 @@ import { MemoryRouter } from "react-router-dom";
 import { TrainingPage } from "./TrainingPage";
 import { api, type QueueSnapshot, type TaskBrief } from "../api/client";
 
+// 向导打桩：只验 TrainingPage 把 ?dataset= 传入 initialDataset（票 119 回链），
+// 向导内部预选行为由 TrainingWizard.test.tsx 覆盖
+vi.mock("../components/training/TrainingWizard", () => ({
+  TrainingWizard: ({ initialDataset }: { initialDataset?: string }) => (
+    <div data-testid="wizard-stub">initial={initialDataset ?? "none"}</div>
+  ),
+}));
+
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
   return {
@@ -132,16 +140,34 @@ function mockDefault(queue: QueueSnapshot = idleQueue) {
   getQueue.mockResolvedValue(queue);
 }
 
-function renderTrainingPage() {
+function renderTrainingPage(initialUrl = "/training") {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter>
+      <MemoryRouter initialEntries={[initialUrl]}>
         <TrainingPage />
       </MemoryRouter>
     </QueryClientProvider>,
   );
 }
+
+describe("TrainingPage ?dataset= 回链（票 119）", () => {
+  it("passes_dataset_query_param_to_wizard_as_initial_dataset", async () => {
+    const user = userEvent.setup();
+    mockDefault();
+    renderTrainingPage("/training?dataset=plate");
+    await user.click(await screen.findByTestId("open-wizard"));
+    expect(screen.getByTestId("wizard-stub").textContent).toContain("initial=plate");
+  });
+
+  it("opens_wizard_without_initial_dataset_when_no_param", async () => {
+    const user = userEvent.setup();
+    mockDefault();
+    renderTrainingPage();
+    await user.click(await screen.findByTestId("open-wizard"));
+    expect(screen.getByTestId("wizard-stub").textContent).toContain("initial=none");
+  });
+});
 
 describe("TrainingPage 记录单表（专利 6）", () => {
   it("renders_dataset_group_bands_and_run_rows_in_one_table", async () => {

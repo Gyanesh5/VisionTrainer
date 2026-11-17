@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   datasetsApi,
@@ -60,7 +60,7 @@ interface CoreParams {
   patience: number | null;
 }
 
-export function TrainingWizard({ onClose }: { onClose: () => void }) {
+export function TrainingWizard({ onClose, initialDataset }: { onClose: () => void; initialDataset?: string }) {
   const queryClient = useQueryClient();
 
   // ── 数据与模型
@@ -107,6 +107,17 @@ export function TrainingWizard({ onClose }: { onClose: () => void }) {
     const t = (dsQ.data ?? []).find((d) => d.name === name_)?.task_type ?? null;
     if (t) setBaseModel(SUGGEST_MODEL[t]);
   }
+
+  // 回链预选（票 119）：?dataset= 带入时走与手选同一链路（带出建议权重）；
+  // 仅命中托管列表才生效；预填不是锁死——选择器照常可改
+  const prefillApplied = useRef(false);
+  useEffect(() => {
+    if (prefillApplied.current || !initialDataset || !dsQ.isSuccess) return;
+    prefillApplied.current = true;
+    if ((dsQ.data ?? []).some((d) => d.name === initialDataset && d.form === "managed")) {
+      pickDataset(initialDataset);
+    }
+  }, [initialDataset, dsQ.isSuccess, dsQ.data]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nonDefaults = useMemo(() => collectNonDefaults(groups, values), [groups, values]);
   const modifiedCount = Object.keys(nonDefaults).length;
