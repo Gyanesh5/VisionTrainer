@@ -112,27 +112,3 @@ def test_by_class_counts_instances():
     assert view["per_image"][0]["labels"] == ["car", "person"]  # 筛图仍按类名去重
 
 
-# ---------------------------------------------------------------- 下钻过滤（02 号票前端谓词的纯函数底座）
-
-def test_drill_filter_predicate():
-    from visiontrainer.ui.pages import _drill_rows, _rect_from_areas
-
-    entries = [
-        _entry(A, [{"label": "car", "cx": 0.5, "cy": 0.5}]),          # 1 目标，中心中
-        _entry(B, [{"label": "car", "cx": 0.05, "cy": 0.05},
-                   {"label": "person", "cx": 0.1, "cy": 0.1}]),        # 2 目标，中心左上
-    ]
-    payload = compose_view(build_stats(entries, "detect", ["car", "person"], "ds", "fp05"),
-                           _split([A], [B]))
-
-    assert [r["image"] for r, _ in _drill_rows(payload, {"class": ("car", "train")})] == [A]
-    assert [r["image"] for r, _ in _drill_rows(payload, {"bucket": 2})] == [B]
-    assert [r["image"] for r, _ in _drill_rows(payload, {"rect": [0.0, 0.2, 0.0, 0.2]})] == [B]
-    # 交集
-    assert _drill_rows(payload, {"class": ("car", "val"), "bucket": 1}) == []
-    assert len(_drill_rows(payload, {})) == 2  # 无过滤 = 全量
-
-    # brushEnd areas 解析（嵌套/扁平两种形状 + 空刷清除）
-    assert _rect_from_areas([{"coordRange": [0.1, 0.4, 0.2, 0.6]}]) == [0.1, 0.4, 0.2, 0.6]
-    assert _rect_from_areas([{"coordRange": [[0.4, 0.1], [0.6, 0.2]]}]) == [0.1, 0.4, 0.2, 0.6]
-    assert _rect_from_areas([{"coordRange": None}, {}]) is None

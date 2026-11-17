@@ -129,3 +129,34 @@ def test_xal_rescan_no_live_instance_is_false(datasets_root, client):
                side_effect=lambda **kw: False):
         r = client.post("/api/v1/datasets/plate/xal-rescan")
     assert r.status_code == 200 and r.json() == {"delivered": False}
+
+
+# ---------------------------------------------------------------- open_in_xal 解释器回退与失败语义（原 pages 胶水语义收编）
+
+def test_open_in_xal_falls_back_to_platform_interpreter(monkeypatch):
+    """training.python 未配置：回退平台解释器调起（入口跑在任何可用 venv，探测归入口）。"""
+    captured: dict = {}
+
+    monkeypatch.setattr("visiontrainer.datasets.xal.load_config", lambda: {"training": {}})
+    monkeypatch.setattr("visiontrainer.datasets.xal.subprocess.Popen",
+                        lambda argv, **kw: captured.update(argv=argv, **kw))
+    from visiontrainer.datasets.xal import open_in_xal
+    import sys
+
+    open_in_xal("/tmp/x.png")
+    assert captured["argv"][0] == sys.executable
+
+
+def test_open_in_xal_spawn_failure_raises(monkeypatch):
+    """spawn 失败：OSError 透传（REST 层转错误信封，UI toast 由前端渲染）。"""
+    monkeypatch.setattr("visiontrainer.datasets.xal.load_config",
+                        lambda: {"training": {"python": "/opt/xal-venv/python"}})
+
+    def fail_popen(argv, **kwargs):
+        raise OSError("No such file or directory: '/opt/xal-venv/python'")
+
+    monkeypatch.setattr("visiontrainer.datasets.xal.subprocess.Popen", fail_popen)
+    from visiontrainer.datasets.xal import open_in_xal
+
+    with pytest.raises(OSError):
+        open_in_xal("/data/img/1.jpg")

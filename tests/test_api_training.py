@@ -79,7 +79,7 @@ def test_run_artifacts_lists_run_dir_images_or_empty(datasets_root, detect_sourc
         "check_occupancy": False,
     })
     build_dataset("art", "detect", str(detect_source))
-    with TestClient(create_app(cfg=cfg, with_ui=False)) as c:
+    with TestClient(create_app(cfg=cfg, serve_frontend=False)) as c:
         r = c.post("/api/v1/tasks", json={"name": "art-demo", "base_model": "stub",
                                           "dataset": "art", "epochs": 1})
         uid = c.get("/api/v1/tasks").json()[0]["runs"][0]["uid"]

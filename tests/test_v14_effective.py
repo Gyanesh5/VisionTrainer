@@ -44,7 +44,7 @@ def eff_ctx(tmp_path: Path, datasets_root: Path, detect_source: Path,
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{db}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     client = TestClient(app)  # 不进 lifespan：队列线程不自动出队，由测试显式触发
     return SimpleNamespace(client=client, mgr=app.state.manager, ds_dir=ds_dir,
                            split=split, root=datasets_root, db=db, tmp=tmp_path,

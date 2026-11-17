@@ -25,7 +25,7 @@ def cmp_client(tmp_path: Path, datasets_root, detect_source):
                         "db_url": f"sqlite:///{tmp_path / 'cmp.db'}",
                         "model_lib_dir": str(tmp_path / "models"),
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         yield c, tmp_path / "models"
 

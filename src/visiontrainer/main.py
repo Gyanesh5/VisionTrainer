@@ -1,8 +1,9 @@
-"""平台入口：FastAPI 应用 + NiceGUI 页面 + WebSocket 事件通道。
+"""平台入口：FastAPI 应用 + React SPA 静态托管 + WebSocket 事件通道。
 
-架构约定（ADR 0001/0002）：
+架构约定（ADR 0001/0002/0014）：
 - Runner 与 FastAPI 同进程；训练子进程脱离启动，平台重启不杀训练。
-- UI（NiceGUI）是薄层：业务数据全走 /api（REST）与 /ws（事件），换 UI 框架不动契约。
+- UI（frontend/ React SPA）是薄层：业务数据全走 /api（REST）与 /ws（事件），
+  构建产物由本应用静态托管，单进程部署无 Node 服务。
 """
 
 from __future__ import annotations
@@ -13,15 +14,36 @@ from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-
-from nicegui import ui
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from .api import router as api_router
 from .config import load_config
 from .db.models import init_db
 from .training.manager import ManagerSettings, TrainingManager, set_manager
-from .ui.pages import mount as mount_ui
 from .ws import bind_loop, stream, subscribe, unsubscribe
+
+_FRONTEND_DIST = Path(__file__).parent.parent.parent / "frontend" / "dist"
+
+
+def _mount_frontend(app: FastAPI) -> bool:
+    """静态托管 React SPA：/assets 走文件、其余非 API 路径回落 index.html（react-router 深链）。
+
+    Returns:
+        dist 是否存在并完成挂载（缺失时仅跳过——测试/纯 API 场景照常启动）。
+    """
+    if not (_FRONTEND_DIST / "index.html").is_file():
+        return False
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_DIST / "assets"), name="assets")
+
+    @app.get("/{spa_path:path}", include_in_schema=False)
+    async def spa_fallback(spa_path: str) -> FileResponse:
+        candidate = _FRONTEND_DIST / spa_path
+        if spa_path and candidate.is_file() and candidate.resolve().is_relative_to(_FRONTEND_DIST.resolve()):
+            return FileResponse(candidate)
+        return FileResponse(_FRONTEND_DIST / "index.html")
+
+    return True
 
 
 def _default_trainer_entry() -> str:
@@ -40,8 +62,8 @@ def _default_test_infer_entry() -> str:
     return str(__import__("pathlib").Path(__file__).parent / "training" / "test_infer_entry.py")
 
 
-def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
-    """构建应用（可注入配置；测试用 with_ui=False 并传入 stub 训练环境）。"""
+def create_app(cfg: dict | None = None, serve_frontend: bool = True) -> FastAPI:
+    """构建应用（可注入配置；测试传 stub 训练环境，serve_frontend=False 跳过 SPA 挂载）。"""
     cfg = cfg or load_config()
     training = cfg.get("training", {})
     settings = ManagerSettings(
@@ -88,6 +110,11 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
     app.state.cfg = cfg  # 自检等系统域按注入配置而非盘上 config.toml（测试可注入）
     set_manager(manager)
 
+    @app.get("/favicon.ico", include_in_schema=False)
+    async def favicon() -> FileResponse:
+        """标签页图标：包内静态资产，不随 SPA 挂载条件（dist 缺失也须可用）。"""
+        return FileResponse(Path(__file__).parent / "static" / "favicon.ico")
+
     try:
         from .agent.mcp_server import mount_mcp
 
@@ -110,18 +137,8 @@ def create_app(cfg: dict | None = None, with_ui: bool = True) -> FastAPI:
         finally:
             unsubscribe(q)
 
-    if with_ui:
-        mount_ui()
-        # language=zh-CN：Quasar 内置组件文案中文化（NiceGUI 自带 zh-CN 语言包）
-        # reconnect_timeout=10：默认 3s 推导出心跳 ping 4s/超时 2s，大网格渲染风暴
-        # （质量审计数百卡缩略图回填）会卡住浏览器主线程 >2s 发不出 PONG → 服务端
-        # 断连 → 实例删除 → 重连被拒 → 整页 reload（2026-09-21 断连事故同病灶）。
-        # 放宽后 ping 8s/超时 4s/重连宽限 10s，渲染尖峰不再误杀连接。
-        # favicon 必须传包内绝对路径：NiceGUI 按 Path 判存在后自动挂 /favicon.ico 路由，
-        # 相对路径按进程 CWD 解析，服务从其他目录启动会静默回落默认图标。
-        ui.run_with(app, title="VisionTrainer", storage_secret="visiontrainer-dev-secret",
-                    language="zh-CN", reconnect_timeout=10.0,
-                    favicon=str(Path(__file__).parent / "ui" / "static" / "favicon.ico"))
+    if serve_frontend:
+        app.state.frontend_mounted = _mount_frontend(app)
     return app
 
 

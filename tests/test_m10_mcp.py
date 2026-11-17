@@ -115,7 +115,7 @@ def test_mcp_submit_approval_same_gate(tmp_path: Path, datasets_root, detect_sou
     fake_chat.n = 0
     monkeypatch.setattr(tuner_mod, "chat", fake_chat)
 
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     server = build_mcp_server(app.state.manager)
     with TestClient(app) as client:
         r = client.post("/api/v1/tasks", json={
@@ -170,7 +170,7 @@ def test_mount_mcp_and_rest_unaffected(tmp_path: Path, datasets_root, detect_sou
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     assert any(getattr(r, "path", "") == "/mcp" for r in app.routes)  # 已挂载
     with TestClient(app) as client:
         assert client.get("/api/v1/tasks").status_code == 200  # REST 不受影响
@@ -190,5 +190,5 @@ def test_mount_mcp_and_rest_unaffected(tmp_path: Path, datasets_root, detect_sou
     with monkey.context():
         builtins.__import__ = fake_import
         assert build_mcp_server(app.state.manager) is None
-        app2 = create_app(cfg=cfg, with_ui=False)
+        app2 = create_app(cfg=cfg, serve_frontend=False)
         assert not any(getattr(r, "path", "") == "/mcp" for r in app2.routes)

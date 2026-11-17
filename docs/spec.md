@@ -7,9 +7,9 @@ Version 1.4 · 2026-11-03 · v1.0（2026-09-06）由 wayfinder 地图 13 张决�
 ## 1. 总体架构
 
 ```
-浏览器（NiceGUI 薄层 UI，中文）
+浏览器（React SPA 薄层 UI，中文；frontend/ 构建产物由 FastAPI 静态托管）
    │ REST /api/v1（docs/api.md）  WS /ws/events（七事件）
-FastAPI + Runner（同进程；asyncio 单飞队列）──── SQLite（SQLAlchemy 2.0，schema 6）
+FastAPI + Runner（同进程；asyncio 单飞队列）──── SQLite（SQLAlchemy 2.0；Alembic 迁移，baseline schema 6）
    │ Popen(start_new_session)                       │
 Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染管线
    ├─ on_fit_epoch_end callback → WS 推送           （前端曲线 + Agent 双消费端）
@@ -19,7 +19,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 ~/Documents/x-anylabeling-models（回注目标）← 一键部署
 ```
 
-技术栈 [T8, ADR 0002]：Python 3.12 · uv · FastAPI · NiceGUI 3.x（UI 薄层，契约框架无关）· SQLite + SQLAlchemy 2.0 · TOML 配置（密钥不进 git）。平台 venv 无 torch；训练子进程指向配置的外部 python（vendor/X-AnyLabeling 子模块 .venv，[ADR 0008](adr/0008-x-anylabeling-vendor-submodule.md)，固定 v4.0.5）。
+技术栈 [T8, ADR 0002/0014]：Python 3.12 · uv · FastAPI · 前端 React 18 + TypeScript + Vite SPA（UI 薄层，契约框架无关；构建产物同进程静态托管，运行期零 Node）· SQLite + SQLAlchemy 2.0 · TOML 配置（密钥不进 git）。平台 venv 无 torch；训练子进程指向配置的外部 python（vendor/X-AnyLabeling 子模块 .venv，[ADR 0008](adr/0008-x-anylabeling-vendor-submodule.md)，固定 v4.0.5）。UI 设计令牌真相源 = 根 `DESIGN.md`（industrial-impeccable 纪律），产品上下文 = `PRODUCT.md`。
 
 ## 2. 功能规格
 
