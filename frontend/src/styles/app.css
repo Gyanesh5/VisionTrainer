@@ -1329,3 +1329,100 @@ body {
     animation: none !important;
   }
 }
+
+/* ---------------------------------------------------------------- 训练页（票 110 批 1） */
+
+/* Run 六态徽章补充档位（DESIGN.md §3：cancelled 中性灰不是失败；stopping 手动语义） */
+.badge.is-neutral {
+  color: var(--chrome-text-dim);
+}
+
+.badge.is-manual {
+  color: var(--state-manual);
+}
+
+/* 队列总貌（D 族 L1）：色块状态 + 位次，只监不控 */
+.queue-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queue-line {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.queue-progress {
+  color: var(--chrome-text-dim);
+}
+
+/* 进度微条：跑动宽度，无循环动画（DESIGN.md §5 数据更新指示） */
+.queue-bar {
+  display: inline-block;
+  width: 120px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--chrome-bg);
+  border: 1px solid var(--chrome-border);
+  overflow: hidden;
+}
+
+.queue-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--state-running);
+}
+
+/* 训练记录单表（专利 6）：组头灰带 colspan 行 + Run 行同表 */
+.run-table td {
+  padding: 6px 10px;
+}
+
+.run-table .group-row td {
+  background: var(--chrome-bg);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.run-table .group-row:hover td {
+  background: color-mix(in srgb, var(--chrome-bg) 80%, var(--chrome-border));
+}
+
+.group-caret {
+  display: inline-block;
+  width: 16px;
+  color: var(--chrome-text-dim);
+}
+
+.group-name {
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.group-count {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+  margin-right: 8px;
+}
+
+.run-row td {
+  white-space: nowrap;
+}
+
+.run-link {
+  color: var(--chrome-text);
+  text-decoration: none;
+}
+
+.run-row:hover {
+  background: var(--chrome-bg);
+}
+
+.run-row:hover .run-link {
+  color: var(--chrome-accent);
+}

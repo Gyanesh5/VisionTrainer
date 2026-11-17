@@ -587,13 +587,45 @@ export interface TaskBrief {
   name: string;
   status: string;
   dataset: string;
-  runs: {
-    uid: string;
-    round_no: number;
-    status: string;
-    primary_metric: number | null;
-    pruned: boolean;
-  }[];
+  runs: RunBrief[];
+  /** 以下字段训练页消费（service.list_tasks 全量回显；部署页不读，保持可缺省） */
+  uid?: string;
+  source?: string;
+  base_model?: string;
+  split_uid?: string | null;
+  format_id?: string;
+  created_at?: string | null;
+  rounds?: number;
+  primary_metric?: number | null;
+  agent_state?: string | null;
+  progress?: string;
+  prog_frac?: number | null;
+  block_reason?: string | null;
+}
+
+/** Run 概要行（GET /api/v1/tasks 的 runs 列表项，训练记录单表数据面） */
+export interface RunBrief {
+  uid: string;
+  round_no: number;
+  /** 六态：queued/running/stopping/done/failed/cancelled（DESIGN.md §3 状态映射） */
+  status: string;
+  primary_metric: number | null;
+  pruned: boolean;
+  error?: string | null;
+  /** 实际产出 epoch 数（终态「共 N epoch」口径，取消零 epoch 空轮=0） */
+  epochs?: number;
+  progress?: string;
+  prog_frac?: number | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  block_reason?: string | null;
+}
+
+/** 队列当前态（GET /api/v1/queue，queue.updated 事件的 REST 补齐源） */
+export interface QueueSnapshot {
+  running_uid: string | null;
+  queued_uids: string[];
+  block_reason: string | null;
 }
 
 export interface DeployStartResult {
@@ -611,6 +643,7 @@ export const api = {
   getDeployments: () => request<DeploymentsResult>("/api/v1/deployments"),
   getModelLibrary: () => request<ModelLibraryResult>("/api/v1/model-library"),
   listTasks: () => request<TaskBrief[]>("/api/v1/tasks"),
+  getQueue: () => request<QueueSnapshot>("/api/v1/queue"),
   deployRun: (uid: string) =>
     request<DeployStartResult>(`/api/v1/runs/${encodeURIComponent(uid)}/deploy`, {
       method: "POST",
