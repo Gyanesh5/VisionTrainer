@@ -466,6 +466,18 @@ function SourcePanel({ meta }: { meta: DatasetDetail }) {
         <span className="meta-label">真源目录</span>
         <span className="meta-value mono">{meta.source_dir ?? "—"}</span>
       </div>
+      <div className="meta-row" data-testid="source-diff-row">
+        <span className="meta-label">变动</span>
+        <span className="meta-value">
+          {meta.fingerprint_stale === true
+            ? "当前指纹与账本指纹不一致——真源有未入账的改标/加图/删图，打开本页已自动对账（重校验 + 重算画像）"
+            : meta.fingerprint_stale === false
+              ? "与账本指纹一致（source_fingerprint 相同）"
+              : "尚无校验账本（未建指纹）"}
+          {(meta.validation_summary?.source_fingerprint ?? "") &&
+            ` · 账本 ${meta.validation_summary?.source_fingerprint?.slice(0, 12)}`}
+        </span>
+      </div>
       <p className="form-hint">
         真源 source/ 是唯一标注真源：平台只在这里增补与正规化，用户直接投放的文件打开详情时自动对账入账。
       </p>

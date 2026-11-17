@@ -160,6 +160,73 @@ describe("DatasetDetailPage status flow", () => {
     expect(reconcile).not.toHaveBeenCalled();
   });
 
+  it.each([
+    [true, "当前指纹与账本指纹不一致", "打开本页已自动对账"],
+    [false, "与账本指纹一致", "source_fingerprint 相同"],
+    [null, "尚无校验账本", "未建指纹"],
+  ])("source_diff_row_shows_fingerprint_state_stale=%s", async (stale, fragA, fragB) => {
+    get.mockResolvedValue({
+      ...baseMeta,
+      fingerprint_stale: stale,
+      validation_summary: {
+        ...baseMeta.validation_summary!,
+        source_fingerprint: "c62e51c3a09b4d7e8f12",
+      },
+    });
+    reconcile.mockResolvedValue({ changed: false });
+    renderDetail();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "来源" }));
+    const row = await screen.findByTestId("source-diff-row");
+    expect(row.textContent).toContain(fragA);
+    expect(row.textContent).toContain(fragB);
+    // 账本指纹只露前 12 位（NiceGUI 同款口径）
+    expect(row.textContent).toContain("账本 c62e51c3a09b");
+    expect(row.textContent).not.toContain("c62e51c3a09b4d7e8f12");
+  });
+
+  it("source_diff_row_omits_ledger_prefix_when_no_fingerprint_recorded", async () => {    get.mockResolvedValue({
+      ...baseMeta,
+      validation_summary: { ok: true, total_images: 128, negatives: 8 },
+    });
+    renderDetail();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("button", { name: "来源" }));
+    const row = await screen.findByTestId("source-diff-row");
+    expect(row.textContent).toContain("与账本指纹一致");
+    expect(row.textContent).not.toContain("账本 ");
+  });
+
+  it("shows_stale_badge_while_fingerprint_lags_ledger", async () => {
+    get.mockResolvedValue({
+      ...baseMeta,
+      fingerprint_stale: true,
+      validation_summary: { ok: true, total_images: 130 },
+    });
+    reconcile.mockResolvedValue({ changed: false });
+    renderDetail();
+    await screen.findByTestId("status-cards");
+    // 指纹落后期间琥珀徽章可见；对账无变化时账目不刷新、徽章保持
+    expect(screen.getByText("账本落后真源")).toBeInTheDocument();
+    expect(reconcile).toHaveBeenCalledTimes(1);
+  });
+
+  it("stale_badge_clears_after_reconcile_refreshes_meta", async () => {
+    const staleMeta = {
+      ...baseMeta,
+      fingerprint_stale: true,
+      validation_summary: { ok: true, total_images: 130 },
+    };
+    get.mockResolvedValueOnce(staleMeta); // 首屏
+    get.mockResolvedValueOnce({ ...baseMeta, fingerprint_stale: false }); // 对账后 invalidateAll 重拉
+    reconcile.mockResolvedValue({ changed: true, revalidated: true, total_images: 130, corrupted: 0 });
+    renderDetail();
+    expect(await screen.findByText("账本落后真源")).toBeInTheDocument();
+    // 对账完成 → 详情重读 → 指纹已前移 → 琥珀徽章消失（对账提示卡仍在）
+    await waitFor(() => expect(screen.queryByText("账本落后真源")).not.toBeInTheDocument());
+    expect(screen.getByText(/真源已变：重校验 130 张完成/)).toBeInTheDocument();
+  });
+
   it("external_dataset_shows_readonly_path_without_status_cards", async () => {
     get.mockResolvedValue({
       name: "ext",
