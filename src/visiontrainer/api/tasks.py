@@ -152,9 +152,11 @@ def get_task(task_id: int, request: Request):
 
 @router.delete("/tasks/{task_id}")
 @_maps_errors
-def delete_task(task_id: int, request: Request, delete_files: bool = False):
-    tsvc.delete_task(_manager(request), task_id, delete_files)
-    return {"deleted": task_id}
+def delete_task(task_id: int, request: Request, delete_files: bool = False, force: bool = False):
+    """删除任务（级联删行，磁盘默认保留）；含已部署/已发布 Run 时默认阻止
+    （票 126：409 delete_conflict），force=true 显式放行并标注账目失效。"""
+    out = tsvc.delete_task(_manager(request), task_id, delete_files, force=force)
+    return {"deleted": task_id, **out}
 
 
 @router.get("/runs/{uid}")
@@ -165,11 +167,13 @@ def get_run(uid: str, request: Request):
 
 @router.delete("/runs/{uid}")
 @_maps_errors
-def delete_run(uid: str, request: Request, delete_files: bool = False):
+def delete_run(uid: str, request: Request, delete_files: bool = False, force: bool = False):
     """删除单条训练记录（Run）：仅终态可删，其余轮次保留（2026-10-31 用户反馈：
-    多轮任务删一轮不该连坐全部轮次）；任务被删空时连任务本身移除。"""
-    tsvc.delete_run(_manager(request), uid, delete_files)
-    return {"deleted": uid}
+    多轮任务删一轮不该连坐全部轮次）；任务被删空时连任务本身移除。
+    已部署/已发布的 Run 默认阻止（票 126：409 delete_conflict，提示列部署/发布
+    记录要点），force=true 显式放行——部署/发布记录标注失效、物理拷贝留派生目录。"""
+    out = tsvc.delete_run(_manager(request), uid, delete_files, force=force)
+    return {"deleted": uid, **out}
 
 
 @router.get("/runs/{uid}/logs")
@@ -305,10 +309,14 @@ def deploy_run(uid: str, request: Request, body: dict | None = None):
 @_maps_errors
 def release_run(uid: str, request: Request, body: dict | None = None):
     """模型发布（票 123，ADR 0015 Decision 1）：与部署分立——best 权重+元数据打包进发布目录
-    （派生产物）+ 限时签名 URL + 发布记录（只增不改）。长操作：登记 `run:{uid}:release`。"""
+    （派生产物）+ 限时签名 URL + 发布记录（只增不改）。长操作登记 `run:{uid}:release`。
+    发布目录取 body 注入 → app 配置（`training.release_dir`）→ load_config 兜底，
+    与 model-library 同款读法（票 126：派生目录位置须可注入，测试与盘上配置解耦）。"""
     body = body or {}
+    cfg = (getattr(request.app.state, "cfg", {}) or {}).get("training", {})
     with long_op(f"run:{uid}:release", f"模型发布 · {uid}", scope=uid):
-        return tsvc.release_run(_manager(request), uid, release_dir=body.get("release_dir"))
+        return tsvc.release_run(_manager(request), uid,
+                                release_dir=body.get("release_dir") or cfg.get("release_dir"))
 
 
 @router.get("/releases")

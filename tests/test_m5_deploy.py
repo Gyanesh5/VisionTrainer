@@ -184,7 +184,8 @@ def test_deploy_events_published(deploy_client):
         assert [e["action"] for e in dep_events] == ["created", "updated"], dep_events
         assert isinstance(dep_events[0]["deployment_id"], int)
 
-        # 清理删除：登记一条指向临时模型库的部署（真实链路会写真实模型库目录，不在此删除）
+        # 清理派生目录（票 126）：登记一条指向临时模型库的部署（真实链路会写真实模型库目录，
+        # 不在此删除）；清理只删目录不动部署记录（真源账目），事件 action=dir_removed
         fake = tmp_path / "models" / "fake-ev"
         fake.mkdir(parents=True, exist_ok=True)
         with manager.Session() as s:
@@ -196,9 +197,11 @@ def test_deploy_events_published(deploy_client):
         deadline = time.time() + 5
         while time.time() < deadline:
             _collect()
-            if dep_events[-1]["action"] == "removed":
+            if dep_events[-1]["action"] == "dir_removed":
                 break
             time.sleep(0.1)
-        assert [e["action"] for e in dep_events] == ["created", "updated", "removed"], dep_events
+        assert [e["action"] for e in dep_events] == ["created", "updated", "dir_removed"], dep_events
+        # 部署记录保留（清理派生物不动真源账目）：真实链路 1 条 + 本段登记 1 条
+        assert len(c.get("/api/v1/deployments").json()["deployments"]) == 2
     finally:
         wsmod.unsubscribe(q)

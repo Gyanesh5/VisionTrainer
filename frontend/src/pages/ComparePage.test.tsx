@@ -69,7 +69,7 @@ function mockBase() {
     { id: 12, name: "乙任务", status: "done", dataset: "plate", runs: [{ uid: "r2", round_no: 1, status: "done", primary_metric: 0.55, pruned: false }] },
   ]);
   getDeployments.mockResolvedValue({
-    deployments: [{ deployment_id: 1, run_uid: "r1", task_id: 11, task_name: "甲任务", model_lib_dir: "/m", verified: true, verification: {}, created_at: null }],
+    deployments: [{ deployment_id: 1, run_uid: "r1", task_id: 11, task_name: "甲任务", model_lib_dir: "/m", verified: true, verification: {}, invalidated: false, created_at: null }],
     lru_hint: null,
   });
   compareTasks.mockResolvedValue({ tasks: [mkItem(12, "乙任务", 0.55, 0.02), mkItem(11, "甲任务", 0.4, 0.01)] });

@@ -211,18 +211,66 @@ def get_task(manager, task_id: int) -> dict:
 
 
 def _purge_run_children(s, run_ids: list[int]) -> None:
-    """删除 Run 行的子表数据（epoch 指标 / GPU 采样 / 逐框错误 / Agent 决策 / 部署登记）。
-    delete_task 与 delete_run 共用——此前只清 EpochMetric，其余四表留孤儿行。"""
-    from visiontrainer.db.models import (AgentDecision, Deployment, EpochMetric, GPUSample,
-                                         RunSampleError)
+    """删除 Run 行的子表数据（epoch 指标 / GPU 采样 / 逐框错误 / Agent 决策）。
+    delete_task 与 delete_run 共用——此前只清 EpochMetric，其余表留孤儿行。
+    部署/发布记录不在此列（票 126）：它们是产线账目，删除冲突门管处置
+    （阻止或放行标注失效），不随 Run 行静默清表。"""
+    from visiontrainer.db.models import AgentDecision, EpochMetric, GPUSample, RunSampleError
 
     if not run_ids:
         return
-    for model in (EpochMetric, GPUSample, RunSampleError, AgentDecision, Deployment):
+    for model in (EpochMetric, GPUSample, RunSampleError, AgentDecision):
         s.query(model).filter(model.run_id.in_(run_ids)).delete(synchronize_session=False)
 
 
-def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
+def _delete_conflict(s, run_ids: list[int]) -> dict:
+    """删除冲突收集（票 126）：这些 Run 挂着的部署/发布记录（产线账目，ADR 0015
+    Decision 2：记录挂 Run 权重；模型库/发布目录只是派生产物）。非空即删除冲突。"""
+    from visiontrainer.db.models import Deployment, ModelRelease
+
+    deps = s.query(Deployment).filter(Deployment.run_id.in_(run_ids)).order_by(Deployment.id).all()
+    rels = s.query(ModelRelease).filter(ModelRelease.run_id.in_(run_ids)).order_by(ModelRelease.id).all()
+    return {"deployments": deps, "releases": rels}
+
+
+def _conflict_message(label: str, conflict: dict) -> str:
+    """可读提示（票 126 验收 1）：列出部署/发布记录要点（目录名、指纹）与放行路径。"""
+
+    def _join(items, fmt, cap=3):
+        shown = [fmt(x) for x in items[:cap]]
+        more = len(items) - len(shown)
+        return "、".join(shown) + (f" 等 {len(items)} 条" if more > 0 else "")
+
+    bits = []
+    if conflict["deployments"]:
+        bits.append(f"部署 {len(conflict['deployments'])} 条（"
+                    f"{_join(conflict['deployments'], lambda d: Path(d.model_lib_dir).name)}）")
+    if conflict["releases"]:
+        bits.append(f"发布 {len(conflict['releases'])} 条（"
+                    f"{_join(conflict['releases'], lambda m: (m.payload or {}).get('version') or m.fingerprint)}）")
+    return (f"删除冲突：{label} 已有产线账目——{'；'.join(bits)}。"
+            "放行后部署/发布记录随 Run 标注失效（物理拷贝留在派生目录，可追溯）；"
+            "确认删除请带 force=true 重试。")
+
+
+def _invalidate_records(s, run_ids: list[int]) -> dict:
+    """放行删除的账目处置（票 126）：部署/发布记录保留并标注失效，不静默消失。
+
+    物理拷贝留在派生目录（模型库目录/发布目录）不动；冗余 run_uid 创建时已写入，
+    Run 行删除后记录仍可对账。"""
+    from visiontrainer.db.models import Deployment, ModelRelease
+
+    now = datetime.now()
+    n_dep = s.query(Deployment).filter(Deployment.run_id.in_(run_ids),
+                                       Deployment.invalidated_at.is_(None)).update(
+        {"invalidated_at": now}, synchronize_session=False)
+    n_rel = s.query(ModelRelease).filter(ModelRelease.run_id.in_(run_ids),
+                                         ModelRelease.invalidated_at.is_(None)).update(
+        {"invalidated_at": now}, synchronize_session=False)
+    return {"deployments": n_dep, "releases": n_rel}
+
+
+def delete_task(manager, task_id: int, delete_files: bool = False, force: bool = False) -> dict:
     import shutil
 
     from visiontrainer.db.models import Run, Task
@@ -233,24 +281,38 @@ def delete_task(manager, task_id: int, delete_files: bool = False) -> None:
             raise _http_err("not_found", f"任务不存在：{task_id}", 404)
         if t.status in ("running", "stopping"):
             raise _http_err("state_conflict", "任务运行中，请先停止", 409)
+        run_ids = [rid for (rid,) in s.query(Run.id).filter(Run.task_id == task_id).all()]
+        # 删除冲突门（票 126）：任务内任一 Run 已部署/已发布即默认阻止（防绕过单 Run 门）
+        conflict = _delete_conflict(s, run_ids)
+        if conflict["deployments"] or conflict["releases"]:
+            if not force:
+                raise _http_err("delete_conflict",
+                                _conflict_message(f"任务 {task_id}（含 Run {len(run_ids)} 条）", conflict), 409)
+            invalidated = _invalidate_records(s, run_ids)
+        else:
+            invalidated = {"deployments": 0, "releases": 0}
         # 任务目录 = 库内 run_dir 的父目录（两级布局，ADR 0013）：不按 task_uid 重拼
         # 路径——那是旧 hex 布局假设，重拼打空且 ignore_errors 会吞掉失败，产物成孤儿
         run_dirs = [Path(r.run_dir) for r in s.query(Run).filter(Run.task_id == task_id)
                     if r.run_dir]
-        _purge_run_children(s, [rid for (rid,) in
-                                s.query(Run.id).filter(Run.task_id == task_id).all()])
+        _purge_run_children(s, run_ids)
         s.query(Run).filter(Run.task_id == task_id).delete()
         s.delete(t)
         s.commit()
     if delete_files:
         for task_dir in {p.parent for p in run_dirs}:
             shutil.rmtree(task_dir, ignore_errors=True)
+    return {"invalidated": invalidated}
 
 
-def delete_run(manager, uid: str, delete_files: bool = False) -> None:
+def delete_run(manager, uid: str, delete_files: bool = False, force: bool = False) -> dict:
     """删除单条训练记录（Run）：仅终态可删，其余轮次保留（2026-10-31 用户反馈：
     多轮任务删一轮不该连坐全部轮次）。任务被删空时连任务本身移除；存余轮次时
-    Task 聚合按剩余轮重算（删掉最新终态轮回落到前一轮，_aggregate 口径）。"""
+    Task 聚合按剩余轮重算（删掉最新终态轮回落到前一轮，_aggregate 口径）。
+    删除冲突门（票 126，ADR 0015 Decision 2 后果）：已部署/已发布的 Run 默认阻止
+    （409 delete_conflict，提示列记录要点）；force=true 显式放行——部署/发布记录
+    保留并标注失效（invalidated_at），物理拷贝留在模型库/发布目录（派生产物）。
+    返回 {"invalidated": {deployments, releases}}（放行时为实删标注条数）。"""
     import shutil
 
     from visiontrainer.db.models import Run, Task
@@ -262,6 +324,13 @@ def delete_run(manager, uid: str, delete_files: bool = False) -> None:
         if r.status not in ("done", "failed", "cancelled"):
             raise _http_err("state_conflict",
                             "仅已结束的训练记录可删除（运行/排队中请先停止或取消）", 409)
+        conflict = _delete_conflict(s, [r.id])
+        if conflict["deployments"] or conflict["releases"]:
+            if not force:
+                raise _http_err("delete_conflict", _conflict_message(f"Run {uid}", conflict), 409)
+            invalidated = _invalidate_records(s, [r.id])
+        else:
+            invalidated = {"deployments": 0, "releases": 0}
         task = s.get(Task, r.task_id)
         _purge_run_children(s, [r.id])
         s.query(Run).filter(Run.id == r.id).delete(synchronize_session=False)
@@ -281,6 +350,7 @@ def delete_run(manager, uid: str, delete_files: bool = False) -> None:
             shutil.rmtree(Path(run_dir).parent, ignore_errors=True)
         elif run_dir:
             shutil.rmtree(Path(run_dir), ignore_errors=True)
+    return {"invalidated": invalidated}
 
 
 def get_run(manager, uid: str) -> dict:
@@ -1035,7 +1105,12 @@ def model_library(manager, model_lib_dir: str | None = None) -> dict:
 
 
 def delete_model_dir(manager, name: str, model_lib_dir: str | None = None) -> dict:
-    """清理模型目录（M8 07）：删目录 + 同步删除 deployments 记录（登记式删除）。"""
+    """清理模型库目录（票 126 对齐派生语义）：只删派生物，不动真源账目。
+
+    ADR 0015 Decision 2：模型库目录降为派生产物（部署组装物），部署记录挂 Run 权重
+    是产线账目——目录清理后记录保留（部署发生过即历史事实，失效与否则看所属 Run
+    存续），重新部署可重建目录、run_uid 可对账。返回 {"deleted", "kept_deployments"}。
+    """
     import shutil
 
     from ..config import load_config
@@ -1051,16 +1126,14 @@ def delete_model_dir(manager, name: str, model_lib_dir: str | None = None) -> di
     # 防越界：确认解析后仍在库内
     if target.resolve().parent != lib.resolve():
         raise _http_err("invalid_args", "目录不在模型库内，拒绝删除", 400)
-    n_dep = 0
     with manager.Session() as s:
-        removed_ids = [row[0] for row in
-                       s.query(Deployment.id).filter(Deployment.model_lib_dir == str(target))]
-        n_dep = s.query(Deployment).filter(Deployment.model_lib_dir == str(target)).delete()
-        s.commit()
-    for dep_id in removed_ids:
-        publish_threadsafe({"type": "deployment.updated", "deployment_id": dep_id, "action": "removed"})
+        kept_ids = [row[0] for row in
+                    s.query(Deployment.id).filter(Deployment.model_lib_dir == str(target))]
+    for dep_id in kept_ids:  # 门铃：UI 据此刷新部署清单/真源行（派生目录已变）
+        publish_threadsafe({"type": "deployment.updated", "deployment_id": dep_id,
+                            "action": "dir_removed"})
     shutil.rmtree(target, ignore_errors=True)
-    return {"deleted": name, "removed_deployments": n_dep}
+    return {"deleted": name, "kept_deployments": len(kept_ids)}
 
 
 # ---------------------------------------------------------------- 票 121：模型真源清单
@@ -1269,7 +1342,7 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
         except Exception:  # noqa: BLE001 — 部署不被分析读取失败拖死
             pass
         imgsz = (task.train_args or {}).get("imgsz", 640)
-        deployment = Deployment(run_id=run.id, model_lib_dir=str(target),
+        deployment = Deployment(run_id=run.id, run_uid=uid, model_lib_dir=str(target),
                                 onnx_path=str(target / "model.onnx"), verified=False,
                                 verification={"status": "exporting"})
         s.add(deployment)
@@ -1352,13 +1425,17 @@ def list_deployments(manager) -> dict:
     from visiontrainer.db.models import Deployment, Run, Task
 
     with manager.Session() as s:
+        # outerjoin（票 126）：Run 被放行删除后记录仍在账（失效标注可查），不静默消失
         rows = (s.query(Deployment, Run, Task)
-                .join(Run, Deployment.run_id == Run.id)
-                .join(Task, Run.task_id == Task.id)
+                .outerjoin(Run, Deployment.run_id == Run.id)
+                .outerjoin(Task, Run.task_id == Task.id)
                 .order_by(Deployment.id.desc()).all())
-        items = [{"deployment_id": d.id, "run_uid": r.uid, "task_id": t.id, "task_name": t.name,
+        items = [{"deployment_id": d.id,
+                  "run_uid": r.uid if r else d.run_uid,
+                  "task_id": t.id if t else None, "task_name": t.name if t else None,
                   "model_lib_dir": d.model_lib_dir, "verified": d.verified,
                   "verification": d.verification or {},
+                  "invalidated": d.invalidated_at is not None,
                   "created_at": d.created_at.isoformat(timespec="seconds")} for d, r, t in rows]
         hint = ("已部署超过 5 个模型：最早登记的模型可能被桌面端下拉框 LRU 挤出（文件保留，重新加载一次即可）"
                 if len(items) > 5 else None)
@@ -1446,8 +1523,9 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
             z.write(target / "metadata.json", "metadata.json")
             z.write(target / "classes.txt", "classes.txt")
 
-        record = ModelRelease(run_id=run.id, fingerprint=fingerprint, release_dir=str(target),
-                              bundle_path=str(bundle), url_expires_at=rel.expiry(), payload=meta)
+        record = ModelRelease(run_id=run.id, run_uid=uid, fingerprint=fingerprint,
+                              release_dir=str(target), bundle_path=str(bundle),
+                              url_expires_at=rel.expiry(), payload=meta)
         s.add(record)
         s.commit()
         rid = record.id
@@ -1462,15 +1540,18 @@ def list_releases(manager) -> dict:
     from visiontrainer.db.models import ModelRelease, Run, Task
 
     with manager.Session() as s:
+        # outerjoin（票 126）：Run 被放行删除后记录仍在账（失效标注可查），不静默消失
         rows = (s.query(ModelRelease, Run, Task)
-                .join(Run, ModelRelease.run_id == Run.id)
-                .join(Task, Run.task_id == Task.id)
+                .outerjoin(Run, ModelRelease.run_id == Run.id)
+                .outerjoin(Task, Run.task_id == Task.id)
                 .order_by(ModelRelease.id.desc()).all())
     now = datetime.now()
-    items = [{"release_id": m.id, "run_uid": r.uid, "task_id": t.id, "task_name": t.name,
-              "round_no": r.round_no, "fingerprint": m.fingerprint,
+    items = [{"release_id": m.id, "run_uid": r.uid if r else m.run_uid,
+              "task_id": t.id if t else None, "task_name": t.name if t else None,
+              "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,
               "version": (m.payload or {}).get("version", m.fingerprint),
-              "release_dir": m.release_dir, "primary_metric": r.primary_metric,
+              "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
+              "invalidated": m.invalidated_at is not None,
               "created_at": m.created_at.isoformat(timespec="seconds"),
               "url_expires_at": m.url_expires_at.isoformat(timespec="seconds"),
               "url_expired": m.url_expires_at < now,

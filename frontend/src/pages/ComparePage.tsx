@@ -82,11 +82,12 @@ export function ComparePage() {
     patchParams({ tasks: ids.join(",") });
   }
 
-  /** 一键纳入当前部署版对应任务（M8 06 六件套之六） */
+  /** 一键纳入当前部署版对应任务（M8 06 六件套之六）；票 126：失效记录（所属 Run 已放行删除）
+   *  无 task 可纳——先取 task_id 非空的验证记录，回退任一在账记录 */
   async function withDeployed() {
     const deps = depsQ.data?.deployments ?? [];
-    const cur = deps.find((d) => d.verified) ?? deps[0];
-    if (!cur) return;
+    const cur = deps.find((d) => d.verified && d.task_id !== null) ?? deps.find((d) => d.task_id !== null);
+    if (!cur || cur.task_id === null) return;
     const ids = [...new Set([...checked, cur.task_id])];
     setChecked(new Set(ids));
     runCross(ids);
@@ -94,7 +95,7 @@ export function ComparePage() {
 
   const deployedTaskId = (() => {
     const deps = depsQ.data?.deployments ?? [];
-    const cur = deps.find((d) => d.verified) ?? deps[0];
+    const cur = deps.find((d) => d.verified && d.task_id !== null) ?? deps.find((d) => d.task_id !== null);
     return cur?.task_id ?? null;
   })();
 

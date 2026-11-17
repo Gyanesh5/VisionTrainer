@@ -25,16 +25,20 @@ def _table_schemas(db_path: Path) -> dict[str, set[str]]:
 
 
 def _create_prealembic(engine) -> None:
-    """造 pre-Alembic 基线形状库：metadata 全表 minus post-baseline 迁移新增表。
+    """造 pre-Alembic 基线形状库：metadata 全表 minus post-baseline 迁移新增表与新列。
 
     create_all 跟着当前 metadata 走，会把 post-baseline 表（票 122 runtime_settings、
     票 123 model_releases）一并建出来——旧库模拟须剔除，否则 stamp 接入后的
-    upgrade head 重复建表。
+    upgrade head 重复建表。post-baseline 新列同理（票 126 失效标注列），建完剔除。
     """
     post_baseline = {"runtime_settings", "model_releases"}
     for name, table in Base.metadata.tables.items():
         if name not in post_baseline:
             table.create(engine)
+    with engine.begin() as conn:
+        for ddl in ("ALTER TABLE deployments DROP COLUMN run_uid",
+                    "ALTER TABLE deployments DROP COLUMN invalidated_at"):
+            conn.exec_driver_sql(ddl)
 
 
 def test_fresh_init_db_matches_metadata(tmp_path):
