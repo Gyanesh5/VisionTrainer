@@ -301,6 +301,22 @@ def deploy_run(uid: str, request: Request, body: dict | None = None):
         return tsvc.deploy_run(_manager(request), uid, model_lib_dir=body.get("model_lib_dir"))
 
 
+@router.post("/runs/{uid}/release")
+@_maps_errors
+def release_run(uid: str, request: Request, body: dict | None = None):
+    """模型发布（票 123，ADR 0015 Decision 1）：与部署分立——best 权重+元数据打包进发布目录
+    （派生产物）+ 限时签名 URL + 发布记录（只增不改）。长操作：登记 `run:{uid}:release`。"""
+    body = body or {}
+    with long_op(f"run:{uid}:release", f"模型发布 · {uid}", scope=uid):
+        return tsvc.release_run(_manager(request), uid, release_dir=body.get("release_dir"))
+
+
+@router.get("/releases")
+def list_releases(request: Request):
+    """发布记录清单（票 123）：只增不改账目（时间/指纹/run 标识/URL 状态），新在前。"""
+    return tsvc.list_releases(_manager(request))
+
+
 @router.post("/runs/{uid}/clear-last-pt")
 @_maps_errors
 def clear_last_pt(uid: str, request: Request):

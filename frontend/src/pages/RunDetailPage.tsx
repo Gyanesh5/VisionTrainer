@@ -31,6 +31,7 @@ export function RunDetailPage() {
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [deleteFiles, setDeleteFiles] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
+  const [releaseOpen, setReleaseOpen] = useState(false);
   const [tiOpen, setTiOpen] = useState(false);
   const [bigImage, setBigImage] = useState<ThumbUrl | null>(null);
   // run.metrics 逐 epoch 一发：门铃节流 1s
@@ -222,6 +223,11 @@ export function RunDetailPage() {
                   to={`/training/runs/${uid}/analysis`}>
                   错误分析
                 </Link>
+                <button type="button" className="btn btn-primary" data-testid="run-release"
+                  title="打包 best.pt + 元数据进发布目录，配限时签名 URL 供监控端拉取（票 123）"
+                  onClick={() => setReleaseOpen(true)}>
+                  发布给监控端
+                </button>
                 <button type="button" className="btn btn-primary" data-testid="run-deploy"
                   onClick={() => setDeployOpen(true)}>
                   部署到标注端
@@ -442,6 +448,29 @@ export function RunDetailPage() {
             void act(() => api.deployRun(uid), "部署失败");
           }}
           onCancel={() => setDeployOpen(false)}
+        />
+      )}
+
+      {/* ── 发布确认门（票 123：与部署同入口模式、不同动作——打包+签名 URL，不动 ONNX 导出链） */}
+      {releaseOpen && (
+        <ConfirmDialog
+          title="发布给监控端？"
+          confirmLabel="发布"
+          busy={false}
+          error={null}
+          intent={
+            <>
+              <li>发布对象：{run.task_name} · Run {run.uid}（主指标 {fmtMetric(run.primary_metric)}）</li>
+              <li>发布包：best.pt + metadata.json（类别表、建议置信度、指纹）+ classes.txt。</li>
+              <li>拉取：生成限时签名 URL（24 小时有效）供监控端免凭据下载。</li>
+            </>
+          }
+          consequence="发布目录是派生产物，可清理后重新发布；发布记录只增不改，重复发布生成新记录。"
+          onConfirm={() => {
+            setReleaseOpen(false);
+            void act(() => api.releaseRun(uid), "发布失败");
+          }}
+          onCancel={() => setReleaseOpen(false)}
         />
       )}
 

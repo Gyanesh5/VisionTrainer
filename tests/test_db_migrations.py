@@ -27,10 +27,11 @@ def _table_schemas(db_path: Path) -> dict[str, set[str]]:
 def _create_prealembic(engine) -> None:
     """造 pre-Alembic 基线形状库：metadata 全表 minus post-baseline 迁移新增表。
 
-    create_all 跟着当前 metadata 走，会把 post-baseline 表（票 122 runtime_settings）
-    一并建出来——旧库模拟须剔除，否则 stamp 接入后的 upgrade head 重复建表。
+    create_all 跟着当前 metadata 走，会把 post-baseline 表（票 122 runtime_settings、
+    票 123 model_releases）一并建出来——旧库模拟须剔除，否则 stamp 接入后的
+    upgrade head 重复建表。
     """
-    post_baseline = {"runtime_settings"}
+    post_baseline = {"runtime_settings", "model_releases"}
     for name, table in Base.metadata.tables.items():
         if name not in post_baseline:
             table.create(engine)

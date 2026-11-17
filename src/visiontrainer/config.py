@@ -30,7 +30,7 @@ EDITABLE: dict[str, set[str]] = {
     "server": {"host", "port"},
     "llm": {"base_url", "api_key", "model"},
     "training": {"python", "trainer_entry", "export_entry", "datasets_dir",
-                 "runs_dir", "model_lib_dir", "check_occupancy"},
+                 "runs_dir", "model_lib_dir", "release_dir", "check_occupancy"},
     "notifications": {"desktop"},
     "agent": {"prune_enabled", "prune_delta", "provider",
               "budget_round_seconds", "budget_total_tokens", "context_budget_chars"},

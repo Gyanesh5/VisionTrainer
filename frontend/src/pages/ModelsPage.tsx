@@ -11,13 +11,15 @@ import { useEvents } from "../ws/useEvents";
 
 /**
  * 模型页（票 121，表面族 D · operate；前身部署页/票 108）：模型真源清单 + 部署记录
- * + 模型库目录（派生）。
+ * + 发布记录（票 123）+ 模型库目录（派生）。
  *
  * 真源纪律（ADR 0015 Decision 2）：模型真源 = Run 产物权重（run_uid + 权重文件 +
  * sha256 前 8 位指纹），全部 Run 都在列（未入库未发布、权重缺失的也如实标注）；
- * 模型库目录降为派生分区——部署组装物，可清理重建，账目以 Run 权重为准。
+ * 模型库目录与发布目录降为派生分区——部署组装物/发布打包物，可清理重建，账目以
+ * Run 权重为准。发布（票 123，ADR 0015 Decision 1）与部署是两个动作：发布打包
+ * best.pt + 元数据并配限时签名 URL 供监控端拉取，发布记录只增不改。
  * 数据纪律（map §5/§6）：事件当门铃、REST 取数据，不轮询；长操作（部署导出/
- * 清理删除）由 API 薄层 opctx 登记，进度经 operation.updated 事件载荷显示。
+ * 发布打包/清理删除）由 API 薄层 opctx 登记，进度经 operation.updated 事件载荷显示。
  * 状态徽章颜色 + 形状 + 文字三重编码（DESIGN.md §3），数值 tabular-nums。
  */
 
@@ -40,6 +42,12 @@ const VERIFY_META: Record<VerifyKind, { label: string; mark: string; cls: string
   failed: { label: "验证失败", mark: "✕", cls: "is-failed" },
   verified: { label: "已验证", mark: "✓", cls: "is-ok" },
   unverified: { label: "未验证", mark: "−", cls: "is-unverified" },
+};
+
+/** 发布记录 URL 状态三重编码（票 123）：过期只影响拉取，记录本身留档 */
+const URL_META: Record<"fresh" | "expired", { label: string; mark: string; cls: string }> = {
+  fresh: { label: "URL 有效", mark: "✓", cls: "is-ok" },
+  expired: { label: "URL 过期", mark: "−", cls: "is-unverified" },
 };
 
 type LibKind = "latest" | "verified" | "unverified" | "unregistered";
@@ -125,11 +133,16 @@ export function ModelsPage() {
   const [deployTarget, setDeployTarget] = useState<RunWeightItem | null>(null);
   const [deployBusy, setDeployBusy] = useState(false);
   const [deployError, setDeployError] = useState<string | null>(null);
+  // 发布提交（挂权重行，票 123）：与部署同入口模式、不同动作
+  const [releaseTarget, setReleaseTarget] = useState<RunWeightItem | null>(null);
+  const [releaseBusy, setReleaseBusy] = useState(false);
+  const [releaseError, setReleaseError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const weightsQ = useQuery({ queryKey: ["run-weights"], queryFn: api.getRunWeights });
   const depsQ = useQuery({ queryKey: ["deployments"], queryFn: api.getDeployments });
   const libQ = useQuery({ queryKey: ["model-library"], queryFn: api.getModelLibrary });
+  const relsQ = useQuery({ queryKey: ["releases"], queryFn: api.getReleases });
 
   // WS 门铃：deployment.updated → 真源行部署历史/部署清单/派生库 REST 补齐；
   // run/task 状态变化 → 真源清单补齐（新 Run 上表、状态与权重落定）；
@@ -139,6 +152,7 @@ export function ModelsPage() {
       void queryClient.invalidateQueries({ queryKey: ["run-weights"] });
       void queryClient.invalidateQueries({ queryKey: ["deployments"] });
       void queryClient.invalidateQueries({ queryKey: ["model-library"] });
+      void queryClient.invalidateQueries({ queryKey: ["releases"] });
     },
     onEvent: (ev) => {
       const type = typeof ev.type === "string" ? ev.type : "";
@@ -171,6 +185,7 @@ export function ModelsPage() {
   });
 
   const deps = depsQ.data?.deployments ?? [];
+  const releases = relsQ.data?.releases ?? [];
   const filtered = useMemo(
     () =>
       deps.filter((d) => {
@@ -209,6 +224,23 @@ export function ModelsPage() {
       setDeployError(e instanceof Error ? e.message : "部署失败");
     } finally {
       setDeployBusy(false);
+    }
+  }
+
+  /** 发布（票 123）：同步动作——打包落定后直接 REST 补齐发布记录与真源行 */
+  async function submitRelease() {
+    if (!releaseTarget) return;
+    setReleaseBusy(true);
+    setReleaseError(null);
+    try {
+      await api.releaseRun(releaseTarget.run_uid);
+      setReleaseTarget(null);
+      await queryClient.invalidateQueries({ queryKey: ["releases"] });
+      await queryClient.invalidateQueries({ queryKey: ["run-weights"] });
+    } catch (e) {
+      setReleaseError(e instanceof Error ? e.message : "发布失败");
+    } finally {
+      setReleaseBusy(false);
     }
   }
 
@@ -384,18 +416,105 @@ export function ModelsPage() {
                     </td>
                     <td>
                       {deployable(w) && (
-                        <button
-                          type="button"
-                          className="btn btn-ghost"
-                          data-testid={`weight-deploy-${w.run_uid}`}
-                          onClick={() => {
-                            setDeployError(null);
-                            setDeployTarget(w);
-                          }}
-                        >
-                          部署
-                        </button>
+                        <>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            data-testid={`weight-release-${w.run_uid}`}
+                            title="打包 best.pt + 元数据进发布目录，配限时签名 URL 供监控端拉取（票 123）"
+                            onClick={() => {
+                              setReleaseError(null);
+                              setReleaseTarget(w);
+                            }}
+                          >
+                            发布
+                          </button>
+                          <button
+                            type="button"
+                            className="btn btn-ghost"
+                            data-testid={`weight-deploy-${w.run_uid}`}
+                            onClick={() => {
+                              setDeployError(null);
+                              setDeployTarget(w);
+                            }}
+                          >
+                            部署
+                          </button>
+                        </>
                       )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      {/* ── 发布记录（票 123）：只增不改账目，跨 Run 流水（逐 Run 历史见上表权重行 releases） */}
+      <div className="card" data-testid="releases-card">
+        <h2 className="card-title">发布记录</h2>
+        <p className="placeholder-note">
+          发布与部署是两个动作：发布把 best 权重与元数据（类别表、建议置信度、指纹）打包进
+          发布目录并生成限时签名 URL 供监控端拉取；记录只增不改，URL 过期只影响拉取。
+        </p>
+        {relsQ.isError ? (
+          <div>
+            <p className="error-note">发布记录读取失败：{relsQ.error.message}</p>
+            <button type="button" className="btn" onClick={() => void relsQ.refetch()}>重试</button>
+          </div>
+        ) : relsQ.isPending ? (
+          <p className="placeholder-note">读取发布记录…</p>
+        ) : releases.length === 0 ? (
+          <div className="empty-state" data-testid="release-empty-first">
+            <p>还没有发布记录——对任意已完成 Run 的权重发起发布，监控端即可凭签名 URL 拉取。</p>
+          </div>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>发布时间</th>
+                <th>任务</th>
+                <th>Run</th>
+                <th>指纹 / version</th>
+                <th className="num">建议置信度</th>
+                <th>拉取 URL</th>
+                <th aria-label="操作" />
+              </tr>
+            </thead>
+            <tbody data-testid="release-rows">
+              {releases.map((m) => {
+                const meta = URL_META[m.url_expired ? "expired" : "fresh"];
+                return (
+                  <tr key={m.release_id}>
+                    <td className="tnum">{formatTs(m.created_at)}</td>
+                    <td>{m.task_name}</td>
+                    <td className="mono">{m.run_uid}</td>
+                    <td>
+                      <span className="mono" title={`模型指纹（sha256 前 8 位）· version 标签 ${m.version}`}>
+                        {m.fingerprint}
+                      </span>
+                    </td>
+                    <td className="num tnum">
+                      {m.recommended_conf !== null ? m.recommended_conf.toFixed(2) : "—"}
+                    </td>
+                    <td>
+                      <span
+                        className={`badge ${meta.cls}`}
+                        data-testid={`release-url-${m.release_id}`}
+                        title={`过期时刻 ${m.url_expires_at}`}
+                      >
+                        <span aria-hidden="true">{meta.mark}</span> {meta.label}
+                      </span>
+                    </td>
+                    <td>
+                      <button
+                        type="button"
+                        className="btn btn-ghost"
+                        onClick={() => void openDir(m.release_dir)}
+                      >
+                        打开目录
+                      </button>
                     </td>
                   </tr>
                 );
@@ -629,6 +748,29 @@ export function ModelsPage() {
           consequence="部署完成后在桌面端模型下拉 → Custom → 加载 config.yaml 一次性登记。"
           onConfirm={() => void submitDeploy()}
           onCancel={() => setDeployTarget(null)}
+        />
+      )}
+
+      {releaseTarget && (
+        <ConfirmDialog
+          title="发布给监控端？"
+          confirmLabel="发布"
+          busy={releaseBusy}
+          error={releaseError}
+          intent={
+            <>
+              <li>
+                发布对象：{releaseTarget.task_name ?? releaseTarget.task_id} · Run{" "}
+                {releaseTarget.run_uid}（指纹 <span className="mono">{releaseTarget.fingerprint ?? "—"}</span>，
+                <span className="tnum">{releaseTarget.classes.length}</span> 类）
+              </li>
+              <li>发布包：best.pt + metadata.json（类别表、建议置信度、指纹）+ classes.txt。</li>
+              <li>拉取：生成限时签名 URL（24 小时有效）供监控端免凭据下载。</li>
+            </>
+          }
+          consequence="发布目录是派生产物，可清理后重新发布；发布记录只增不改，重复发布生成新记录。"
+          onConfirm={() => void submitRelease()}
+          onCancel={() => setReleaseTarget(null)}
         />
       )}
 
