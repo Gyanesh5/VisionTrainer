@@ -1706,3 +1706,42 @@ body {
 .run-log-terminal {
   max-height: 320px;
 }
+
+/* ---------------------------------------------------------------- 对比页（票 110 批 4，H 族 read · tufte） */
+
+.compare-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.rank-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rank-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rank-name {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.rank-metric {
+  font-weight: 600;
+}
+
+/* 指标表极值高亮（正向语义 state-ok；NG 语义不在此） */
+.is-extreme {
+  color: var(--state-ok);
+  font-weight: 600;
+}

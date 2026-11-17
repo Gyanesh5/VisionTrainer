@@ -745,6 +745,66 @@ export const runsApi = {
     ),
 };
 
+// ---------------------------------------------------------------- 对比复盘（H 族 read）
+
+/** 主指标曲线点（对比视图统一形状；primary 缺 epoch 无数据） */
+export interface CurvePoint {
+  epoch: number;
+  primary: number | null;
+}
+
+/** Task 内跨轮对比轮条目（GET /tasks/{id}/comparison；快照口径 args_changes 基于首轮） */
+export interface CompareRound {
+  uid: string;
+  round_no: number;
+  status: string;
+  pruned: boolean;
+  primary_metric: number | null;
+  best_epoch: number | null;
+  best_val: number | null;
+  curve: CurvePoint[];
+  split_uid: string | null;
+  effective: { train: number; val: number } | null;
+  args_changes: Record<string, unknown>;
+}
+
+export interface CompareRunsResult {
+  task: { id: number; uid: string; name: string; task_type: string | null; dataset: string; split_uid: string | null };
+  rounds: CompareRound[];
+  train_args: Record<string, unknown> | null;
+  gpu_curves: [string, [number, number][]][] | null;
+  param_importance: Record<string, unknown> | null;
+}
+
+/** 跨任务对比条目（GET /compare；metrics_summary=最优 Run 逐指标 Best/Last/Min/Max） */
+export interface CompareTaskItem {
+  id: number;
+  uid: string;
+  name: string;
+  status: string;
+  base_model: string;
+  runs: number;
+  train_args: Record<string, unknown>;
+  dataset: string;
+  split_uid: string | null;
+  effective_val: number | null;
+  best_run_uid: string | null;
+  best_primary_metric: number | null;
+  metrics_summary: Record<string, { best: number; last: number; min: number; max: number }>;
+  curve: CurvePoint[];
+}
+
+export interface CompareTasksResult {
+  tasks: CompareTaskItem[];
+}
+
+export const compareApi = {
+  runs: (taskId: number) =>
+    request<CompareRunsResult>(`/api/v1/tasks/${taskId}/comparison`),
+  tasks: (ids: number[]) =>
+    request<CompareTasksResult>(`/api/v1/compare?tasks=${ids.join(",")}`),
+};
+
 /** 图片展示唯一通道：先批量签发签名 URL（HMAC 密钥只在服务端），再进 img.src */export async function signThumbUrls(items: { path: string; box?: number }[]): Promise<Map<string, ThumbUrl>> {
   if (items.length === 0) return new Map();
   const res = await request<{ urls: ThumbUrl[] }>("/api/v1/thumb/sign", {
