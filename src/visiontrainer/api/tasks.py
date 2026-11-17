@@ -8,6 +8,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 from ..training import service as tsvc
+from .opctx import long_op
 
 router = APIRouter(tags=["tasks"])
 
@@ -136,6 +137,13 @@ def list_tasks(request: Request):
     return tsvc.list_tasks(_manager(request))
 
 
+@router.get("/queue")
+def queue_state(request: Request):
+    """队列当前态（阶段 1c 票 105）：`WS queue.updated` 的 REST 补齐源——事件无回放，
+    初始加载与断线重连从这里取全量 `{running_uid, queued_uids, block_reason}`。"""
+    return tsvc.queue_snapshot(_manager(request))
+
+
 @router.get("/tasks/{task_id}")
 @_maps_errors
 def get_task(task_id: int, request: Request):
@@ -203,6 +211,14 @@ def run_gpu(uid: str, request: Request):
     return {"samples": tsvc.run_gpu_samples(_manager(request), uid)}
 
 
+@router.get("/runs/{uid}/artifacts")
+@_maps_errors
+def run_artifacts(uid: str, request: Request):
+    """产物图清单（阶段 3c 票 110）：run_dir 顶层 PNG/JPG 列表 `{images:[{name,path}]}`；
+    图片展示经 `POST /thumb/sign` 签名。无 run_dir 返回空列表。"""
+    return {"images": tsvc.run_artifacts(_manager(request), uid)}
+
+
 @router.get("/runs/{uid}/analysis")
 @_maps_errors
 def get_analysis(uid: str, request: Request):
@@ -214,17 +230,20 @@ def get_analysis(uid: str, request: Request):
 @_maps_errors
 def run_analysis(uid: str, request: Request, body: dict | None = None):
     """跑错误分析（M8 01）：训练 venv 低置信度全量推理 + IoU 贪心匹配入库；body `{conf?}`
-    设分析口径（低于该 conf 的预测框视同未检出；已推理过则复用结果只做平台侧重算）。"""
+    设分析口径（低于该 conf 的预测框视同未检出；已推理过则复用结果只做平台侧重算）。
+    长操作：登记 `run:{uid}:analysis`（tick 为 (cur,total) 口径）。"""
     body = body or {}
-    return tsvc.run_error_analysis(_manager(request), uid,
-                                   conf=float(body.get("conf") or 0.25))
+    with long_op(f"run:{uid}:analysis", f"错误分析 · {uid}", scope=uid) as op:
+        return tsvc.run_error_analysis(_manager(request), uid,
+                                       conf=float(body.get("conf") or 0.25), progress=op.tick)
 
 
 @router.post("/runs/{uid}/analysis/export")
 @_maps_errors
 def export_relabel(uid: str, request: Request):
-    """导出 FN/FP 改标清单（M8 02）：markdown 落 Run 目录。"""
-    return tsvc.export_relabel_list(_manager(request), uid)
+    """导出 FN/FP 改标清单（M8 02）：markdown 落 Run 目录。登记 `run:{uid}:relabel_list`。"""
+    with long_op(f"run:{uid}:relabel_list", "导出改标清单", scope=uid):
+        return tsvc.export_relabel_list(_manager(request), uid)
 
 
 @router.get("/runs/{uid}/analysis/cell")
@@ -234,13 +253,25 @@ def analysis_cell(uid: str, request: Request, gt: str = "", pred: str = ""):
     return {"entries": tsvc.analysis_cell(_manager(request), uid, gt or "背景", pred or "背景")}
 
 
+@router.get("/runs/{uid}/analysis/cell/overlay")
+@_maps_errors
+def analysis_cell_overlay(uid: str, request: Request, gt: str = "", pred: str = "",
+                          image: str = ""):
+    """混淆矩阵格内单图聚焦叠加（M8 02 · 阶段 1c 票 105）：只画该格在该图的记录，
+    其余标注一律不画（2026-10-29 用户反馈）。产物按格缓存 analysis/overlays_cells/，
+    随重算失效；返回 `{path}`，图片字节经 `POST /thumb/sign` 签名 URL 展示。"""
+    return {"path": tsvc.analysis_cell_overlay(_manager(request), uid,
+                                               gt or "背景", pred or "背景", image)}
+
+
 @router.post("/runs/{uid}/test-infer")
 @_maps_errors
 def test_infer(uid: str, request: Request, body: dict | None = None):
-    """训后试跑（M8 05）：按需导出 ONNX + 叠框可视化（训练 venv 执行）。"""
+    """训后试跑（M8 05）：按需导出 ONNX + 叠框可视化（训练 venv 执行）。长操作：登记 `run:{uid}:test_infer`。"""
     body = body or {}
-    return tsvc.test_infer(_manager(request), uid, body.get("image", ""),
-                           conf=float(body.get("conf") or 0.25), iou=float(body.get("iou") or 0.45))
+    with long_op(f"run:{uid}:test_infer", f"试跑 · {uid}", scope=uid):
+        return tsvc.test_infer(_manager(request), uid, body.get("image", ""),
+                               conf=float(body.get("conf") or 0.25), iou=float(body.get("iou") or 0.45))
 
 
 @router.get("/model-library")
@@ -254,18 +285,20 @@ def model_library(request: Request):
 @router.delete("/model-library/{name}")
 @_maps_errors
 def delete_model_dir(name: str, request: Request):
-    """模型库清理（M8 07）：删目录同步 deployments 记录。"""
+    """模型库清理（M8 07）：删目录同步 deployments 记录。长操作：登记 `lib:purge`。"""
     cfg = getattr(request.app.state, "cfg", {}) or {}
-    return tsvc.delete_model_dir(_manager(request), name,
-                                 cfg.get("training", {}).get("model_lib_dir"))
+    with long_op("lib:purge", f"删除模型目录 · {name}"):
+        return tsvc.delete_model_dir(_manager(request), name,
+                                     cfg.get("training", {}).get("model_lib_dir"))
 
 
 @router.post("/runs/{uid}/deploy")
 @_maps_errors
 def deploy_run(uid: str, request: Request, body: dict | None = None):
-    """一键部署（09 号票）：导出 ONNX + 组装模型库 + 导出验证，后台执行。"""
+    """一键部署（09 号票）：导出 ONNX + 组装模型库 + 导出验证，后台执行。长操作：登记 `run:{uid}:deploy`。"""
     body = body or {}
-    return tsvc.deploy_run(_manager(request), uid, model_lib_dir=body.get("model_lib_dir"))
+    with long_op(f"run:{uid}:deploy", f"部署导出 · {uid}", scope=uid):
+        return tsvc.deploy_run(_manager(request), uid, model_lib_dir=body.get("model_lib_dir"))
 
 
 @router.post("/runs/{uid}/clear-last-pt")
@@ -283,8 +316,9 @@ def list_deployments(request: Request):
 @router.post("/runs/{uid}/report")
 @_maps_errors
 def generate_report(uid: str, request: Request):
-    """复盘报告：指标 + 图 → LLM → report.md（07 号票，多模态管线复用）。"""
-    return tsvc.generate_report(_manager(request), uid)
+    """复盘报告：指标 + 图 → LLM → report.md（07 号票，多模态管线复用）。长操作：登记 `run:{uid}:report`。"""
+    with long_op(f"run:{uid}:report", f"复盘报告 · {uid}", scope=uid):
+        return tsvc.generate_report(_manager(request), uid)
 
 
 @router.get("/tasks/{task_id}/comparison")
@@ -296,8 +330,9 @@ def compare_runs(task_id: int, request: Request):
 @router.get("/compare")
 @_maps_errors
 def compare_tasks(request: Request, tasks: str):
-    """跨任务对比：tasks=1,2,3（逗号分隔 id）。"""
+    """跨任务对比：tasks=1,2,3（逗号分隔 id）。慢读（快照 diff/曲线聚合）：登记 `results:compare`。"""
     ids = [int(x) for x in tasks.split(",") if x.strip().isdigit()]
     if not ids:
         raise tsvc.TaskError("invalid_args", "tasks 参数为空或非法", 400)
-    return tsvc.compare_tasks(_manager(request), ids)
+    with long_op("results:compare", "跨任务对比"):
+        return tsvc.compare_tasks(_manager(request), ids)

@@ -70,7 +70,7 @@ def test_selfcheck_endpoint(tmp_path, monkeypatch):
                         "datasets_dir": str(tmp_path / "ds"), "runs_dir": str(tmp_path / "runs"),
                         "model_lib_dir": str(tmp_path / "lib"), "check_occupancy": False,
                         "db_url": f"sqlite:///{tmp_path / 'sc.db'}"}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         r = c.get("/api/v1/selfcheck")
         assert r.status_code == 200

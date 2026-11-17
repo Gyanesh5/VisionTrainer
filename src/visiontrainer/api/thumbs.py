@@ -1,4 +1,8 @@
-"""缩略图 HTTP 端点（架构路线一：图片走浏览器原生管线，不经 websocket）。"""
+"""缩略图 HTTP 端点（架构路线一：图片走浏览器原生管线，不经 websocket）。
+
+阶段 1c 票 105 增签发端点：签名 URL 的 HMAC 密钥只在服务端——NiceGUI 页面此前内联
+`thumbs.thumb_url`，React 无法自签；签发走 `POST /thumb/sign`，GET 管线与 D1 契约不变。
+"""
 
 from __future__ import annotations
 
@@ -6,10 +10,20 @@ from pathlib import Path
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from .. import thumbs
 
 router = APIRouter(tags=["media"])
+
+
+class ThumbSignItem(BaseModel):
+    path: str
+    box: int = 260
+
+
+class ThumbSignBody(BaseModel):
+    items: list[ThumbSignItem] = Field(min_length=0)
 
 
 @router.get("/thumb")
@@ -41,3 +55,20 @@ def get_thumb(p: str, box: int = 260, t: str = "", request: Request = None) -> R
         return JSONResponse(status_code=404, content={"error": {"code": "not_found",
                                                                 "message": "图片不可解码"}})
     return Response(content=data, media_type="image/jpeg", headers=cache_hdr)
+
+
+@router.post("/thumb/sign")
+def sign_thumb_urls(body: ThumbSignBody):
+    """批量签发缩略图签名 URL（阶段 1c 票 105）：`{urls: [{path, box, url}]}`。
+
+    签名是纯 HMAC 计算（不触盘）——路径合法性不在此校验，防篡改由 GET /thumb 的
+    verify 承担（无签名/篡改 → 403）。box 越界 400（与 GET 同口径）。
+    """
+    for it in body.items:
+        if it.box not in thumbs.BOXES:
+            return JSONResponse(status_code=400,
+                                content={"error": {"code": "invalid_args",
+                                                   "message": f"box 必须是 {list(thumbs.BOXES)}",
+                                                   "detail": {}}})
+    return {"urls": [{"path": it.path, "box": it.box,
+                      "url": thumbs.thumb_url(it.path, it.box)} for it in body.items]}

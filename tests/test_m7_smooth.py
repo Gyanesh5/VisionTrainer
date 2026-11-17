@@ -24,7 +24,7 @@ def m7_client(tmp_path: Path, datasets_root, detect_source):
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'm7.db'}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         yield c
 
@@ -105,29 +105,7 @@ def test_estimate_empty_returns_none(tmp_path):
     assert tsvc.estimate_training_time(m) is None
 
 
-# ---------------------------------------------------------------- loss 双线
-
-def test_loss_options_dual_lines_flat_and_nested():
-    from visiontrainer.ui.pages import _loss_options, _val_loss_at
-
-    nested = [  # 回调路径：val 在嵌套 metrics
-        {"epoch": 1, "loss": {"box_loss": 2.0}, "metrics": {"val/box_loss": 2.5}, "lr": [0.001]},
-        {"epoch": 2, "loss": {"box_loss": 1.5}, "metrics": {"val/box_loss": 2.0}, "lr": [0.001]},
-    ]
-    opts = _loss_options(nested)
-    names = [s["name"] for s in opts["series"]]
-    assert "box_loss" in names and "val/box_loss" in names
-    val = next(s for s in opts["series"] if s["name"] == "val/box_loss")
-    assert val["lineStyle"]["type"] == "dashed" and val["data"] == [2.5, 2.0]
-
-    flat = [  # csv 兜底路径：val 平铺在顶层
-        {"epoch": 1, "loss": {}, "val/box_loss": 3.0},
-        {"epoch": 2, "loss": {}, "val/box_loss": 2.6},
-    ]
-    assert _val_loss_at(flat[0], "box_loss") == 3.0
-    opts2 = _loss_options(flat)
-    # loss 为空时无 train 线，val 也不应单独出现（保持同图成对语义）
-    assert "val/box_loss" not in [s["name"] for s in opts2["series"]]
+# ---------------------------------------------------------------- loss 双线（语义锁移居前端 chartOptions.test.ts）
 
 
 def test_run_detail_contains_val_loss_series(m7_client):

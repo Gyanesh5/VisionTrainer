@@ -1,0 +1,58 @@
+/*
+ * 设计令牌层——唯一合法取值，来源 DESIGN.md §2/§3/§4（真相源，变更走提案制）。
+ * 组件样式只允许引用这里的变量，禁止硬编码色值。
+ */
+
+:root {
+  /* §2.1 视口/图表区（viewport）——深底：图像、画布、图表、日志终端 */
+  --vp-bg: #0f1923; /* 图表底 */
+  --vp-bg-page: #0a1119; /* 页底（仅全屏视口页） */
+  --vp-grid: #1a2a3a;
+  --vp-border: #1e3040;
+  --vp-text: #e8edf2; /* 主文字 */
+  --vp-text-dim: #8899aa;
+
+  /* §2.2 参数/报警 chrome 区——浅灰底：表单、表格、报警列表、导航 */
+  --chrome-bg: #f4f5f3;
+  --chrome-surface: #ffffff;
+  --chrome-border: #d9d7d1;
+  --chrome-text: #2b2e33;
+  --chrome-text-dim: #75787d;
+  --chrome-accent: #2f66d0; /* 唯一 accent：主操作/选中/当前项 */
+
+  /* §3 语义色（≤8，只做其语义，不进分类色板） */
+  --alarm-critical: #b3261e; /* 校验红灯、Run failed；唯一允许闪烁的语义 */
+  --alarm-warning: #c08a00; /* 校验琥珀条、漂移提醒、退出码异常 */
+  --state-ok: #2e6b46; /* Run done、校验通过、部署验证落定 */
+  --state-stale: #6b5518; /* WS 断流/画像体检过期 */
+  --state-running: #2f66d0; /* Run running/queued（仅限状态灯） */
+  --state-manual: #8c5a00; /* 手动语义 */
+  --action-primary: #2f66d0; /* 主按钮 */
+  --ng-mark: #b3261e; /* 错误分析 FP/误检标记 */
+
+  /* §4 刻度与排版 */
+  --space-1: 8px;
+  --space-2: 16px;
+  --space-3: 24px;
+  --space-4: 32px;
+  --space-5: 48px;
+  --font-ui: Inter, "Noto Sans SC", system-ui, sans-serif;
+  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  --font-body: 15px; /* 正文 ≥15px */
+  --font-label: 13px; /* 标签 12–13px */
+  --shell-topbar: 62px; /* 六导航壳顶栏高度（票 107） */
+}
+
+/* 分类色（§2.1 数据序列专用，≤10；ECharts 接入时按序取用） */
+:root {
+  --cat-1: #5e9cf3;
+  --cat-2: #4dd9c1;
+  --cat-3: #ff6b7a;
+  --cat-4: #b388ff;
+  --cat-5: #ffc048;
+  --cat-6: #40c4ff;
+  --cat-7: #8e99a4;
+  --cat-8: #ff8a65;
+  --cat-9: #69f0ae;
+  --cat-10: #ff80ab;
+}

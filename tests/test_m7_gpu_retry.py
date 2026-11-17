@@ -29,7 +29,7 @@ def gpu_client(tmp_path: Path, datasets_root, detect_source, monkeypatch):
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'gpu.db'}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         yield c
 
@@ -92,7 +92,7 @@ def retry_client(tmp_path: Path, datasets_root, detect_source):
                         "runs_dir": str(tmp_path / "runs"),
                         "db_url": f"sqlite:///{tmp_path / 'r.db'}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         yield c
 

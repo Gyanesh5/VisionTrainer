@@ -18,10 +18,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import sqlite3
 import sys
-import tempfile
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -156,9 +154,9 @@ def _static_config_users() -> list:
     """顶部静态 `from ..config import load_config` 的模块：改绑前取到的是生产配置。"""
     from visiontrainer import config
     from visiontrainer.agent import decider, llm, tuner
-    from visiontrainer.ui import pages
+    from visiontrainer.datasets import xal
 
-    return [config, decider, llm, tuner, pages]
+    return [config, decider, llm, tuner, xal]
 
 
 _STATIC_CONFIG_USERS = _static_config_users()
@@ -308,20 +306,7 @@ def isolated_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 @pytest.fixture()
 def client(isolated_config: dict) -> TestClient:
     """按测构建的 REST 客户端：独立临时库 + 独立数据集根 + 独立产物根，不跑 lifespan。"""
-    return TestClient(create_app(cfg=isolated_config, with_ui=False))
-
-
-@pytest.fixture(scope="session")
-def ui_client():
-    """会话一次构建的带 UI 客户端（NiceGUI 全局态不可重复装配）：同样落进会话临时工作区。"""
-    root = Path(tempfile.mkdtemp(prefix="visiontrainer-tests-ui-"))
-    cfg = isolated_cfg(root)
-    _prepare_roots(cfg)
-    try:
-        with TestClient(create_app(cfg=cfg, with_ui=True)) as c:
-            yield c
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
+    return TestClient(create_app(cfg=isolated_config, serve_frontend=False))
 
 
 # ---------------------------------------------------------------- 会话守卫

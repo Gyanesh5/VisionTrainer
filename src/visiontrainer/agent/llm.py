@@ -74,6 +74,20 @@ def chat(messages: list[dict], *, client: httpx.Client | None = None,
             client.close()
 
 
+def smoke_test() -> str:
+    """连通性测试：发一条探测消息回显回复（设置页「测试」按钮，阶段 1c 票 105 收编 UI 胶水）。
+
+    Raises:
+        LLMError: 未配置（缺 base_url/model）或端点不可达。
+    """
+    client = build_client()
+    try:
+        return chat([{"role": "user", "content": "只回复两个字：正常"}],
+                    client=client, cfg=llm_config())
+    finally:
+        client.close()
+
+
 def parse_json_loose(text: str) -> dict:
     """三级解析降级（06 号票）：直接 loads → 剥代码栏 → 正则抽首个 {...}。"""
     text = text.strip()

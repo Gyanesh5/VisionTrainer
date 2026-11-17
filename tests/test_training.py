@@ -46,7 +46,7 @@ def training_client(tmp_path: Path, datasets_root, detect_source, monkeypatch: p
         },
     }
     monkeypatch.setattr("visiontrainer.datasets.service.get_datasets_root", lambda: datasets_root)
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         yield c
 
@@ -187,7 +187,7 @@ def test_task_status_latest_round_wins(tmp_path, datasets_root, detect_source):
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         task_uid = _create_task(c, epochs=2, name="failed-then-resume")
         task = _wait_task(c, task_uid, {"done"})
@@ -230,7 +230,7 @@ def test_restart_reaggregates_stale_task_status(tmp_path, datasets_root, detect_
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app1 = create_app(cfg=cfg, with_ui=False)
+    app1 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app1) as c1:
         task_uid = _create_task(c1, epochs=2, name="stale-agg")
         task = _wait_task(c1, task_uid, {"done"})
@@ -249,7 +249,7 @@ def test_restart_reaggregates_stale_task_status(tmp_path, datasets_root, detect_
         conn.commit()
         conn.close()
 
-    app2 = create_app(cfg=cfg, with_ui=False)
+    app2 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app2) as c2:
         deadline = time.time() + 10
         status = None
@@ -324,7 +324,7 @@ def test_orphan_adoption_after_platform_restart(tmp_path, datasets_root, detect_
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app1 = create_app(cfg=cfg, with_ui=False)
+    app1 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app1) as c1:
         r = c1.post("/api/v1/tasks", json={"name": "adopt", "base_model": "stub",
                                            "dataset": "plate", "epochs": 100})
@@ -358,7 +358,7 @@ def test_orphan_adoption_after_platform_restart(tmp_path, datasets_root, detect_
     assert alive, "脱离启动的子进程不应随平台退出"
 
     # 新平台实例启动 → 收养 → 继续监控 → 优雅停止仍有效
-    app2 = create_app(cfg=cfg, with_ui=False)
+    app2 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app2) as c2:
         deadline = time.time() + 15
         status = None
@@ -388,7 +388,7 @@ def test_orphan_completed_during_downtime_judged_done(tmp_path, datasets_root, d
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app1 = create_app(cfg=cfg, with_ui=False)
+    app1 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app1) as c1:
         r = c1.post("/api/v1/tasks", json={"name": "orphan-done", "base_model": "stub",
                                            "dataset": "plate", "epochs": 2})
@@ -406,7 +406,7 @@ def test_orphan_completed_during_downtime_judged_done(tmp_path, datasets_root, d
         conn.commit()
         conn.close()
 
-    app2 = create_app(cfg=cfg, with_ui=False)
+    app2 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app2) as c2:
         deadline = time.time() + 10
         status = None
@@ -424,7 +424,7 @@ def test_adopted_run_natural_exit_judged_done(tmp_path, datasets_root, detect_so
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app1 = create_app(cfg=cfg, with_ui=False)
+    app1 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app1) as c1:
         r = c1.post("/api/v1/tasks", json={"name": "adopt-exit", "base_model": "stub",
                                            "dataset": "plate", "epochs": 8})  # ~4.8s，足够完成收养
@@ -438,7 +438,7 @@ def test_adopted_run_natural_exit_judged_done(tmp_path, datasets_root, detect_so
             time.sleep(0.1)
         assert run["status"] == "running"
 
-    app2 = create_app(cfg=cfg, with_ui=False)
+    app2 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app2) as c2:
         deadline = time.time() + 20
         status = None
@@ -585,7 +585,7 @@ def test_adopt_stopping_orphan_resumes_stop_chain(tmp_path, datasets_root, detec
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{db}",
                         "check_occupancy": False}}
-    app1 = create_app(cfg=cfg, with_ui=False)
+    app1 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app1) as c1:
         task_id = c1.post("/api/v1/tasks", json={"name": "stuck-stop", "base_model": "stub",
                                                  "dataset": "plate", "epochs": 100}).json()["id"]
@@ -603,7 +603,7 @@ def test_adopt_stopping_orphan_resumes_stop_chain(tmp_path, datasets_root, detec
     pid = _run_pid(db, run_uid)
     os.kill(pid, 0)  # 脱离进程随"崩溃"存活
 
-    app2 = create_app(cfg=cfg, with_ui=False)
+    app2 = create_app(cfg=cfg, serve_frontend=False)
     app2.state.manager.s.stop_timeout = 2.0
     with TestClient(app2) as c2:
         final = _wait_run_status(c2, run_uid, {"cancelled"}, timeout=8.0)
@@ -620,7 +620,7 @@ def test_adopt_stopping_dead_pid_finalizes_cancelled(tmp_path, datasets_root, de
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{db}",
                         "check_occupancy": False}}
-    app1 = create_app(cfg=cfg, with_ui=False)
+    app1 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app1) as c1:
         task_id = c1.post("/api/v1/tasks", json={"name": "dead-stop", "base_model": "stub",
                                                  "dataset": "plate", "epochs": 100}).json()["id"]
@@ -648,7 +648,7 @@ def test_adopt_stopping_dead_pid_finalizes_cancelled(tmp_path, datasets_root, de
         _wait_run_status(c1, run_uid, {"failed"}, timeout=10.0)
         _db_exec(db, "UPDATE runs SET status='stopping' WHERE uid=?", (run_uid,))
 
-    app2 = create_app(cfg=cfg, with_ui=False)
+    app2 = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app2) as c2:
         final = _wait_run_status(c2, run_uid, {"cancelled", "failed", "done"}, timeout=10.0)
         assert final == "cancelled", f"stopping 孤儿应落 cancelled（用户已请求停止），实际 {final}"

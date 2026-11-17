@@ -241,7 +241,7 @@ def test_first_round_injects_experiences(tmp_path: Path, datasets_root, detect_s
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
 
     first_payload: dict = {}
 

@@ -1,6 +1,7 @@
 """数据集 API + 服务编排测试（v1.4 票 03 形态：create_dataset 唯一出生入口）。"""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -171,3 +172,61 @@ def test_classes_action_single_entry_gates(datasets_root, detect_source, client)
 
     # 响应携带读时组合视图与重校验报告（四动作提交即重算账目）
     assert r.json()["validation"]["total_images"] > 0
+
+
+# ---------------------------------------------------------------- POST /datasets/expand-paths（阶段 3b 补只读缺口）
+
+def test_expand_paths_lists_images_with_sidecars_and_skip(datasets_root, detect_source, client):
+    """目录展开：图片清单口径与校验同源，同词干 JSON 带入，skip 按 basename 剔除，零写入。
+
+    独立真值（conftest 夹具）：detect_source 9 图全带 JSON（negative.json 空 shapes 也是 JSON）；
+    文件路径直传不拖同词干 JSON——配对只发生在目录展开（与旧 UI 层 _expand_add_paths 同语义）。
+    """
+    src2 = datasets_root.parent / "extra_src"
+    src2.mkdir()
+    make_image(src2, "x.png")
+    make_annotation(src2, "x", [{"label": "car", "shape_type": "rectangle",
+                                 "points": [[1, 1], [9, 9]]}])
+
+    # 目录展开（9 图 + 9 JSON），文件路径原样带过（只 x.png 本身）
+    r = client.post("/api/v1/datasets/expand-paths", json={
+        "paths": [str(detect_source), str(src2 / "x.png")], "skip": []})
+    assert r.status_code == 200, r.text
+    files = r.json()["files"]
+    names = [Path(f).name for f in files]
+    assert "x.png" in names and "x.json" not in names  # 文件路径不拖 sidecar
+    assert sum(1 for n in names if n.endswith(".json")) == 9
+    assert sum(1 for n in names if n.endswith(".png")) == 10
+
+    # skip 按 basename 剔除：x.png 被剔；目录展开时同词干 x.json 一并不出（图先被剔）
+    r = client.post("/api/v1/datasets/expand-paths", json={
+        "paths": [str(src2)], "skip": ["x.png"]})
+    names2 = [Path(f).name for f in r.json()["files"]]
+    assert "x.png" not in names2 and "x.json" not in names2
+
+    # 不带 skip 的目录展开带 sidecar
+    r = client.post("/api/v1/datasets/expand-paths", json={"paths": [str(src2)], "skip": []})
+    names3 = [Path(f).name for f in r.json()["files"]]
+    assert names3 == ["x.png", "x.json"]
+
+
+# ---------------------------------------------------------------- GET /datasets/{name}/annotation（阶段 3b 补只读缺口）
+
+def test_annotation_returns_labelme_json_for_source_image(datasets_root, detect_source, client):
+    """审查画布叠加的数据源：image 取 source/ 内 basename，返回标注 JSON 全文，零写入。"""
+    build_dataset("plate", "detect", detect_source)  # 出生即拷贝真源（labeled 态）
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "car0.png"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["imageWidth"] == 640 and body["imageHeight"] == 480  # conftest 夹具真值
+    assert body["shapes"][0]["label"] == "car"
+
+    # 负样本（有 JSON 无 shapes 也算有标注）；真正无 JSON 的图才 404
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "negative.png"})
+    assert r.status_code == 200 and r.json()["shapes"] == []
+
+    # basename 之外不解析：穿越路径按名截断防穿越（../annot/car1.png → car1.png，仍在 source/ 内）
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "../annot/car1.png"})
+    assert r.status_code == 200 and r.json()["shapes"][0]["label"] == "car"
+    r = client.get("/api/v1/datasets/plate/annotation", params={"image": "missing.png"})
+    assert r.status_code == 404

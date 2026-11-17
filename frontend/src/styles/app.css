@@ -1,0 +1,1851 @@
+/* 壳与页面基线：布局/密度/刻度走 tokens.css 令牌，本文件不出现色值。 */
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-ui);
+  font-size: var(--font-body);
+  color: var(--chrome-text);
+  background: var(--chrome-bg);
+}
+
+/* 数值一律等宽数字（DESIGN.md §4） */
+.tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 六导航壳 */
+
+.shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.shell-topbar {
+  height: var(--shell-topbar);
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  background: var(--chrome-surface);
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.shell-brand {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-weight: 600;
+}
+
+.shell-brand-mark {
+  font-variant-numeric: tabular-nums;
+  color: var(--chrome-accent);
+}
+
+.shell-topbar-spacer {
+  flex: 1;
+}
+
+/* 后台状态灯（D 族硬指标：顶栏常显）——颜色 + 文字双编码（DESIGN.md §3） */
+.conn-light {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--font-label);
+}
+
+.conn-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
+.conn-dot.live {
+  background: var(--state-ok);
+}
+
+.conn-dot.stale {
+  background: var(--state-stale);
+}
+
+.conn-dot.connecting {
+  background: var(--chrome-text-dim);
+}
+
+.shell-layout {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.shell-sidebar {
+  width: 176px;
+  flex: none;
+  padding: var(--space-2) var(--space-1);
+  background: var(--chrome-surface);
+  border-right: 1px solid var(--chrome-border);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.nav-group-label {
+  padding: var(--space-1) 10px 4px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  color: var(--chrome-text);
+  text-decoration: none;
+  font-size: var(--font-body);
+}
+
+.nav-item svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: var(--chrome-text-dim);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.nav-item:hover {
+  background: var(--chrome-bg);
+}
+
+.nav-item.active {
+  background: var(--chrome-bg);
+  color: var(--chrome-accent);
+  font-weight: 600;
+}
+
+.nav-item.active svg {
+  stroke: var(--chrome-accent);
+}
+
+.shell-main {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: var(--space-3);
+}
+
+/* ---------------------------------------------------------------- 页面骨架 */
+
+.page-head {
+  margin-bottom: var(--space-2);
+}
+
+.page-head h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.page-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.card {
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: var(--space-2);
+}
+
+.card-title {
+  margin: 0 0 var(--space-1);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.placeholder-note {
+  color: var(--chrome-text-dim);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- 汇总卡 */
+
+.summary-row {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.summary-cell {
+  flex: 1;
+}
+
+.summary-cell small {
+  display: block;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.summary-cell strong {
+  font-size: 24px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------------------------------------------------------------- 日志页（终端暗块 = §2.1 vp 区） */
+
+.log-terminal {
+  background: var(--vp-bg);
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+  padding: var(--space-2);
+  max-height: 560px;
+  overflow-y: auto;
+}
+
+.log-terminal pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--font-body);
+  line-height: 1.6;
+  color: var(--vp-text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-terminal .log-empty {
+  color: var(--vp-text-dim);
+}
+
+.log-line.is-error {
+  color: var(--alarm-critical);
+}
+
+.log-line.is-warning {
+  color: var(--alarm-warning);
+}
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.log-toolbar label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.log-toolbar input,
+.log-toolbar select {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.level-btn {
+  font: inherit;
+  font-size: var(--font-label);
+  padding: 4px 10px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+  cursor: pointer;
+}
+
+.level-btn.active {
+  background: var(--chrome-accent);
+  border-color: var(--chrome-accent);
+  color: var(--chrome-surface);
+}
+
+/* ---------------------------------------------------------------- 系统页（自检/配置，总貌档疏排） */
+
+.check-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.check-item {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  padding: 8px 0;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.check-item:last-child {
+  border-bottom: none;
+}
+
+.severity-badge {
+  font-size: var(--font-label);
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  flex: none;
+}
+
+.severity-badge.ok {
+  color: var(--state-ok);
+}
+
+.severity-badge.warning {
+  color: var(--alarm-warning);
+}
+
+.severity-badge.error {
+  color: var(--alarm-critical);
+}
+
+.check-message {
+  margin: 0;
+}
+
+.config-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.config-table th,
+.config-table td {
+  text-align: left;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.config-table th {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+}
+
+.config-table td {
+  font-variant-numeric: tabular-nums;
+}
+
+.state-text.ok {
+  color: var(--state-ok);
+}
+
+.state-text.error {
+  color: var(--alarm-critical);
+}
+
+.error-note {
+  color: var(--alarm-critical);
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------- 部署页（票 108，D 族 operate · 总貌档） */
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  word-break: break-all;
+}
+
+/* 按钮：动词开头文案；danger 只给破坏性确认门 */
+.btn {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 14px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+  cursor: pointer;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--chrome-bg);
+}
+
+.btn:disabled {
+  color: var(--chrome-text-dim);
+  cursor: not-allowed;
+}
+
+/* 禁用态不再保留语义底色（红色禁用按钮读作「可点的危险操作」） */
+.btn-primary:disabled,
+.btn-danger:disabled {
+  background: var(--chrome-border);
+  border-color: var(--chrome-border);
+}
+
+.btn-primary {
+  background: var(--action-primary);
+  border-color: var(--action-primary);
+  color: var(--chrome-surface);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--action-primary);
+}
+
+.btn-danger {
+  background: var(--alarm-critical);
+  border-color: var(--alarm-critical);
+  color: var(--chrome-surface);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: var(--alarm-critical);
+}
+
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  padding: 3px 8px;
+  font-size: var(--font-label);
+  color: var(--chrome-accent);
+}
+
+/* 状态徽章：语义色 + 形状标记 + 文字三重编码（DESIGN.md §3） */
+.badge {
+  font-size: var(--font-label);
+  padding: 1px 8px;
+  border-radius: 4px;
+  border: 1px solid currentColor;
+  flex: none;
+  white-space: nowrap;
+}
+
+.badge.is-ok {
+  color: var(--state-ok);
+}
+
+.badge.is-running {
+  color: var(--state-running);
+}
+
+.badge.is-failed {
+  color: var(--alarm-critical);
+}
+
+.badge.is-unverified,
+.badge.is-unregistered {
+  color: var(--chrome-text-dim);
+}
+
+.badge.is-latest {
+  color: var(--chrome-accent);
+}
+
+/* 数据表（总貌档疏排）：数值右对齐等宽，表头带单位 */
+.data-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.data-table th,
+.data-table td {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.data-table th {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+  white-space: nowrap;
+}
+
+.data-table .num {
+  text-align: right;
+}
+
+.data-table .num,
+.data-table .tnum {
+  font-variant-numeric: tabular-nums;
+}
+
+/* 部署入口与过滤行 */
+.deploy-toolbar {
+  display: flex;
+  align-items: end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.deploy-toolbar label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.deploy-toolbar select {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  min-width: 220px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.filter-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: var(--space-1);
+}
+
+/* 提示行：进行中操作 / 导出验证未落定 / LRU 挤出预警 */
+.op-line {
+  margin: 0;
+  font-size: var(--font-body);
+}
+
+.pending-note,
+.warn-note {
+  font-size: var(--font-label);
+  margin: 0 0 var(--space-1);
+}
+
+.pending-note {
+  color: var(--chrome-text-dim);
+}
+
+.warn-note {
+  color: var(--alarm-warning);
+  margin: var(--space-1) 0 0;
+}
+
+.lib-root {
+  color: var(--chrome-text-dim);
+  margin: var(--space-1) 0 0;
+}
+
+/* 空态：一句话 + 动作（首用空与过滤空两种文案分开，专利 10） */
+.empty-state {
+  padding: var(--space-2) 0;
+}
+
+.empty-state p {
+  margin: 0 0 var(--space-1);
+  color: var(--chrome-text-dim);
+}
+
+/* 确认门对话框：浮层允许阴影；遮罩由令牌派生，不硬编码色值 */
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--vp-bg-page) 55%, transparent);
+}
+
+.dialog {
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: var(--space-2);
+  width: min(480px, 92vw);
+  max-height: 80vh;
+  overflow-y: auto;
+  box-shadow: 0 8px 24px color-mix(in srgb, var(--vp-bg-page) 35%, transparent);
+}
+
+.dialog h2 {
+  margin: 0 0 var(--space-1);
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.intent-list {
+  margin: 0 0 var(--space-1);
+  padding-left: 20px;
+}
+
+.intent-list li {
+  margin-bottom: 4px;
+}
+
+.dialog-consequence {
+  margin: 0 0 var(--space-1);
+  color: var(--chrome-text-dim);
+  font-size: var(--font-label);
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* ---------------------------------------------------------------- 数据集域（票 109） */
+
+.page-actions {
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+/* 详情页面包屑头 */
+.crumb-link {
+  color: var(--chrome-accent);
+  text-decoration: none;
+  font-size: 15px;
+}
+
+.crumb-link:hover {
+  text-decoration: underline;
+}
+
+.page-head .crumb-current {
+  display: inline;
+  font-size: 20px;
+  font-weight: 600;
+  margin: 0;
+}
+
+.section-title {
+  margin: var(--space-1) 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+}
+
+/* 列表卡片网格：卡片承载「同一数据集的概览」，不做等宽三卡营销布局 */
+.ds-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: var(--space-1);
+}
+
+.ds-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: var(--space-1) 12px;
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.ds-card:hover {
+  background: var(--chrome-bg);
+}
+
+.ds-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ds-card-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ds-card-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.ds-card-stats {
+  display: flex;
+  gap: var(--space-1);
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.badge.is-warning {
+  color: var(--alarm-warning);
+}
+
+/* 表单（F 族）：左标签右控件；hint 三档分流——占位符/删除/防呆精简保留 */
+.form-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-1);
+  margin-bottom: var(--space-1);
+}
+
+.form-row > label,
+.form-row > .form-label {
+  width: 88px;
+  flex: none;
+  padding-top: 6px;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+  text-align: right;
+}
+
+.form-row input,
+.form-row select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.form-stack {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.radio-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-body);
+}
+
+.radio-line .form-hint {
+  margin-left: 4px;
+}
+
+.form-hint {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.btn-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.dialog-wide {
+  width: min(880px, 95vw);
+}
+
+.dialog-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+}
+
+.dialog-head-note {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.create-cols {
+  display: flex;
+  gap: var(--space-3);
+  align-items: flex-start;
+}
+
+.create-col {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.create-col-grow {
+  flex: 1;
+}
+
+/* 类别表行编辑（行序即类别号） */
+.cls-table {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 40vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.cls-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cls-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.cls-idx {
+  width: 24px;
+  flex: none;
+  text-align: right;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.probe-block {
+  margin-top: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probe-result {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probe-result p {
+  margin: 0;
+  font-size: var(--font-body);
+}
+
+.probe-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: var(--font-label);
+}
+
+/* 阻断回执（琥珀警示条）：服务侧拦下 + 处置动作 */
+.block-card {
+  margin-top: var(--space-1);
+  border: 1px solid var(--alarm-warning);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.block-title {
+  margin: 0;
+  font-weight: 600;
+  color: var(--alarm-warning);
+}
+
+/* 详情页：状态卡行 + 元信息行 */
+.status-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.status-card {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 10px;
+  background: var(--chrome-surface);
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.status-card:hover {
+  background: var(--chrome-bg);
+}
+
+.status-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-card-head .status-title {
+  font-weight: 600;
+  flex: 1;
+  font-size: var(--font-body);
+}
+
+.status-card-line {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+  word-break: break-all;
+}
+
+.meta-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  font-size: var(--font-body);
+}
+
+.meta-row .meta-label {
+  width: 88px;
+  flex: none;
+  color: var(--chrome-text-dim);
+  font-size: var(--font-label);
+  text-align: right;
+}
+
+.meta-row .meta-value {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.detail-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  flex: 1;
+}
+
+/* 详情工作区内部 */
+.detail-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-1);
+}
+
+.panel-head > p {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.problem-group {
+  border-top: 1px solid var(--chrome-border);
+  padding: var(--space-1) 0 0;
+  margin-top: var(--space-1);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.problem-group p {
+  margin: 0;
+}
+
+.problem-line {
+  font-size: var(--font-label);
+  margin: 0;
+}
+
+.append-row {
+  display: flex;
+  gap: 8px;
+  margin: var(--space-1) 0;
+}
+
+.append-row input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.cls-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.cls-line input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.suspect-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.suspect-row select {
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 4px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.exclude-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--chrome-border);
+}
+
+.exclude-row .problem-line {
+  flex-sh: 0;
+}
+
+.exclude-row .form-hint {
+  flex: 1;
+  min-width: 0;
+}
+
+.is-danger-text {
+  color: var(--alarm-critical);
+}
+
+/* ---------------------------------------------------------------- 审查工作区（票 109 批 3） */
+
+.review-layout {
+  display: flex;
+  gap: var(--space-2);
+  align-items: stretch;
+  min-width: 0;
+}
+
+.review-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.review-strip {
+  width: 96px;
+  flex: none;
+  max-height: 62vh;
+  overflow-y: auto;
+}
+
+/* 缩略条带当前项：主色边 + 滚动跟随目标 */
+.review-thumb {
+  cursor: pointer;
+  margin-bottom: 4px;
+  border: 2px solid transparent;
+  border-radius: 2px;
+}
+
+.review-thumb.current {
+  border-color: var(--chrome-accent);
+}
+
+.review-thumb img {
+  display: block;
+  width: 100%;
+  height: 48px;
+  object-fit: cover;
+}
+
+.review-thumb .thumb-state {
+  font-size: 10px;
+  text-align: center;
+  color: var(--chrome-text-dim);
+}
+
+/* 审查画布：contain 适应全图（CSS 约束替代 VTPZ transform；初始/切图/窗口变化自动回适应），
+   单击开 Viewer.js 大图弹层（细节交互全在弹层：滚轮缩放/拖拽/1:1/旋转/全屏） */
+.review-canvas {
+  cursor: zoom-in;
+  max-height: 62vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+  background: var(--vp-bg);
+}
+
+.review-stage {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.review-stage img.review-img {
+  display: block;
+  max-width: 100%;
+  max-height: 62vh;
+  width: auto;
+  height: auto;
+}
+
+/* SVG 叠加层贴 img 渲染盒（stage 收缩包裹 img，inset:0 即图像内容盒） */
+.review-stage .review-overlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.review-meta-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: 100%;
+  font-size: var(--font-label);
+}
+
+.review-legend {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  max-width: 100%;
+  font-size: var(--font-label);
+}
+
+.legend-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.key-cap {
+  font-family: var(--font-mono);
+  font-size: var(--font-label);
+  background: var(--chrome-bg);
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  padding: 0 6px;
+  margin-right: 8px;
+  flex: none;
+  text-align: center;
+  width: 72px;
+}
+
+.reject-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+}
+
+/* 大图查看器自定义工具栏按钮（vtxal/vtclose）拿不到库的精灵图——按内置按钮同款
+   机制自配白描边 SVG 背景（li 24×24，::before 经通用 margin:2px 成 20×20 内容盒） */
+.viewer-toolbar li.viewer-vtclose:before {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 20px;
+  background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20'%3E%3Cpath fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' d='M4.5 4.5l11 11m0-11l-11 11'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+
+.viewer-toolbar li.viewer-vtxal:before {
+  content: "";
+  display: block;
+  width: 20px;
+  height: 20px;
+  background: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' d='M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z'/%3E%3C/svg%3E") center/contain no-repeat;
+}
+
+/* 详情工作区导航行 */
+.ws-nav {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---------------------------------------------------------------- 窗口化缩略图网格（专利 1） */
+
+.thumb-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.thumb-cards {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* 卡宽 168 + gap 8 = 176 步距；卡高 139（spacer 校准公式与 ThumbWindowGrid 同源） */
+.thumb-card {
+  width: 168px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.thumb-ph {
+  width: 100%;
+  height: 112px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 6px;
+  background: var(--vp-bg);
+  border: 1px solid var(--vp-border);
+  overflow: hidden;
+}
+
+.thumb-ph img {
+  width: 100%;
+  height: 112px;
+  object-fit: cover;
+  display: block;
+}
+
+.thumb-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 4px;
+  min-width: 0;
+}
+
+.thumb-name {
+  font-size: 11px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+  color: var(--chrome-text-dim);
+}
+
+/* 卡注一行（试跑结果「N 检出 · 类别 置信」串）：溢出截断，title 补全 */
+.thumb-note {
+  font-size: 11px;
+  color: var(--chrome-text-dim);
+  padding: 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thumb-spacer {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  font-size: 11px;
+  color: var(--chrome-text-dim);
+  padding-top: 8px;
+}
+
+.audit-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 0;
+  border-top: 1px solid var(--chrome-border);
+}
+
+.imbalance-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+
+.imbalance-name {
+  width: 112px;
+  flex: none;
+  font-size: var(--font-body);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imbalance-bar {
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+  max-width: 60%;
+}
+
+/* 动效回退（DESIGN.md §5） */
+
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* ---------------------------------------------------------------- 训练页（票 110 批 1） */
+
+/* Run 六态徽章补充档位（DESIGN.md §3：cancelled 中性灰不是失败；stopping 手动语义） */
+.badge.is-neutral {
+  color: var(--chrome-text-dim);
+}
+
+.badge.is-manual {
+  color: var(--state-manual);
+}
+
+/* 队列总貌（D 族 L1）：色块状态 + 位次，只监不控 */
+.queue-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.queue-line {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.queue-progress {
+  color: var(--chrome-text-dim);
+}
+
+/* 进度微条：跑动宽度，无循环动画（DESIGN.md §5 数据更新指示） */
+.queue-bar {
+  display: inline-block;
+  width: 120px;
+  height: 6px;
+  border-radius: 2px;
+  background: var(--chrome-bg);
+  border: 1px solid var(--chrome-border);
+  overflow: hidden;
+}
+
+.queue-bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--state-running);
+}
+
+/* 训练记录单表（专利 6）：组头灰带 colspan 行 + Run 行同表 */
+.run-table td {
+  padding: 6px 10px;
+}
+
+.run-table .group-row td {
+  background: var(--chrome-bg);
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.run-table .group-row:hover td {
+  background: color-mix(in srgb, var(--chrome-bg) 80%, var(--chrome-border));
+}
+
+.group-caret {
+  display: inline-block;
+  width: 16px;
+  color: var(--chrome-text-dim);
+}
+
+.group-name {
+  font-weight: 600;
+  margin-right: 8px;
+}
+
+.group-count {
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+  margin-right: 8px;
+}
+
+.run-row td {
+  white-space: nowrap;
+}
+
+.run-link {
+  color: var(--chrome-text);
+  text-decoration: none;
+}
+
+.run-row:hover {
+  background: var(--chrome-bg);
+}
+
+.run-row:hover .run-link {
+  color: var(--chrome-accent);
+}
+
+/* ---------------------------------------------------------------- 训练提交向导（票 110 批 2，G 族） */
+
+/* 页头动作区：标题行右侧按钮 */
+.page-head .page-actions {
+  margin-left: auto;
+}
+
+.wizard-section {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: var(--space-1) 12px;
+  margin: 0 0 var(--space-1);
+}
+
+.wizard-section legend {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+  padding: 0 6px;
+}
+
+/* 参数域：控件 + 已修改徽章 + hint 纵排 */
+.param-field {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.param-field input,
+.param-field select {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: var(--font-body);
+  padding: 5px 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 4px;
+  background: var(--chrome-surface);
+  color: var(--chrome-text);
+}
+
+.param-field input:disabled,
+.param-field select:disabled {
+  background: var(--chrome-bg);
+  color: var(--chrome-text-dim);
+}
+
+.param-field input[type="checkbox"] {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.badge.is-modified {
+  color: var(--chrome-accent);
+}
+
+.is-clamp-note {
+  color: var(--alarm-warning);
+}
+
+/* 表单双列（数值参数成对排布） */
+.form-pair {
+  display: flex;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.form-pair > .form-row {
+  flex: 1;
+  min-width: 220px;
+}
+
+/* 三态分段/两模式分段：沿用 level-btn，行内排布 */
+.segment-row {
+  display: flex;
+  gap: 8px;
+  margin: var(--space-1) 0;
+}
+
+/* 高级参数分组 */
+.param-group {
+  border: none;
+  border-top: 1px solid var(--chrome-border);
+  margin: var(--space-1) 0 0;
+  padding: var(--space-1) 0 0;
+}
+
+.param-group legend {
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+  padding: 0 0 4px;
+}
+
+/* 新建切分预览块（常驻，可折叠） */
+.split-preview {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  margin: var(--space-1) 0;
+}
+
+.split-preview summary {
+  cursor: pointer;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.split-preview-body p {
+  margin: 4px 0;
+}
+
+/* 意图清单里的改动项（旧值 → 新值） */
+.confirm-change {
+  display: inline-block;
+  margin-right: 4px;
+}
+
+.wizard-footer {
+  justify-content: flex-end;
+}
+
+.wizard-footer .form-hint {
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+/* ---------------------------------------------------------------- Run 详情页（票 110 批 3，D 族 operate） */
+
+.crumb-line {
+  margin: 0;
+}
+
+.run-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.meta-line {
+  margin: var(--space-1) 0 0;
+  word-break: break-all;
+}
+
+.run-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+  flex-wrap: wrap;
+}
+
+/* 曲线区（vp 暗块 §2.1）：图表网格 2 列，loss 占满行 */
+.chart-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-1);
+}
+
+.chart-cell-wide {
+  grid-column: 1 / -1;
+}
+
+.chart-box {
+  background: var(--vp-bg);
+  border: 1px solid var(--vp-border);
+  border-radius: 6px;
+}
+
+@media (max-width: 900px) {
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* GPU 采样表滚动区 */
+.gpu-scroll {
+  max-height: 320px;
+  overflow-y: auto;
+  margin-top: var(--space-1);
+}
+
+/* 产物区 */
+.artifact-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: var(--space-1);
+}
+
+.artifact-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  flex-wrap: wrap;
+}
+
+.artifact-label {
+  width: 96px;
+  flex: none;
+  text-align: right;
+  font-size: var(--font-label);
+  color: var(--chrome-text-dim);
+}
+
+.artifact-path {
+  flex: 1;
+  min-width: 0;
+}
+
+.artifact-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--space-1);
+}
+
+.artifact-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  background: var(--vp-bg);
+  cursor: zoom-in;
+  font: inherit;
+}
+
+.artifact-cell img {
+  width: 100%;
+  height: 120px;
+  object-fit: contain;
+  display: block;
+}
+
+.artifact-ph {
+  height: 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vp-text-dim);
+  font-size: var(--font-label);
+}
+
+.artifact-name {
+  font-size: var(--font-label);
+  color: var(--vp-text);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.artifact-bigview {
+  width: min(1100px, 94vw);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  align-items: center;
+}
+
+.artifact-bigview img {
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+}
+
+.run-log-terminal {
+  max-height: 320px;
+}
+
+/* 试跑结果（G1）：ONNX 缓存路径一行账目，长路径换行不撑宽弹层 */
+.onnx-line {
+  word-break: break-all;
+}
+
+.ti-result {
+  margin-top: var(--space-2);
+}
+
+/* ---------------------------------------------------------------- 对比页（票 110 批 4，H 族 read · tufte） */
+
+.compare-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+}
+
+.rank-list {
+  list-style: none;
+  margin: 4px 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.rank-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.rank-name {
+  flex: 1;
+  min-width: 0;
+  word-break: break-all;
+}
+
+.rank-metric {
+  font-weight: 600;
+}
+
+/* 指标表极值高亮（正向语义 state-ok；NG 语义不在此） */
+.is-extreme {
+  color: var(--state-ok);
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------- 错误分析页（票 111 批 1，B 族只读叠加 + F 明细表） */
+
+/* 逐框记录类型：混淆（类别错）走数据分类色紫（配 ⇄ 文字标记双编码，不占语义色板） */
+.badge.is-confusion {
+  color: var(--cat-4);
+}
+
+/* 长图片路径列：收窄省略，完整路径在 title 悬停 */
+.img-path {
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 明细表横向溢出兜底（长 val 清单窄窗不破格） */
+.table-scroll {
+  overflow-x: auto;
+}
+
+/* ---------------------------------------------------------------- Agent 循环页（票 111 批 2，D 族详情档 + 三角色消息分色） */
+
+/* 三角色分色（对方 agent-message role-* 模式移植）：决策 assistant=accent / 取证 tool=manual / 裁决 user=ok。
+   平台形态是调参循环不是聊天框：角色分色只落在决策卡的三段左缘，不做气泡 */
+.agent-tl {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin-top: 8px;
+}
+
+.agent-tl-card {
+  border: 1px solid var(--chrome-border);
+  border-radius: 6px;
+  padding: 12px 16px;
+  background: var(--chrome-surface);
+}
+
+.agent-role {
+  border-left: 3px solid var(--chrome-border);
+  border-radius: 0 4px 4px 0;
+  padding: 8px 12px;
+  margin-top: 8px;
+  background: var(--chrome-bg);
+}
+
+.agent-role.assistant {
+  border-left-color: var(--chrome-accent);
+}
+
+.agent-role.tool {
+  border-left-color: var(--state-manual);
+}
+
+.agent-role.user {
+  border-left-color: var(--state-ok);
+}
+
+.agent-role-title {
+  margin: 0 0 4px;
+  font-size: var(--font-label);
+  font-weight: 600;
+  color: var(--chrome-text-dim);
+}
+
+.agent-role p {
+  margin: 2px 0;
+  font-size: var(--font-label);
+}
+
+/* 白名单拦截记录：越界即警示（alarm-warning 语义） */
+.agent-clamp {
+  color: var(--alarm-warning);
+}
+
+/* 审批门卡：琥珀左缘（等待语义），暂停态转手动棕 */
+.agent-gate {
+  border-left: 3px solid var(--alarm-warning);
+}
+
+/* 选中行：accent 左缘 + 底色微升（同 nav-item.active 语义） */
+.run-row.is-selected td {
+  background: color-mix(in srgb, var(--chrome-accent) 8%, var(--chrome-surface));
+}

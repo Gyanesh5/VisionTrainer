@@ -29,7 +29,7 @@ def deploy_client(tmp_path: Path, datasets_root, detect_source):
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "model_lib_dir": str(tmp_path / "models"),
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         yield c, tmp_path
 
@@ -100,7 +100,7 @@ def test_lru_hint_after_six(tmp_path, datasets_root, detect_source):
     cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
                         "runs_dir": str(tmp_path / "runs"), "db_url": f"sqlite:///{tmp_path / 'db.sqlite'}",
                         "check_occupancy": False}}
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         r = c.post("/api/v1/tasks", json={"name": "seed-deploy", "base_model": "yolo11n",
                                           "dataset": "plate", "epochs": 1})

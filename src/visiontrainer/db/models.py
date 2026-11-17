@@ -7,8 +7,12 @@ Task.status 为聚合冗余（由 Run 事件/启动重算更新，口径=最新�
 from __future__ import annotations
 
 from datetime import datetime
+from pathlib import Path
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, create_engine, func
+from alembic import command
+from alembic.config import Config
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint, create_engine, func, inspect
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from .runtime import set_session_factory
@@ -23,7 +27,7 @@ def _now() -> datetime:
 
 
 class SchemaVersion(Base):
-    """单行表：当前 schema 版本（10 号票：不上 Alembic，靠幂等迁移函数）。"""
+    """退役遗迹表（票 104）：Alembic 接管结构管理后不再演进，(1, 6) 冻结反映 baseline 形状。"""
 
     __tablename__ = "schema_version"
 
@@ -188,42 +192,87 @@ class AgentExperience(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 6  # 遗迹值（票 104）：与 baseline 种子行对应，结构演进自此走 Alembic，不再递增
+
+
+class SchemaError(Exception):
+    """pre-Alembic 旧库形状不满足 stamp 接入前提（只支持 schema 6）。"""
+
+
+def _assert_schema6_shape(engine: Engine) -> None:
+    """校验 pre-Alembic 旧库已是 schema 6 形状，否则拒绝 stamp。
+
+    Args:
+        engine: 目标库引擎。
+
+    Raises:
+        SchemaError: 缺 schema 6 特征列——先用旧版平台代码把库升到 v6 再切换。
+    """
+    insp = inspect(engine)
+    table_names = set(insp.get_table_names())
+    missing: list[str] = []
+    for table in ("runs", "tasks", "dataset_stats"):
+        if table not in table_names:
+            missing.append(f"缺表 {table}")
+    if missing:
+        raise SchemaError(
+            "库形状早于 schema 6，缺少: " + ", ".join(missing)
+            + "；请先用旧版平台代码把库升级到 v6，再走 Alembic stamp"
+        )
+    runs_cols = {c["name"] for c in insp.get_columns("runs")}
+    tasks_cols = {c["name"] for c in insp.get_columns("tasks")}
+    stats_cols = {c["name"] for c in insp.get_columns("dataset_stats")}
+    if "pruned" not in runs_cols:
+        missing.append("runs.pruned")
+    if "format_id" not in tasks_cols:
+        missing.append("tasks.format_id")
+    if "manifest_uid" in stats_cols:
+        missing.append("dataset_stats 一行制（仍带 manifest_uid）")
+    if missing:
+        raise SchemaError(
+            "库形状早于 schema 6，缺少: " + ", ".join(missing)
+            + "；请先用旧版平台代码把库升级到 v6，再走 Alembic stamp"
+        )
+
+
+def _run_migrations(engine: Engine, db_url: str) -> None:
+    """结构管理唯一入口（票 104，D2）：空库 upgrade head；pre-Alembic schema 6 库 stamp 接入；其余 upgrade head。
+
+    Args:
+        engine: 目标库引擎（仅用于形状探测）。
+        db_url: 注入 Alembic 的数据库 URL。
+    """
+    cfg = Config(str(Path(__file__).parent / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", db_url)
+    insp = inspect(engine)
+    if not insp.has_table("alembic_version") and insp.get_table_names():
+        _assert_schema6_shape(engine)
+        command.stamp(cfg, "head")
+        if insp.has_table("schema_version"):
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    "INSERT INTO schema_version (id, version) VALUES (1, 6) "
+                    "ON CONFLICT(id) DO UPDATE SET version = 6"
+                )
+        return
+    command.upgrade(cfg, "head")
 
 
 def init_db(db_url: str = "sqlite:///data/visiontrainer.db") -> sessionmaker:
-    """建表 + 记录 schema 版本；返回会话工厂。幂等。"""
-    if db_url.startswith("sqlite:///"):
-        from pathlib import Path
+    """建引擎并执行 Alembic 迁移（结构唯一真相源），返回会话工厂。幂等。
 
+    Args:
+        db_url: SQLAlchemy 数据库 URL（sqlite 路径父目录自动创建）。
+
+    Returns:
+        绑定引擎的会话工厂（同时注册到 db.runtime）。
+    """
+    if db_url.startswith("sqlite:///"):
         Path(db_url[len("sqlite:///"):]).parent.mkdir(parents=True, exist_ok=True)
     # 并发写串行化在调用侧（agent_config 走 tuner._mutate_agent_config 的进程内互斥）：
     # 引擎级 BEGIN IMMEDIATE 会让每个只读事务也占住 SQLite 写锁，同线程嵌套会话即自锁。
     engine = create_engine(db_url, connect_args={"check_same_thread": False})
-    # 票 06 幂等重建（v5→v6）：两本账表从「(dataset, manifest_uid) 一行」重建为
-    # 「dataset UNIQUE 一行」（spec §3.4）。旧形状判据 = manifest_uid 列还在；
-    # 重建后的新形状不含该列，重复执行自然 no-op。
-    with engine.begin() as conn:
-        for table in ("dataset_stats", "dataset_audits"):
-            cols = [r[1] for r in conn.exec_driver_sql(f"PRAGMA table_info({table})")]
-            if cols and "manifest_uid" in cols:
-                conn.exec_driver_sql(f"DROP TABLE {table}")
-    Base.metadata.create_all(engine)
-    with engine.begin() as conn:
-        conn.exec_driver_sql(
-            "CREATE TABLE IF NOT EXISTS schema_version (id INTEGER PRIMARY KEY, version INTEGER)"
-        )
-        # 幂等迁移：v2 = stats/audits 两表；v3 = gpu_samples 表 + runs.pruned 列；
-        # v4 = run_sample_errors 表（create_all 已建）；v5 = agent_experiences 表（create_all 已建）；
-        # v6 = tasks 三列（dataset/split_uid/format_id）+ 两本账表 dataset UNIQUE 一行制
-        # （旧形状表在上面的 v5→v6 重建中弃档）。本函数只保证新库/测试库结构正确
-        # 并按当前值刷版本号。
-        conn.exec_driver_sql("INSERT OR IGNORE INTO schema_version (id, version) VALUES (1, 1)")
-        if engine.dialect.name == "sqlite":
-            cols = [r[1] for r in conn.exec_driver_sql("PRAGMA table_info(runs)")]
-            if "pruned" not in cols:
-                conn.exec_driver_sql("ALTER TABLE runs ADD COLUMN pruned BOOLEAN NOT NULL DEFAULT 0")
-        conn.exec_driver_sql("UPDATE schema_version SET version = ? WHERE id = 1", (SCHEMA_VERSION,))
+    _run_migrations(engine, db_url)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     set_session_factory(factory)
     return factory

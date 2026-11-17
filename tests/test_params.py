@@ -124,7 +124,7 @@ def api_client(tmp_path, datasets_root, detect_source, monkeypatch):
         },
     }
     monkeypatch.setattr("visiontrainer.datasets.service.get_datasets_root", lambda: datasets_root)
-    app = create_app(cfg=cfg, with_ui=False)
+    app = create_app(cfg=cfg, serve_frontend=False)
     with TestClient(app) as c:
         yield c
 
