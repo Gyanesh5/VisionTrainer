@@ -198,7 +198,8 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
     - classify 例外：`data/{train,val}/<NN_类名>/` 链接树 + 根 data.yaml，两位数字前缀让
       字母序等于类别行序，class_map 为唯一回查依据。
 
-    Returns: {"data_yaml", "train_txt", "val_txt", "labels_dir", "format": {…快照段…}}。
+    Returns: {"data_yaml", "train_txt", "val_txt", "labels_dir", "format": {…快照段…}}；
+    `data_yaml` 语义 = 训练 `data` 参数（txt-list 为 yaml 路径，classify 为入口目录）。
     """
     adapter = adapter_for(format_id)
     pool = pool_dir(ds_dir, format_id)
@@ -223,9 +224,11 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
                 if flag and flag in class_map:
                     _link(src.resolve(), entry / side / f"{class_map[flag]:02d}_{flag}" / Path(name).name)
         _atomic_text(entry / "data.yaml", _yaml_text(meta, path=entry, train="train", val="val"))
-        return {"data_yaml": str(entry / "data.yaml"), "train_txt": None, "val_txt": None,
+        # Ultralytics 分类训练的 data 参数必须是目录（check_cls_dataset 拒收 yaml 文件），
+        # data.yaml 仅作类别映射存档；返回值语义 = 训练 `data` 参数，classify 即入口目录
+        return {"data_yaml": str(entry), "train_txt": None, "val_txt": None,
                 "labels_dir": None, "val_labels": [],
-                "format": _format_segment(format_id, adapter, class_map, str(entry / "data.yaml"))}
+                "format": _format_segment(format_id, adapter, class_map, str(entry))}
 
     train_txt = entry / "train.txt"
     val_txt = entry / "val.txt"

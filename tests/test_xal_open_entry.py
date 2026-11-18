@@ -11,9 +11,11 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 from pathlib import Path
 
@@ -81,31 +83,37 @@ def _fake_instance(tmp_path, mode: str, received: list[bytes]) -> Path:
     """假存活实例：真 AF_UNIX 服务端，按 mode 决定对请求的回应。
 
     ok=回 ack ok；nok=回 ack 拒绝；silence=连上但不回（测超时）；close=不 ack 直接挂断。
+
+    sock 放系统临时目录短路径——xdist 并行的 tmp_path 带 popen-gwN 段，
+    AF_UNIX 108 字节上限会被撑爆（OSError: AF_UNIX path too long）。
     """
-    sock_path = tmp_path / "xal-test.sock"
+    sock_path = Path(tempfile.gettempdir()) / f"xal-test-{os.getpid()}-{mode}.sock"
     server = socket.socket(socket.AF_UNIX)
     server.bind(str(sock_path))
     server.listen(1)
 
     def run() -> None:
-        conn, _ = server.accept()
-        data = b""
-        while b"\n" not in data:
-            chunk = conn.recv(4096)
-            if not chunk:
-                break
-            data += chunk
-        received.append(data)
-        if mode == "ok":
-            conn.sendall(xal.encode_ack(True))
-        elif mode == "nok":
-            conn.sendall(xal.encode_ack(False, "窗口正在关闭"))
-        elif mode == "close":
-            pass  # 不 ack
-        elif mode == "silence":
-            threading.Event().wait(30)  # 挂而不回，由客户端超时断路
-        conn.close()
-        server.close()
+        try:
+            conn, _ = server.accept()
+            data = b""
+            while b"\n" not in data:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+            received.append(data)
+            if mode == "ok":
+                conn.sendall(xal.encode_ack(True))
+            elif mode == "nok":
+                conn.sendall(xal.encode_ack(False, "窗口正在关闭"))
+            elif mode == "close":
+                pass  # 不 ack
+            elif mode == "silence":
+                threading.Event().wait(30)  # 挂而不回，由客户端超时断路
+            conn.close()
+        finally:
+            server.close()
+            sock_path.unlink(missing_ok=True)
 
     threading.Thread(target=run, daemon=True).start()
     return sock_path
