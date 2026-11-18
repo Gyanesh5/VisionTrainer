@@ -553,6 +553,26 @@ export const datasetsApi = {
       `/api/v1/datasets/${encodeURIComponent(name)}/review/export`,
       { method: "POST" },
     ),
+  /** classify 改类即判定（#131）：flags 真键切换 + vt_review=approved（detect 不扩） */
+  reviewReclassify: (name: string, body: { image: string; label: string }) =>
+    request<{ image: string; label: string; state: ReviewState; effective: ReviewState; checked_synced: boolean }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/review/relabel`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
+  /** 批量通过（#131）：当前过滤子集整体判定 approved；返回新通过与已通过计数 */
+  reviewBatchApprove: (name: string, body: { images: string[] }) =>
+    request<{ requested: number; approved: number; already: number }>(
+      `/api/v1/datasets/${encodeURIComponent(name)}/review/approve-batch`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    ),
   /** 真源标注 JSON 全文（审查叠加数据源；负样本 404） */
   annotation: (name: string, image: string) =>
     request<{

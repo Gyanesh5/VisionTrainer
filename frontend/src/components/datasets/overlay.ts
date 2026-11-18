@@ -67,6 +67,14 @@ export function shapeLegend(j: LabelJson, classes?: string[] | null): [string, n
   return [...counts.entries()].map(([lbl, n]) => [lbl, n, colors[lbl]]);
 }
 
+/** classify 判类：首个为真的 flags 键（与后端 `pool._classify_flag_of` 同一口径）。 */
+export function classifyFlag(j: LabelJson | null | undefined): string | null {
+  for (const [k, v] of Object.entries(j?.flags ?? {})) {
+    if (v) return k;
+  }
+  return null;
+}
+
 /** 叠加形状内容（多边形/外接框/名称标注，百分比坐标）——画布 inline 层直接用 */
 export function overlaySvgInner(j: LabelJson | null | undefined, classes?: string[] | null): string {
   if (!j || !j.shapes?.length) return "";

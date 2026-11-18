@@ -69,6 +69,8 @@
 | :--- | :--- | :--- |
 | GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——迭代源为 `source/` 下带 JSON 的图（v1.4 去掉清单归属 `split` 维度）；有效状态按双指纹现算（shapes 哈希变更 → pending + modified 标记）；负样本（无标注 JSON）与排除在册图不入前进序列；可疑度分值与来源（校验/审计/错误分析）由平台聚合，队列按可疑度降序 |
 | POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单原子写回 JSON，rejected 必填 reason；图不在 source/ 审查集合 404 |
+| POST | `/api/v1/datasets/{id}/review/relabel` | classify 改类即判定（#131，classify 数据集专属）：body: `{image, label}`——flags 真键切换（旧真键置假、目标类唯一为真）+ `vt_review=approved` 同一次原子写（人工改类即人工判定）；label 须在类别表内（400），detect 数据集 400（detect 改类走 XAL 改标注），排除在册图 400；返回 `{image, label, state, effective, checked_synced}` |
+| POST | `/api/v1/datasets/{id}/review/approve-batch` | 批量通过（#131）：body: `{images: [...]}`（审查页当前过滤子集）；先整体校验再落笔——任一图不在审查集合（404）/排除在册（400）整体拒绝不部分通过，空清单 400；已通过的幂等跳过（不刷新 decided_at），返回 `{requested, approved, already}` |
 | GET | `/api/v1/datasets/{id}/annotation?image=` | 读取真源标注 JSON 全文（阶段 3b 补只读缺口，审查画布叠加/大图合成的数据源）：`image` 为 source/ 内图片 basename（同名校验防穿越）；返回 labelme JSON 原文；无标注 JSON（负样本）或图不在 source/ 404、坏 JSON 400。零写入 |
 | POST | `/api/v1/datasets/{id}/review/export` | 导出驳回清单 markdown 至数据集目录（与改标清单同构：逐项图名+理由+XAL 直达行） |
 | POST | `/api/v1/datasets/{id}/drops-ack` | 确认当前投影丢弃签名；待确认状态按 `drops.count>0 ∧ signature≠acked` 现算，提交训练时有未确认 drops 则 409 |
@@ -117,11 +119,11 @@
 
 ### 数据集域票 124 增补（从推理端拉取导入，2026-11-18；#129 命名泛化）
 
-联动域主动学习环的样本回流入口（ADR 0015 Decision 3/4）：后端按过滤条件调推理端导出 API（地址取系统域连接配置，票 122），解包 → 审查键归一（推理端 LabelMe JSON 的 `vt_review` 为字符串态生命周期状态，平台按 ADR 0003 字典态消费——归一剥除非字典态 `vt_review`，`checked: true` 经 XAL 互认口径继承为 approved）→ 走既有托管导入链（新建/加图，与手工导入同质量同路径）→ 导出包 manifest 四要素（工位 site、模型指纹 models[].model_sha8、时间窗 time_window、样本清单 samples）追加进 dataset meta 的 `producer_imports`（逐次拉取一条记录，逐条样本不建独立表；#129 前旧 meta 键读侧迁移，写恒新键）→ 回写推理端样本状态 ingested。重复拉取同批：add 模式按文件名与既有真源去重（同批重复 added=0）。临时包用完即焚，失败不留半成品。
+联动域主动学习环的样本回流入口（ADR 0015 Decision 3/4）：后端按过滤条件调推理端导出 API（地址取系统域连接配置，票 122），解包 → 审查键归一（推理端 LabelMe JSON 的 `vt_review` 为字符串态生命周期状态，平台按 ADR 0003 字典态消费——归一剥除非字典态 `vt_review`，`checked: true` 经 XAL 互认口径继承为 approved）→ classify 消费投影（#131：task_type=classify 时包内顶层 `label` 键就地投影为 flags 布尔真键——契约 §4.5 包内形态 `{"shapes":[],"label":"X"}` 不投影会判无类负样本，`classes.txt` 行序登记类别表）→ 走既有托管导入链（新建/加图，与手工导入同质量同路径）→ 导出包 manifest 四要素（工位 site、模型指纹 models[].model_sha8、时间窗 time_window、样本清单 samples）追加进 dataset meta 的 `producer_imports`（逐次拉取一条记录，逐条样本不建独立表；#129 前旧 meta 键读侧迁移，写恒新键）→ 回写推理端样本状态 ingested。重复拉取同批：add 模式按文件名与既有真源去重（同批重复 added=0）。临时包用完即焚，失败不留半成品。
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| POST | `/api/v1/datasets/producer-pulls` | 拉取导入（长操作，登记 `ds:{name}:producer-pull`，相：拉取导出包/解包归一/入图/校验标注/回写状态）。body: `{mode:create\|add, name, task_type?(create), classes?(create，缺省由导出包派生), base_url?(本次覆盖，不落库), filters:{task?, status?:confirmed\|corrected, created_from?, created_to?}}`；返回 `{name, mode, pulled, added, skipped_existing, site, models, time_window, writeback:{ok,detail,sample_ids}, validation_summary}`。错误：502 `producer_unreachable`（连不上）/ `producer_http_error`（导出 API 非 2xx）/ `producer_bad_bundle`（坏 ZIP 或 manifest 缺四要素），404 `producer_empty`（204 无样本）与 add 目标不存在 `not_found`，400 `invalid_args`；导入链阻断（表外类别 409、同名冲突 409）按票 03/04 契约原样返回 |
+| POST | `/api/v1/datasets/producer-pulls` | 拉取导入（长操作，登记 `ds:{name}:producer-pull`，相：拉取导出包/解包归一/入图/校验标注/回写状态）。body: `{mode:create\|add, name, task_type?(create), classes?(create，缺省由导出包派生), append_classes?(add，表外类别 409 拦下后的追加重试载荷，#131), base_url?(本次覆盖，不落库), filters:{task?, status?:confirmed\|corrected, created_from?, created_to?}}`；返回 `{name, mode, pulled, added, skipped_existing, normalized_review_keys, projected_labels, site, models, time_window, writeback:{ok,detail,sample_ids}, validation_summary}`。classify 消费投影（#131，契约 §4.5）：task_type=classify（add 按目标数据集任务形态）时包内顶层 `label` 键就地投影为 flags 布尔真键（`projected_labels` = 改写文件数），classes.txt 行序登记类别表。错误：502 `producer_unreachable`（连不上）/ `producer_http_error`（导出 API 非 2xx）/ `producer_bad_bundle`（坏 ZIP 或 manifest 缺四要素），404 `producer_empty`（204 无样本）与 add 目标不存在 `not_found`，400 `invalid_args`；导入链阻断（表外类别 409 带 `detail.source_labels`、同名冲突 409）按票 03/04 契约原样返回 |
 
 **出站回写契约**（推理端样本状态 API，推理端侧契约见联动契约 §5.3）：导入成功后平台发起 `POST {推理端基址}/api/samples/status`，body `{"status": "ingested", "sample_ids": [manifest 样本清单的逐条 sample_id]}`。回写失败告警降级不阻断导入主流程（与通知域一致口径）：响应 `writeback.ok=false` 带 detail，操作仍 done；重复拉取同一批（全量去重）也会再发回写，可补前次失败。
 

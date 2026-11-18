@@ -135,6 +135,37 @@ def _normalize_review_keys(unpack: Path) -> int:
     return changed
 
 
+def _project_classify_labels(unpack: Path) -> int:
+    """classify 消费投影（#131，契约 §4.5）：包内顶层 ``label`` 键 → ``flags`` 布尔真键。
+
+    推理端 classify 包形态 = ``{"shapes": [], "label": "X"}``（预测类名∈classes.txt），
+    而平台判类唯一口径是 flags 布尔真键（``pool._classify_flag_of`` / 校验健康 meta /
+    类别实例账目等处消费）——不投影直接导入会判成无类负样本。解包后就地改写：
+    ``flags["X"] = true``、删除顶层 ``label``，既有 flags 键原样保留（真键判类取首个
+    真键，目标类追加为真即被选中）。坏 JSON 不动（归导入链校验红灯管）。
+    Returns: 改写文件数。
+    """
+    changed = 0
+    for path in unpack.rglob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        label = data.get("label")
+        if not isinstance(label, str) or not label:
+            continue
+        flags = data.get("flags")
+        flags = dict(flags) if isinstance(flags, dict) else {}
+        flags[label] = True
+        data["flags"] = flags
+        del data["label"]
+        path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        changed += 1
+    return changed
+
+
 def _package_classes(unpack: Path) -> list[str]:
     """导出包类别表：classes.txt 行序（即类别 id）打底，包内标注标签补尾（去重保序）。"""
     classes: list[str] = []
@@ -225,6 +256,7 @@ def pull_import(
     name: str,
     task_type: str = "detect",
     classes: list[str] | None = None,
+    append_classes: list[str] | None = None,
     base_url: str | None = None,
     filters: dict | None = None,
     cfg: dict | None = None,
@@ -234,9 +266,12 @@ def pull_import(
     """拉取导入主流程（REST 端点经 long_op 登记调用，progress_cb 三段式 (phase, cur, total)）。
 
     mode="create"：新建托管数据集（task_type/classes 缺省由导出包派生）；
-    mode="add"：加图进既有托管数据集（同名去重：重复拉取同批 added=0）。
-    两条路径共用同一段解包/归一/落账/回写；导入链内任何阻断（表外类别、
-    同名冲突）按票 03/04 契约原样上抛，临时包不留半成品。
+    mode="add"：加图进既有托管数据集（同名去重：重复拉取同批 added=0；表外类别
+    走既有 409 流，``append_classes`` 为「一键追加后重试」载荷透传给加图链）。
+    两条路径共用同一段解包/归一/落账/回写；classify 包（契约 §4.5）在解包后就地
+    投影顶层 ``label`` → flags 布尔真键（判定按 create 的 task_type / add 的目标
+    数据集 task_type）；导入链内任何阻断（表外类别、同名冲突）按票 03/04 契约
+    原样上抛，临时包不留半成品。
     """
     if mode not in ("create", "add"):
         raise DatasetError("invalid_args", f"mode 必须是 create 或 add，得到 {mode!r}")
@@ -258,6 +293,14 @@ def pull_import(
         sample_ids = [str(s.get("sample_id")) for s in manifest["samples"]
                       if s.get("sample_id")]
         normalized = _normalize_review_keys(unpack)
+        # classify 消费投影：create 按请求 task_type；add 按目标数据集自身 task_type
+        # （body 的 task_type 缺省 detect，不作为 add 模式判据）
+        if mode == "create":
+            is_classify = task_type == "classify"
+        else:
+            target_meta = svc._read_meta(svc._ds_dir(name, root) / "dataset.json")
+            is_classify = (target_meta.get("task_type") or task_type) == "classify"
+        projected = _project_classify_labels(unpack) if is_classify else 0
 
         if progress_cb is not None:
             progress_cb("解包归一", len(sample_ids), len(sample_ids))
@@ -279,7 +322,7 @@ def pull_import(
             picked, skipped = _add_mode_plan(unpack, source)
             if picked:
                 svc.add_images(name, [str(p) for p in picked], "copy", root=root,
-                               progress_cb=progress_cb)
+                               append_classes=append_classes, progress_cb=progress_cb)
             added = sum(1 for p in picked if p.suffix.lower() in svc.IMAGE_EXTS)
         _append_manifest_meta(ds_dir, manifest, mode=mode, base=base, filters=filters)
     finally:
@@ -296,6 +339,7 @@ def pull_import(
         "added": added,
         "skipped_existing": len(skipped),
         "normalized_review_keys": normalized,
+        "projected_labels": projected,
         "site": manifest.get("site"),
         "models": manifest.get("models"),
         "time_window": manifest.get("time_window"),

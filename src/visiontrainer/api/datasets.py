@@ -166,6 +166,19 @@ class ReviewDecideBody(BaseModel):
     note: str = ""
 
 
+class ReviewRelabelBody(BaseModel):
+    """classify 改类（#131）：人工改类即判定（flags 真键切换 + vt_review=approved）。"""
+
+    image: str
+    label: str
+
+
+class ReviewBatchBody(BaseModel):
+    """批量通过（#131）：审查页当前过滤子集的整体判定；逐图窄写 approved。"""
+
+    images: list[str]
+
+
 @router.get("")
 def list_datasets():
     return svc.list_datasets()
@@ -519,6 +532,26 @@ def review_decide(name: str, body: ReviewDecideBody):
         return _error_response(exc)
 
 
+@router.post("/{name}/review/relabel")
+def review_relabel(name: str, body: ReviewRelabelBody):
+    """改类即判定（classify 首发，#131）：flags 真键切换 + vt_review=approved 原子落盘；
+    detect 不扩（detect 改类走 XAL 改标注）。"""
+    try:
+        return svc.review_reclassify(name, body.image, body.label)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/review/approve-batch")
+def review_approve_batch(name: str, body: ReviewBatchBody):
+    """批量通过（#131）：审查页当前过滤子集整体判定 approved；先整体校验再落笔
+    （任一图不可判 → 整体拒绝，不部分通过），已通过的幂等跳过。"""
+    try:
+        return svc.review_batch_approve(name, body.images)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
 @router.get("/{name}/annotation")
 def get_annotation(name: str, image: str):
     """读取真源标注 JSON 全文（阶段 3b 补只读缺口：审查画布叠加与大图合成的数据源）。
@@ -610,13 +643,15 @@ class ProducerPullBody(BaseModel):
     """从推理端拉取导入（票 124）：create 新建 / add 加图，过滤与目标二段一体。
 
     `base_url` 缺省走系统域连接配置（#122 runtime_settings → config 兜底），
-    显式给值即本次拉取覆盖（不落库）。`classes` 仅 create 生效，缺省由导出包派生。
+    显式给值即本次拉取覆盖（不落库）。`classes` 仅 create 生效，缺省由导出包派生；
+    `append_classes` 仅 add 生效——表外类别 409 拦下后的「一键追加后重试」载荷（#131）。
     """
 
     mode: Literal["create", "add"] = "create"
     name: str
     task_type: str = "detect"
     classes: list[str] | None = None
+    append_classes: list[str] | None = None
     base_url: str | None = None
     filters: ProducerPullFilters = ProducerPullFilters()
 
@@ -644,7 +679,8 @@ def pull_from_producer(body: ProducerPullBody, request: Request):
                      f"从推理端拉取导入 · {body.name}", scope=body.name) as op:
             return producer_pull.pull_import(
                 mode=body.mode, name=body.name, task_type=body.task_type,
-                classes=body.classes, base_url=body.base_url,
+                classes=body.classes, append_classes=body.append_classes,
+                base_url=body.base_url,
                 filters=body.filters.model_dump(exclude_none=True),
                 cfg=cfg, progress_cb=op.progress)
     except DatasetError as exc:

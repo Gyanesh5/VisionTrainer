@@ -10,7 +10,7 @@ import {
   type ReviewState,
   type ThumbUrl,
 } from "../../api/client";
-import { overlaySvg, overlaySvgInner, shapeLegend, type LabelJson } from "./overlay";
+import { classifyFlag, labelColors, overlaySvg, overlaySvgInner, shapeLegend, type LabelJson } from "./overlay";
 import { openZoom, setZoomFollow } from "./zoomViewer";
 
 /**
@@ -259,6 +259,54 @@ export function ReviewFlow({
     [meta.name, go, onMessage, onChanged, queryClient],
   );
 
+  // ── classify 改类即判定（#131）：类选择器 → 写 flags 真键 + vt_review=approved
+  // （detect 不渲染——detect 改类走 XAL 改标注，内容变更自动回待审）
+  const reclassify = useCallback(
+    async (label: string) => {
+      const c = curRef.current;
+      if (!c) return;
+      setBusy(true);
+      try {
+        const r = await datasetsApi.reviewReclassify(meta.name, { image: c.image, label });
+        setItems((prev) =>
+          prev.map((it) =>
+            it.image === c.image
+              ? { ...it, state: r.state, effective: r.effective, reason: "", modified: false }
+              : it,
+          ),
+        );
+        setLastDecide(`${new Date().toTimeString().slice(0, 5)} 通过（改类 ${label}）`);
+        go(1);
+        void queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
+        followPendingRef.current = true;
+        onChanged();
+      } catch (e) {
+        onMessage(e instanceof Error ? e.message : "改类失败", "error");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [meta.name, go, onMessage, onChanged, queryClient],
+  );
+
+  // ── 批量通过（#131）：当前过滤子集整体判定 approved——逐图走单判同一写路径，
+  // 确认门显式报数（含已通过之外的判定翻转），取消不动任何一张
+  const batchApprove = useCallback(async () => {
+    setBusy(true);
+    try {
+      const images = filteredRef.current.map((it) => it.image);
+      const r = await datasetsApi.reviewBatchApprove(meta.name, { images });
+      onMessage(`批量通过 ${r.approved} 张（已通过 ${r.already} 张保持不变）`, "ok");
+      await reload();
+      void queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
+      onChanged();
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "批量通过失败", "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [meta.name, onMessage, onChanged, queryClient, reload]);
+
   // ── 键盘流：物理键 code 匹配（IME 不可见）；input/textarea/select 与 IME 组合中不触发
   const rejectOpenRef = useRef(rejectOpen);
   rejectOpenRef.current = rejectOpen;
@@ -313,10 +361,18 @@ export function ReviewFlow({
   }, [items]);
   const done = counts.approved + counts.rejected + counts.skipped;
 
-  const legend = useMemo(
-    () => (annotation?.j ? shapeLegend(annotation.j, meta.classes) : []),
-    [annotation, meta.classes],
-  );
+  // 本图标注图例：detect 系按 shapes 计；classify 判类 = flags 真键（#131，包内 shapes 恒空，
+  // 不分支会落「无标注 shapes（负样本路径）」的错位显示）。色卡与叠加同按类别序。
+  const legend = useMemo(() => {
+    if (!annotation?.j) return [];
+    if (meta.task_type === "classify") {
+      const flag = classifyFlag(annotation.j);
+      if (!flag) return [];
+      const color = labelColors({ shapes: [{ label: flag }] }, meta.classes)[flag];
+      return [[flag, 1, color] as [string, number, string]];
+    }
+    return shapeLegend(annotation.j, meta.classes);
+  }, [annotation, meta.classes, meta.task_type]);
 
   if (loading) {
     return <p className="placeholder-note">解析审查队列…（大集可达秒级，进度见操作行）</p>;
@@ -405,6 +461,22 @@ export function ReviewFlow({
             </button>
           );
         })}
+        <span style={{ flex: 1 }} />
+        {filtered.length > 0 && (
+          <button
+            type="button"
+            className="btn btn-ghost"
+            disabled={busy}
+            title="当前过滤子集整体通过——逐图写判定（已通过的保持不变）；含已驳回图时会翻转为通过"
+            onClick={() => {
+              if (window.confirm(`当前过滤子集 ${filtered.length} 张全部通过？（已通过的保持不变，其余判定翻转为通过）`)) {
+                void batchApprove();
+              }
+            }}
+          >
+            批量通过（{filtered.length}）
+          </button>
+        )}
       </div>
 
       {filtered.length === 0 ? (
@@ -458,7 +530,11 @@ export function ReviewFlow({
             {/* 本图标注图例（色卡与画布叠加同按类别序着色） */}
             <div className="review-legend">
               <span style={{ color: "var(--chrome-text-dim)" }}>本图标注</span>
-              {legend.length === 0 && <span className="placeholder-note">无标注 shapes（负样本路径）</span>}
+              {legend.length === 0 && (
+                <span className="placeholder-note">
+                  {meta.task_type === "classify" ? "无判类 flags（负样本路径）" : "无标注 shapes（负样本路径）"}
+                </span>
+              )}
               {legend.map(([lbl, n, color]) => (
                 <span key={lbl} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                   <span className="legend-swatch" style={{ background: color }} />
@@ -490,6 +566,29 @@ export function ReviewFlow({
               >
                 下一张 →
               </button>
+              {meta.task_type === "classify" && cur && (
+                <label
+                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                  title="classify 改类即判定：写 flags 真键并标记通过（人工改类即人工判定）"
+                >
+                  <span style={{ color: "var(--chrome-text-dim)" }}>改类</span>
+                  <select
+                    data-testid="reclass-select"
+                    disabled={busy}
+                    value={(annotation?.name === cur.name ? classifyFlag(annotation.j) : null) ?? ""}
+                    onChange={(e) => { if (e.target.value) void reclassify(e.target.value); }}
+                  >
+                    <option value="" disabled>
+                      选择类…
+                    </option>
+                    {(meta.classes ?? []).map((c) => (
+                      <option key={c} value={c}>
+                        {c}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
               <button
                 type="button"
                 className="btn btn-ghost"

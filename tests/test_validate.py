@@ -75,3 +75,17 @@ def test_circle_only_image_matches_segment(tmp_path):
     report = validate_dataset(src, "segment", ["car"])
     assert report["counts"]["no_matching_shape"] == 0
     assert report["ok"]
+
+
+def test_classify_counts_by_flags_not_shapes(tmp_path):
+    """classify 负样本判据按 flags 真键（#131 修正）：契约 §4.5 包内 shapes 恒空，
+    纯 shapes 判据会把有判类的图计入 background（负样本），健康统计失真。"""
+    src = _src(tmp_path)
+    make_image(src, "a.png")
+    make_annotation(src, "a", [], flags={"occupied": True})  # 有判类
+    make_image(src, "b.png")
+    make_annotation(src, "b", [], flags={})  # 无判类 = 负样本路径
+    report = validate_dataset(src, "classify", ["occupied"])
+    assert report["labeled"] == 1
+    assert report["background"] == 1
+    assert report["ok"]

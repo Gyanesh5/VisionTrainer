@@ -1770,17 +1770,11 @@ def review_queue(name: str, root: Path | None = None) -> dict:
             "unlabeled": unlabeled, "items": items}
 
 
-def review_decide(name: str, image: str, state: str, reason: str = "",
-                  note: str = "", root: Path | None = None) -> dict:
-    """判定一图（窄写 checked/vt_review，ADR 0003）；驳回必附理由。返回写后状态。
+def _review_label_path(ds_dir: Path, image: str) -> Path:
+    """审查写路径（判定/改类/批量）共用的目标校验：source/ 集合内、未排除、带标注 JSON。
 
-    票 05 改源：判据从「在活跃清单内」换成「在 `source/` 审查集合内」（带 JSON、未排除）。
+    票 05 改源口径：判据是「在 `source/` 审查集合内」而非活跃清单（审查先于切分存在）。
     """
-    from . import review as rv
-
-    if state not in rv.REVIEW_STATES:
-        raise DatasetError("invalid_args", f"state 必须是 {list(rv.REVIEW_STATES)}")
-    _, ds_dir = _managed_dataset(name, root, "标注审查")
     source = _source_dir(ds_dir)
     p = Path(image)
     if not p.is_file() or p.parent.resolve() != source.resolve():
@@ -1791,6 +1785,18 @@ def review_decide(name: str, image: str, state: str, reason: str = "",
     lbl = split_lib.label_json_of(source, p)
     if lbl is None:
         raise DatasetError("invalid_args", "负样本无标注 JSON，随标注产生后才能审查")
+    return lbl
+
+
+def review_decide(name: str, image: str, state: str, reason: str = "",
+                  note: str = "", root: Path | None = None) -> dict:
+    """判定一图（窄写 checked/vt_review，ADR 0003）；驳回必附理由。返回写后状态。"""
+    from . import review as rv
+
+    if state not in rv.REVIEW_STATES:
+        raise DatasetError("invalid_args", f"state 必须是 {list(rv.REVIEW_STATES)}")
+    _, ds_dir = _managed_dataset(name, root, "标注审查")
+    lbl = _review_label_path(ds_dir, image)
     try:
         rv.write_review(lbl, state, reason, note)
     except ValueError as exc:
@@ -1798,6 +1804,72 @@ def review_decide(name: str, image: str, state: str, reason: str = "",
     st = rv.read_state(lbl)
     return {"image": image, "state": st["state"], "effective": st["effective"],
             "reason": st["reason"], "checked_synced": True}
+
+
+def review_reclassify(name: str, image: str, label: str, root: Path | None = None) -> dict:
+    """classify 改类即判定（#131）：flags 真键切换 + vt_review=approved，一次原子写。
+
+    人工改类本身就是复核判定（设计约束：融合既有审查流——vt_review 状态机 / 排除
+    机制 / 判定写路径原样复用，只换判定来源）；detect 不扩（detect 改类走 XAL 改
+    标注，shapes 变更经哈希裁决自动回待审）。label 须在类别表内。
+    """
+    from . import review as rv
+
+    meta, ds_dir = _managed_dataset(name, root, "标注审查")
+    if meta.get("task_type") != "classify":
+        raise DatasetError(
+            "invalid_args",
+            "改类动作仅 classify 数据集提供（detect 改类在 X-AnyLabeling 内改标注，"
+            "内容变更会自动回待审）")
+    classes = read_classes(ds_dir)
+    if label not in classes:
+        raise DatasetError("invalid_args", f"类别「{label}」不在类别表内：{'、'.join(classes)}")
+    lbl = _review_label_path(ds_dir, image)
+    try:
+        data = json.loads(lbl.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise DatasetError("invalid_args", f"标注 JSON 读取失败：{exc}") from exc
+    if not isinstance(data, dict):
+        raise DatasetError("invalid_args", f"标注 JSON 顶层不是对象，无法改类：{lbl.name}")
+    flags = dict(data.get("flags") or {})
+    for k, v in list(flags.items()):
+        if v:
+            flags[k] = False  # 判类取首个真键：先全部置假，目标类唯一为真
+    flags[label] = True
+    try:
+        rv.write_review(lbl, "approved", flags=flags)
+    except ValueError as exc:
+        raise DatasetError("invalid_args", str(exc))
+    st = rv.read_state(lbl)
+    return {"image": image, "label": label, "state": st["state"],
+            "effective": st["effective"], "checked_synced": True}
+
+
+def review_batch_approve(name: str, images: list[str], root: Path | None = None) -> dict:
+    """批量通过（#131）：子集整体判定 approved——逐图走与单判同一窄写原子路径。
+
+    先整体校验再落笔（任一图不在审查集合 / 排除在册 → 整体拒绝，不部分通过）；
+    已通过的幂等跳过（不刷新 decided_at）。子集由前端按当前过滤视图选定，后端
+    不感知过滤维度（审查状态机无过滤概念）；含已驳回图时同样翻转为 approved
+    （人工批量判定与单判语义一致）。
+    """
+    from . import review as rv
+
+    if not images:
+        raise DatasetError("invalid_args", "批量通过需要 images 清单（当前过滤子集）")
+    _, ds_dir = _managed_dataset(name, root, "标注审查")
+    targets: dict[str, Path] = {}
+    for image in images:
+        if image not in targets:
+            targets[image] = _review_label_path(ds_dir, image)
+    approved = already = 0
+    for lbl in targets.values():
+        if rv.read_state(lbl)["effective"] == "approved":
+            already += 1
+            continue
+        rv.write_review(lbl, "approved")
+        approved += 1
+    return {"requested": len(images), "approved": approved, "already": already}
 
 
 def review_progress(name: str, root: Path | None = None) -> dict:

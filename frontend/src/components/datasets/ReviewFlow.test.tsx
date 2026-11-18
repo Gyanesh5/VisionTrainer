@@ -3,7 +3,7 @@ import { render, screen, waitFor, act } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { REVIEW_REASONS, datasetsApi, signThumbUrls, type DatasetDetail, type ReviewItem } from "../../api/client";
-import { labelColors, overlaySvg, shapeLegend } from "./overlay";
+import { classifyFlag, labelColors, overlaySvg, shapeLegend } from "./overlay";
 import { openZoom, setZoomFollow, zoomFollowIfShown } from "./zoomViewer";
 import { ReviewFlow } from "./ReviewFlow";
 
@@ -15,6 +15,8 @@ vi.mock("../../api/client", async (importOriginal) => {
       ...actual.datasetsApi,
       reviewQueue: vi.fn(),
       reviewDecide: vi.fn(),
+      reviewReclassify: vi.fn(),
+      reviewBatchApprove: vi.fn(),
       annotation: vi.fn(),
       exportReviewRejects: vi.fn(),
       xalOpen: vi.fn(),
@@ -27,6 +29,8 @@ vi.mock("../../api/client", async (importOriginal) => {
 
 const reviewQueue = vi.mocked(datasetsApi.reviewQueue);
 const reviewDecide = vi.mocked(datasetsApi.reviewDecide);
+const reviewReclassify = vi.mocked(datasetsApi.reviewReclassify);
+const reviewBatchApprove = vi.mocked(datasetsApi.reviewBatchApprove);
 const annotation = vi.mocked(datasetsApi.annotation);
 const signUrls = vi.mocked(signThumbUrls);
 
@@ -86,11 +90,11 @@ const queue = {
   ],
 };
 
-function renderFlow() {
+function renderFlow(m: DatasetDetail = meta) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <ReviewFlow meta={meta} onMessage={vi.fn()} onChanged={vi.fn()} />
+      <ReviewFlow meta={m} onMessage={vi.fn()} onChanged={vi.fn()} />
     </QueryClientProvider>,
   );
 }
@@ -185,6 +189,98 @@ describe("overlay coloring (patent 4)", () => {
     expect(svg).toContain('width="50"');
     expect(svg).toContain('height="100"');
     expect(svg).toContain("car");
+  });
+});
+
+describe("classify flag (linkage #131)", () => {
+  it("classifyFlag_takes_first_true_flags_key_like_backend", () => {
+    // 与后端 pool._classify_flag_of 同口径：首个为真的 flags 键
+    expect(classifyFlag({ flags: { occupied: false, vacant: true } })).toBe("vacant");
+    expect(classifyFlag({ flags: { occupied: true, vacant: true } })).toBe("occupied");
+    expect(classifyFlag({ flags: {} })).toBeNull();
+    expect(classifyFlag({ shapes: [{ label: "car" }] })).toBeNull();
+    expect(classifyFlag(null)).toBeNull();
+  });
+
+  it("classify_queue_renders_flag_class_name_not_negative_sample_note", async () => {
+    // classify 包（契约 §4.5）：shapes 空 + flags 真键——图例显示判类名，
+    // 不再落入「无标注 shapes（负样本路径）」的负样本错位显示
+    const classifyMeta = { ...meta, task_type: "classify" as const };
+    annotation.mockResolvedValue({ imageWidth: 100, imageHeight: 100, shapes: [], flags: { occupied: true } });
+    renderFlow(classifyMeta);
+    const flow = await screen.findByTestId("review-flow");
+    await waitFor(() => expect(flow.textContent).toContain("occupied ×1"));
+    expect(flow.textContent).not.toContain("无标注 shapes");
+  });
+
+  it("classify_without_true_flag_shows_no_class_note", async () => {
+    const classifyMeta = { ...meta, task_type: "classify" as const };
+    annotation.mockResolvedValue({ imageWidth: 100, imageHeight: 100, shapes: [], flags: {} });
+    renderFlow(classifyMeta);
+    const flow = await screen.findByTestId("review-flow");
+    await waitFor(() => expect(flow.textContent).toContain("无判类"));
+    expect(flow.textContent).not.toContain("无标注 shapes");
+  });
+});
+
+describe("classify reclassify (linkage #131)", () => {
+  // classify 数据集：类别表 = flags 真键口径（契约 §4.5 投影后的判类词表）
+  const classifyMeta = { ...meta, task_type: "classify" as const, classes: ["occupied", "vacant"] };
+
+  it("detect_dataset_renders_no_reclass_selector", async () => {
+    renderFlow();
+    await screen.findByTestId("review-flow");
+    expect(screen.queryByTestId("reclass-select")).not.toBeInTheDocument();
+  });
+
+  it("reclass_select_shows_current_class_posts_label_and_advances", async () => {
+    const user = userEvent.setup();
+    annotation.mockResolvedValue({ imageWidth: 100, imageHeight: 100, shapes: [], flags: { occupied: true } });
+    reviewReclassify.mockResolvedValue({
+      image: queue.items[0].image, label: "vacant",
+      state: "approved", effective: "approved", checked_synced: true,
+    });
+    renderFlow(classifyMeta);
+    await screen.findByTestId("review-flow");
+    // 当前判类回显（annotation 异步落位）
+    const sel = (await screen.findByTestId("reclass-select")) as HTMLSelectElement;
+    await waitFor(() => expect(sel.value).toBe("occupied"));
+    // 改类即判定：POST relabel → 写回 approved 并自动前进
+    await user.selectOptions(sel, "vacant");
+    await waitFor(() =>
+      expect(reviewReclassify).toHaveBeenCalledWith("plate", { image: queue.items[0].image, label: "vacant" }),
+    );
+    await waitFor(() => expect(screen.getByText("b.png")).toBeInTheDocument());
+    // 上次判定 pill 记改类
+    await waitFor(() => expect(screen.getByTestId("review-flow").textContent).toContain("改类 vacant"));
+  });
+});
+
+describe("batch approve (linkage #131)", () => {
+  it("batch_button_posts_current_filtered_subset", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
+    reviewBatchApprove.mockResolvedValue({ requested: 2, approved: 2, already: 0 });
+    renderFlow();
+    await screen.findByTestId("review-flow");
+    // 默认 pending 过滤子集 = a/b 两张（c 已通过不在子集）
+    await user.click(screen.getByRole("button", { name: /批量通过/ }));
+    await waitFor(() =>
+      expect(reviewBatchApprove).toHaveBeenCalledWith("plate", {
+        images: [queue.items[0].image, queue.items[1].image],
+      }),
+    );
+    confirmSpy.mockRestore();
+  });
+
+  it("batch_confirm_cancel_does_not_post", async () => {
+    const user = userEvent.setup();
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    renderFlow();
+    await screen.findByTestId("review-flow");
+    await user.click(screen.getByRole("button", { name: /批量通过/ }));
+    expect(reviewBatchApprove).not.toHaveBeenCalled();
+    confirmSpy.mockRestore();
   });
 });
 

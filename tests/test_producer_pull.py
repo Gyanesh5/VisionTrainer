@@ -331,6 +331,90 @@ def test_pull_writeback_failure_degrades_not_blocks(pull_client, fake_producer, 
 # ---------------------------------------------------------------- 契约细节
 
 
+# ---------------------------------------------------------------- classify 消费面（#131）
+
+
+def classify_sample(sample_id: str, label: str | None, idx: int = 0) -> dict:
+    """契约 §4.5 classify 包内形态：``shapes: []`` + 顶层 ``label``（预测类名∈classes.txt）。
+
+    不带 checked/vt_review——契约通用禁止审查状态键出包（复核是训练平台侧职责），
+    故样本进平台后为待审态（人工改类/批量通过的输入）。
+    """
+    stem = f"{sample_id}_1_{idx:06d}"
+    labelme: dict = {"version": "5.0.1", "shapes": [], "imagePath": f"{stem}.jpg",
+                     "imageData": None, "imageHeight": 480, "imageWidth": 640, "flags": {}}
+    if label:
+        labelme["label"] = label
+    return {
+        "sample_id": sample_id, "status": "confirmed", "created_ts": 1760000000.0,
+        "site": SITE, "task_id": TASK, "task_type": "zone_occupancy",
+        "frame_number": 3, "model_id": "m1", "model_sha8": "deadbeef",
+        "images": [{"path": f"images/{stem}.jpg"}],
+        "labelme": labelme,
+    }
+
+
+def test_pull_classify_label_projection_end_to_end(pull_client, fake_producer, datasets_root):
+    """classify 导出包全链：顶层 label→flags 布尔真键投影、classes.txt 类别登记、队列待审。
+
+    契约 §4.5 包内形态直接导入会判无类（flags 空 = 负样本路径），投影是消费面第一件。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [classify_sample("s-caaa", "occupied"), classify_sample("s-cbbb", "vacant")],
+        ["occupied", "vacant"])
+    resp = _pull(pull_client, fake_producer, task_type="classify", name="cls")
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["added"] == 2
+    assert body["projected_labels"] == 2
+    assert body["writeback"]["ok"] is True
+
+    meta = pull_client.get("/api/v1/datasets/cls").json()
+    assert meta["task_type"] == "classify"
+    assert meta["classes"] == ["occupied", "vacant"]  # classes.txt 行序登记
+
+    # 投影形态：flags 布尔真键、顶层 label 键移除（VT 判类唯一口径 = flags 真键）
+    src = datasets_root / "cls" / "source"
+    j1 = json.loads((src / "s-caaa_1_000000.json").read_text(encoding="utf-8"))
+    assert j1["flags"] == {"occupied": True}
+    assert "label" not in j1
+    assert j1["shapes"] == []
+
+    # 审查队列：契约包不带审查状态键 → 全员待审（改类/批量通过的输入）
+    q = pull_client.get("/api/v1/datasets/cls/review").json()
+    assert q["counts"]["pending"] == 2
+    assert q["total"] == 2
+
+
+def test_pull_classify_add_mode_out_of_table_blocks_then_append(pull_client, fake_producer,
+                                                               datasets_root):
+    """add 模式拉进 classify 数据集：表外新类别 409 拦下（既有流不半截入图），
+    append_classes 重试放行——投影后的 flags 真键与 shape label 同口径阻断。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [classify_sample("s-caaa", "occupied")], ["occupied", "vacant"])
+    assert _pull(pull_client, fake_producer, task_type="classify",
+                 name="cls2").status_code == 200
+
+    # 二批带新类别 crowded（body task_type 缺省 detect——投影按目标数据集 task_type 判定）
+    FakeProducerHandler.bundle = build_bundle(
+        [classify_sample("s-cddd", "crowded")], ["occupied", "vacant", "crowded"])
+    r = _pull(pull_client, fake_producer, mode="add", name="cls2")
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["code"] == "state_conflict"
+    assert err["detail"]["source_labels"] == ["crowded"]
+    meta = pull_client.get("/api/v1/datasets/cls2").json()
+    assert meta["validation_summary"]["total_images"] == 1  # 阻断不部分入图
+
+    FakeProducerHandler.export_bodies = []
+    FakeProducerHandler.writeback_bodies = []
+    r = _pull(pull_client, fake_producer, mode="add", name="cls2",
+              append_classes=["crowded"])
+    assert r.status_code == 200, r.text
+    meta = pull_client.get("/api/v1/datasets/cls2").json()
+    assert meta["classes"] == ["occupied", "vacant", "crowded"]
+    assert meta["validation_summary"]["total_images"] == 2
+
+
 def test_pull_invalid_base_url_400(pull_client):
     """显式 base_url 非法（非 http(s)）：400 invalid_args，不发起任何出站。"""
     r = _pull(pull_client, "ftp://bad")
