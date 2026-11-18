@@ -152,7 +152,7 @@ sha256 前 8 位；只算字节内容，与文件名/路径/mtime 无关；样�
 | 6 | 推理端 | external-integration-api.md 第 7 章（训练请求三端点契约）与本文冲突 | 收缩为指针章指向本文 |
 | 7 | 训练平台 | 平台内以 monitor 类词命名对端（连接配置键、/monitor-pull、monitor_pull.py、monitor_writeback.py、monitor_imports meta、UI 文案） | 已完成（实施票 #129：代码 token=`producer`、中文=推理端；旧 runtime_settings 键/config.toml 旧节/meta 旧键读兼容，写恒新键） |
 | 8 | 训练平台 | classify 消费面缺失（审查页渲染态/改类动作/批量通过/label→flags 投影） | 已完成（实施票 #131：pull 解包后顶层 label→flags 真键投影+classes.txt 登记、审查页 classify 渲染分支、改类即判定（review/relabel）、批量通过（review/approve-batch）；validate 对 classify 按 flags 定类计数） |
-| 9 | 训练平台 | 拉取 ZIP 暂存+幂等重导缺失 | 待建票（§5.5 主路径） |
+| 9 | 训练平台 | 拉取 ZIP 暂存+幂等重导缺失 | 已完成（实施票 #132：下载成功且结构校验通过即落暂存 `producer_pulls/`（成功即焚+超期 14 天清扫）；逐文件幂等以词干为单位前置预检——同词干同内容跳过/异内容拒收登记进导入报告与 meta 落账，只作用拉取导入器；`GET producer-pulls/staged` + `POST producer-pulls/reimport` 从暂存重导，成功照常回写 ingested） |
 
 适配完成后逐条勾销；新增偏差随实施登记。
 

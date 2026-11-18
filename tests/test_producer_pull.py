@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -39,8 +41,14 @@ def _labelme_json(image: str, width=640, height=480, *, checked=True,
     return d
 
 
-def build_bundle(samples: list[dict], classes: list[str]) -> bytes:
-    """按推理端导出器包结构造 ZIP：images/ + classes.txt + manifest.yaml。"""
+DEFAULT_JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64
+
+
+def build_bundle(samples: list[dict], classes: list[str],
+                 *, jpeg: bytes = DEFAULT_JPEG) -> bytes:
+    """按推理端导出器包结构造 ZIP：images/ + classes.txt + manifest.yaml。
+
+    jpeg 参数供同词干异内容场景注入不同图字节（缺省与真实包一致的 JPEG 头假体）。"""
     manifest = {
         "schema_version": 1,
         "exported_at": "2026-11-18 10:00:00",
@@ -59,7 +67,7 @@ def build_bundle(samples: list[dict], classes: list[str]) -> bytes:
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for i, s in enumerate(samples):
             stem = f"{s['sample_id']}_1_{i:06d}"
-            zf.writestr(f"images/{stem}.jpg", b"\xff\xd8\xff\xe0" + b"\x00" * 64)
+            zf.writestr(f"images/{stem}.jpg", jpeg)
             zf.writestr(f"images/{stem}.json",
                         json.dumps(s["labelme"], ensure_ascii=False))
         zf.writestr("classes.txt", "".join(f"{c}\n" for c in classes))
@@ -427,3 +435,232 @@ def test_pull_invalid_status_filter_422(pull_client):
     r = pull_client.post("/api/v1/datasets/producer-pulls", json={
         "mode": "create", "name": "mfd", "filters": {"status": "pending"}})
     assert r.status_code == 422
+
+
+# ---------------------------------------------------------------- 拉取恢复：ZIP 暂存（#132）
+
+
+def test_pull_import_failure_stages_zip_for_recovery(pull_client, fake_producer, datasets_root):
+    """导入链阻断（重名 409）后暂存 ZIP 留在数据根下独立目录 producer_pulls/，
+    错误 detail 带 staged_pull_id 供重导定位；sidecar 记录重导所需的拉取上下文。
+
+    暂存时机 = 下载成功且结构校验（ZIP/manifest）通过、动真源之前——坏包没有
+    重导价值，不进暂存区。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-stg1", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="taken").status_code == 200
+    r = _pull(pull_client, fake_producer, name="taken")  # create 重名 → 导入链阻断
+    assert r.status_code == 409
+    detail = r.json()["error"]["detail"]
+    pull_id = detail["staged_pull_id"]
+    assert pull_id
+    stage = datasets_root / "producer_pulls"
+    assert (stage / f"{pull_id}.zip").is_file()
+    sidecar = json.loads((stage / f"{pull_id}.json").read_text(encoding="utf-8"))
+    assert sidecar["pull_id"] == pull_id
+    assert sidecar["name"] == "taken"
+    assert sidecar["mode"] == "create"
+    assert sidecar["task_type"] == "detect"
+    assert sidecar["filters"] == {"task": TASK}
+    assert sidecar["base_url"] == fake_producer
+    assert sidecar["staged_at"]
+
+
+def test_pull_bad_bundle_leaves_no_stage(pull_client, fake_producer, datasets_root):
+    """坏包（非 ZIP）：结构校验先于暂存——不留暂存文件、错误不带 staged_pull_id。"""
+    FakeProducerHandler.raw_body = b"<html>gateway error</html>"
+    r = _pull(pull_client, fake_producer)
+    assert r.status_code == 502
+    assert "staged_pull_id" not in r.json()["error"]["detail"]
+    assert list((datasets_root / "producer_pulls").glob("*.zip")) == []
+
+
+def test_pull_success_discards_staged_zip(pull_client, fake_producer, datasets_root):
+    """保留策略（成功即焚）：导入成功重导使命已尽，producer_pulls/ 不留 ZIP。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-stg2", "confirmed")], ["car"])
+    r = _pull(pull_client, fake_producer, name="mfd9")
+    assert r.status_code == 200, r.text
+    assert list((datasets_root / "producer_pulls").glob("*.zip")) == []
+
+
+# ---------------------------------------------------------------- 逐文件幂等导入（#132，契约 §5.5/§6.4）
+
+
+def test_pull_repeat_same_package_zero_duplicates_with_lists(pull_client, fake_producer,
+                                                             datasets_root):
+    """同一包重复导入零重复样本（重复防线第 2 层）：同词干同内容=跳过，响应带词干清单。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-idem", "confirmed",
+                      shapes=[{"label": "car", "shape_type": "rectangle",
+                               "points": [[10, 10], [110, 90]], "flags": {}}])],
+        ["car"])
+    assert _pull(pull_client, fake_producer, name="mfdi").status_code == 200
+    r = _pull(pull_client, fake_producer, mode="add", name="mfdi")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 0
+    assert body["skipped"] == ["s-idem_1_000000"]
+    assert body["skipped_existing"] == 2  # 图 + 同词干 JSON 逐文件计数（既有口径）
+    assert body["rejected"] == []
+    meta = pull_client.get("/api/v1/datasets/mfdi").json()
+    assert meta["validation_summary"]["total_images"] == 1  # 零重复
+
+
+def test_pull_same_stem_different_content_rejected(pull_client, fake_producer, datasets_root):
+    """同词干异内容=拒收登记（导入报告可见）：真源一字节不动、回写不含被拒样本。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-conf", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="mfdc").status_code == 200
+    # 同词干（s-conf_1_000000）异内容：图字节与标注 shape 都改
+    mutated = [sample_entry("s-conf", "confirmed",
+                            shapes=[{"label": "car", "shape_type": "rectangle",
+                                     "points": [[99, 99], [150, 150]], "flags": {}}])]
+    FakeProducerHandler.bundle = build_bundle(
+        mutated, ["car"], jpeg=b"\xff\xd8\xff\xe1" + b"\x11" * 64)
+    FakeProducerHandler.writeback_bodies = []  # 只看第二批的回写载荷
+    r = _pull(pull_client, fake_producer, mode="add", name="mfdc")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 0
+    assert body["skipped"] == []
+    assert body["rejected"] == [{"stem": "s-conf_1_000000", "reason": "content_mismatch",
+                                 "files": ["s-conf_1_000000.jpg", "s-conf_1_000000.json"]}]
+    src = datasets_root / "mfdc" / "source"
+    assert (src / "s-conf_1_000000.jpg").read_bytes() == DEFAULT_JPEG  # 真源不动
+    assert pull_client.get("/api/v1/datasets/mfdc").json()[
+        "validation_summary"]["total_images"] == 1
+    # 拒收 ≠ ingested：回写不携带被拒样本（样本留在推理端 exported 态待人工处置）
+    assert FakeProducerHandler.writeback_bodies == [
+        {"status": "ingested", "sample_ids": []}]
+
+
+def test_pull_mixed_batch_new_imports_conflict_rejected(pull_client, fake_producer,
+                                                        datasets_root):
+    """混合批次：包内其余照常入库（新词干正常入）、异内容词干拒收登记，互不拖累。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-mix0", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="mfdm").status_code == 200
+    mutated = sample_entry("s-mix0", "confirmed",
+                           shapes=[{"label": "car", "shape_type": "rectangle",
+                                    "points": [[5, 5], [50, 60]], "flags": {}}])
+    fresh = sample_entry("s-mix1", "confirmed",
+                         shapes=[{"label": "car", "shape_type": "rectangle",
+                                  "points": [[10, 10], [110, 90]], "flags": {}}], idx=1)
+    FakeProducerHandler.bundle = build_bundle(
+        [mutated, fresh], ["car"], jpeg=b"\xff\xd8\xff\xe1" + b"\x22" * 64)
+    r = _pull(pull_client, fake_producer, mode="add", name="mfdm")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 1  # 新词干入库
+    assert body["skipped"] == []
+    assert body["rejected"] == [{"stem": "s-mix0_1_000000", "reason": "content_mismatch",
+                                 "files": ["s-mix0_1_000000.jpg", "s-mix0_1_000000.json"]}]
+    meta = pull_client.get("/api/v1/datasets/mfdm").json()
+    assert meta["validation_summary"]["total_images"] == 2  # 零重复：首拉 1 + 新词干 1
+    # 拒收登记进导入落账（dataset meta），事后可查
+    assert meta["producer_imports"][1]["import_rejected"] == body["rejected"]
+
+
+# ---------------------------------------------------------------- 重导入口（#132，契约 §5.5）
+
+STAGED_PATH = "/api/v1/datasets/producer-pulls/staged"
+REIMPORT_PATH = "/api/v1/datasets/producer-pulls/reimport"
+
+
+def test_reimport_from_staged_zip_after_class_block(pull_client, fake_producer, datasets_root):
+    """验收主路径：导入失败（表外类别 409）→ 暂存清单可见 → 从暂存 ZIP 重导成功
+    → 照常回写 ingested → 成功即焚。重导沿用同一套词干幂等语义（同词干同内容跳过）。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-rim0", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="mfd4").status_code == 200
+    # 第二批：同词干同内容复述（s-rim0）+ 新词干携带表外类别（s-rim1/truck）→ 409 拦下
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-rim0", "confirmed"),
+         sample_entry("s-rim1", "confirmed",
+                      shapes=[{"label": "truck", "shape_type": "rectangle",
+                               "points": [[10, 10], [110, 90]], "flags": {}}], idx=1)],
+        ["car", "truck"])
+    r = _pull(pull_client, fake_producer, mode="add", name="mfd4")
+    assert r.status_code == 409
+    err = r.json()["error"]
+    assert err["detail"]["source_labels"] == ["truck"]
+    pull_id = err["detail"]["staged_pull_id"]
+    assert (datasets_root / "producer_pulls" / f"{pull_id}.zip").is_file()
+
+    # 暂存清单可见（重导入口的发现面）
+    lst = pull_client.get(STAGED_PATH).json()
+    assert [s["pull_id"] for s in lst] == [pull_id]
+    assert lst[0]["name"] == "mfd4"
+    assert lst[0]["mode"] == "add"
+    assert lst[0]["task_type"] == "detect"
+    assert lst[0]["staged_at"]
+    assert lst[0]["size_bytes"] > 0
+
+    # 从暂存重导：append_classes 一键追加后重试（与拉取同一载荷语义）
+    r = pull_client.post(REIMPORT_PATH, json={
+        "name": "mfd4", "pull_id": pull_id, "append_classes": ["truck"]})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "add"
+    assert body["added"] == 1  # 新词干入库
+    assert body["skipped"] == ["s-rim0_1_000000"]  # 同词干同内容跳过（幂等语义沿用）
+    assert body["rejected"] == []
+    assert body["writeback"]["ok"] is True
+    assert sorted(body["writeback"]["sample_ids"]) == ["s-rim0", "s-rim1"]
+    meta = pull_client.get("/api/v1/datasets/mfd4").json()
+    assert meta["classes"] == ["car", "truck"]
+    assert meta["validation_summary"]["total_images"] == 2
+
+    # 成功即焚：暂存清空
+    assert pull_client.get(STAGED_PATH).json() == []
+    assert not (datasets_root / "producer_pulls" / f"{pull_id}.zip").exists()
+
+
+def test_reimport_create_when_dataset_missing(pull_client, fake_producer, datasets_root):
+    """create 语义重导：目标数据集不存在（如导入后被删）→ 按暂存 sidecar 的任务形态重建。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-rc0", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="occupied").status_code == 200
+    r = _pull(pull_client, fake_producer, name="occupied")  # create 重名 409 → 暂存
+    assert r.status_code == 409
+    pull_id = r.json()["error"]["detail"]["staged_pull_id"]
+    assert pull_client.delete("/api/v1/datasets/occupied").status_code == 200
+
+    r = pull_client.post(REIMPORT_PATH, json={"name": "occupied", "pull_id": pull_id})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["mode"] == "create"
+    assert body["added"] == 1
+    assert body["writeback"]["ok"] is True
+    meta = pull_client.get("/api/v1/datasets/occupied").json()
+    assert meta["validation_summary"]["total_images"] == 1
+    assert meta["classes"] == ["car"]  # 类别表由暂存包派生（classes.txt 行序）
+
+
+def test_reimport_unknown_pull_id_404(pull_client):
+    """pull_id 不存在（已焚/已清扫/写错）：404 not_found。"""
+    r = pull_client.post(REIMPORT_PATH, json={"name": "ghost", "pull_id": "nope"})
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_staged_zip_expired_swept_on_list(pull_client, fake_producer, datasets_root):
+    """保留策略（超期清扫）：mtime 超 14 天的暂存 ZIP 在暂存清单动作时连同 sidecar 清掉。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-ttl", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="taken").status_code == 200
+    r = _pull(pull_client, fake_producer, name="taken")
+    assert r.status_code == 409
+    keep_id = r.json()["error"]["detail"]["staged_pull_id"]
+
+    stage = datasets_root / "producer_pulls"
+    stale = stage / "20200101T000000-abcdef01.zip"
+    stale.write_bytes(b"stale")
+    stale.with_suffix(".json").write_text("{}", encoding="utf-8")
+    past = time.time() - 15 * 86400
+    os.utime(stale, (past, past))
+
+    assert [s["pull_id"] for s in pull_client.get(STAGED_PATH).json()] == [keep_id]
+    assert not stale.exists()
+    assert not stale.with_suffix(".json").exists()

@@ -663,7 +663,8 @@ def pull_from_producer(body: ProducerPullBody, request: Request):
 
     全程进行中操作三层反馈：登记 `ds:{name}:producer-pull`（拉取/解包/入图/校验/回写
     五相 operation.updated）。推理端不可达/坏包/空范围分别 502/502/404；回写失败
-    告警降级不阻断（响应 writeback.ok=false 带原因）。"""
+    告警降级不阻断（响应 writeback.ok=false 带原因）。下载成功且结构校验通过即落
+    本地暂存（#132 契约 §5.5），导入链阻断时错误 detail 带 staged_pull_id 供重导。"""
     from ..config import ConfigError
     from ..core import producer as producer_lib
     from ..datasets import producer_pull
@@ -683,6 +684,56 @@ def pull_from_producer(body: ProducerPullBody, request: Request):
                 base_url=body.base_url,
                 filters=body.filters.model_dump(exclude_none=True),
                 cfg=cfg, progress_cb=op.progress)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+class ProducerReimportBody(BaseModel):
+    """从暂存 ZIP 重试导入（#132，契约 §5.5）：pull_id 定位暂存包。
+
+    目标数据集存在 → add 语义（词干幂等：同词干同内容跳过、异内容拒收登记）；
+    不存在 → create 语义（任务形态沿暂存 sidecar、类别由包派生，可显式覆盖）。
+    `append_classes` 仅 add 重试生效（表外类别 409 拦下后的一键追加重试载荷）。"""
+
+    name: str
+    pull_id: str
+    task_type: str | None = None
+    classes: list[str] | None = None
+    append_classes: list[str] | None = None
+    base_url: str | None = None
+
+
+@router.get("/producer-pulls/staged")
+def list_staged_pulls():
+    """暂存区清单（#132 拉取恢复）：待重导的拉取包一览（pull_id/暂存时间/目标/模式/
+    任务形态/字节量，时间戳序）。超期（14 天）暂存顺带清扫。"""
+    from ..datasets import producer_pull
+
+    return producer_pull.list_staged()
+
+
+@router.post("/producer-pulls/reimport")
+def reimport_staged_pull(body: ProducerReimportBody, request: Request):
+    """从暂存 ZIP 重试导入（#132，契约 §5.5 主路径）：拉取导入同一套解包/归一/词干
+    幂等/落账/回写，成功即焚暂存；再失败暂存保留（staged_pull_id 随错误外露可再试）。
+    登记 `ds:{name}:producer-reimport` 长操作。"""
+    from ..config import ConfigError
+    from ..core import producer as producer_lib
+    from ..datasets import producer_pull
+
+    cfg = getattr(request.app.state, "cfg", None)
+    if body.base_url:
+        try:
+            producer_lib.validate_base_url(body.base_url)
+        except ConfigError as exc:
+            return _error_response(DatasetError("invalid_args", exc.message))
+    try:
+        with long_op(f"ds:{body.name}:producer-reimport",
+                     f"暂存重导 · {body.name}", scope=body.name) as op:
+            return producer_pull.reimport_staged(
+                name=body.name, pull_id=body.pull_id, task_type=body.task_type,
+                classes=body.classes, append_classes=body.append_classes,
+                base_url=body.base_url, cfg=cfg, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 
