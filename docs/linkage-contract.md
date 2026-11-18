@@ -84,7 +84,7 @@ samples 逐条：`sample_id, status, created_ts, site, task_id, task_type, frame
 
 - `POST {推理端基址}/api/samples/status`，body `{status: "ingested"|"trained", sample_ids: [...]}`。
 - 终义：ingested=已进入训练平台数据集（后续处置由平台自理，推理端不得从状态推断更多）；trained=已进入某次成功训练的实效集（§6.2）。
-- 幂等：同态重复受理；非法迁移逐条拒绝（rejected 列表+reason）；整体恒 2xx。
+- 幂等：同态重复受理；非法迁移逐条拒绝（rejected 列表+reason）；整体恒 2xx——「恒 2xx」指状态机业务层（受理与逐条拒绝都是 2xx）；载荷格式非法（缺字段/非枚举值）属调用方错误，实现可返回 4xx，不构成契约违反。
 - 回写尽力而为：失败不阻断训练平台主流程；回写断链（如数据集被删除）时样本停留 exported，属可接受语义（§6.1）。
 - 丢弃不回写：样本在训练平台的复核处置（排除/驳回）不新增回写维度；推理端如需丢弃率类统计走报表，不进状态机。
 
