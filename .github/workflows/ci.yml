@@ -26,6 +26,12 @@ jobs:
       # CI 环境从模板落地 config.toml（不入库）：conftest 会话守卫与
       # test_isolation 的真值断言都以仓库根 config.toml 存在为前提。
       - run: cp config.example.toml config.toml
+      # example 数据根 ~/datasets（runs 同根）在 runner 上不存在；任一测试经
+      # get_datasets_root() 的 mkdir(parents=True) 创建它后，会话守卫的生产
+      # 账本对账把「目录从无到有（文件数 0→0、空目录指纹）」判为生产数据
+      # 变动 → 强设 TESTS_FAILED（summary 仍 0 failed、退出码 1，极易误诊）。
+      # 预创建对齐快照基线；生产机数据根本就存在，不受影响。
+      - run: mkdir -p ~/datasets/runs
       - run: uv run pytest -q
 
   frontend:
