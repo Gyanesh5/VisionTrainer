@@ -15,7 +15,7 @@
 
 ## 构建和测试
 
-- 后端全量测试：`.venv/bin/python -m pytest -q`（约 600 项，约 5 分钟；实机 8600 端口在跑生产实例，UI 改动须实点验证）。
+- 后端全量测试：`.venv/bin/python -m pytest -q`（pytest-xdist 并行，约 1 分钟；单测调试加 `-n0` 关闭并行；实机 8600 端口在跑生产实例，UI 改动须实点验证）。
 - 前端测试：`cd frontend && npm test`；构建：`npm run build`。
 - 启动：`.venv/bin/python -m visiontrainer.main`（先 `npm run build` 出 `frontend/dist` 才有页面）。
 
@@ -52,4 +52,4 @@ Issues 存放在 GitHub Issues（`Gyanesh5/VisionTrainer`，`gh` CLI 操作）�
 
 ### Domain docs
 
-Single-context：根目录 `GLOSSARY.md`（五域词汇表）+ `docs/adr/`。见 `docs/agents/domain.md`。
+Single-context：根目录 `GLOSSARY.md`（五域词汇表）+ `docs/adr/`。见 `docs/agents/domain.md`。多子代理实施流程遵守 `docs/agents/orchestration.md`（编排纪律）。

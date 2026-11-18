@@ -23,6 +23,7 @@ visiontrainer = "visiontrainer.main:main"
 dev = [
     "pytest>=8",
     "httpx>=0.27",
+    "pytest-xdist>=3.8.0",
 ]
 
 [build-system]
@@ -31,3 +32,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/visiontrainer"]
+
+[tool.pytest.ini_options]
+addopts = "-n auto"
