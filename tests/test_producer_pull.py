@@ -80,14 +80,16 @@ def sample_entry(sample_id: str, status: str, *, checked=True, vt_review="confir
     """manifest 样本清单条目 + 包内 LabelMe JSON（包内形态见推理端 exporter）。
 
     idx = 包内图片序号（build_bundle 按 enumerate 落盘 ``{sample_id}_1_{i:06d}``），
-    manifest images path 与之对齐——真实导出器二者一致，票 125 归因按 path 匹配真源文件名。
+    manifest images 的 ``file`` 与之对齐——契约 §4.4 冻结 ``images[{file, source}]``，
+    真实导出器亦出 ``file``（真实形态 exporter.py: ``{"file": ..., "source": 源媒体相对路径}``）；
+    回写归因按 file 词干映射 sample_id。
     """
     stem = f"{sample_id}_1_{idx:06d}"
     return {
         "sample_id": sample_id, "status": status, "created_ts": 1760000000.0,
         "site": SITE, "task_id": TASK, "task_type": "zone_occupancy",
         "frame_number": 12, "model_id": "m1", "model_sha8": "deadbeef",
-        "images": [{"path": f"images/{stem}.jpg"}],
+        "images": [{"file": f"images/{stem}.jpg", "source": f"recordings/{stem}.mp4"}],
         "labelme": _labelme_json(f"{stem}.jpg", shapes=shapes,
                                  vt_review=vt_review, label=label),
     }
@@ -357,7 +359,7 @@ def classify_sample(sample_id: str, label: str | None, idx: int = 0) -> dict:
         "sample_id": sample_id, "status": "confirmed", "created_ts": 1760000000.0,
         "site": SITE, "task_id": TASK, "task_type": "zone_occupancy",
         "frame_number": 3, "model_id": "m1", "model_sha8": "deadbeef",
-        "images": [{"path": f"images/{stem}.jpg"}],
+        "images": [{"file": f"images/{stem}.jpg", "source": f"recordings/{stem}.mp4"}],
         "labelme": labelme,
     }
 
@@ -435,6 +437,22 @@ def test_pull_invalid_status_filter_422(pull_client):
     r = pull_client.post("/api/v1/datasets/producer-pulls", json={
         "mode": "create", "name": "mfd", "filters": {"status": "pending"}})
     assert r.status_code == 422
+
+
+def test_pull_sample_ids_passthrough_and_cap(pull_client, fake_producer):
+    """sample_ids 直选（契约 §5.2）逐字转发对端导出 API；超上限 500 → 422 快速失败。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-x0000", "confirmed"),
+         sample_entry("s-x0001", "confirmed", idx=1)], ["car"])
+    ids = ["s-x0000", "s-x0001"]
+    r = _pull(pull_client, fake_producer, name="mfdx", filters={"sample_ids": ids})
+    assert r.status_code == 200, r.text
+    assert FakeProducerHandler.export_bodies == [{"sample_ids": ids}]
+
+    r = _pull(pull_client, fake_producer, name="mfdy",
+              filters={"sample_ids": [f"s-{i}" for i in range(501)]})
+    assert r.status_code == 422
+    assert FakeProducerHandler.export_bodies == [{"sample_ids": ids}]  # 超限不出站
 
 
 # ---------------------------------------------------------------- 拉取恢复：ZIP 暂存（#132）
@@ -560,6 +578,36 @@ def test_pull_mixed_batch_new_imports_conflict_rejected(pull_client, fake_produc
     assert meta["validation_summary"]["total_images"] == 2  # 零重复：首拉 1 + 新词干 1
     # 拒收登记进导入落账（dataset meta），事后可查
     assert meta["producer_imports"][1]["import_rejected"] == body["rejected"]
+
+
+def test_pull_rejected_not_writebacked_attribution_via_file_key(pull_client, fake_producer,
+                                                                datasets_root):
+    """回归（契约 §4.4 冻结键）：词干→sample_id 回写归因走 manifest ``images[].file``。
+
+    契约格式包（无 ``path`` 键）下同词干异内容被拒样本不得混进 ingested 回写，
+    同批新词干照常回写——修复前实现读 ``path`` 键，映射恒空，被拒样本被误回写
+    （推理端侧 exported 误迁 ingested，状态账失真）。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-att0", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="mfda").status_code == 200
+    # 第二批：同词干（s-att0）异内容拒收 + 新词干（s-att1）照常入库
+    mutated = sample_entry("s-att0", "confirmed",
+                           shapes=[{"label": "car", "shape_type": "rectangle",
+                                    "points": [[7, 7], [60, 70]], "flags": {}}])
+    fresh = sample_entry("s-att1", "confirmed",
+                         shapes=[{"label": "car", "shape_type": "rectangle",
+                                  "points": [[10, 10], [110, 90]], "flags": {}}], idx=1)
+    FakeProducerHandler.bundle = build_bundle(
+        [mutated, fresh], ["car"], jpeg=b"\xff\xd8\xff\xe1" + b"\x33" * 64)
+    FakeProducerHandler.writeback_bodies = []  # 只看第二批的回写载荷
+    r = _pull(pull_client, fake_producer, mode="add", name="mfda")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["rejected"] == [{"stem": "s-att0_1_000000", "reason": "content_mismatch",
+                                 "files": ["s-att0_1_000000.jpg", "s-att0_1_000000.json"]}]
+    # 拒收归因正确：被拒词干经 file 键映射回 s-att0 剔出回写，s-att1 照常回写 ingested
+    assert FakeProducerHandler.writeback_bodies == [
+        {"status": "ingested", "sample_ids": ["s-att1"]}]
 
 
 # ---------------------------------------------------------------- 重导入口（#132，契约 §5.5）

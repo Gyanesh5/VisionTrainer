@@ -91,11 +91,11 @@ def _effective_names(run_dir) -> set[str] | None:
 def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[str]:
     """归因：dataset meta ``producer_imports`` 样本清单 ∩ 该 Run 实效名单。
 
-    样本图片（manifest ``images[].path`` 的 basename）落在实效名单内才计入该
-    ``sample_id``；顺序沿导入批次落账序，去重保序。数据集无联动导入记录或 Run
-    无实效快照 → 空清单（无从归因，不回写）。#129 改名兼容：meta 读侧已把旧键
-    记录并入 ``producer_imports``（见 `datasets.service._read_meta`），旧 dataset.json
-    归因不断链。
+    样本图片（manifest ``images[].file`` 的 basename）落在实效名单内才计入该
+    ``sample_id``——images 条目键按契约 §4.4 冻结格式读 ``file``；顺序沿导入批次
+    落账序，去重保序。数据集无联动导入记录或 Run 无实效快照 → 空清单（无从归因，
+    不回写）。#129 改名兼容：meta 读侧已把旧键记录并入 ``producer_imports``（见
+    `datasets.service._read_meta`），旧 dataset.json 归因不断链。
     """
     try:
         meta = svc.get_dataset(dataset, root)
@@ -112,7 +112,7 @@ def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[
             if not sid or sid in ids:
                 continue
             for img in sample.get("images") or []:
-                if Path(str(img.get("path") or "")).name in names:
+                if Path(str(img.get("file") or "")).name in names:
                     ids.append(sid)
                     break
     return ids

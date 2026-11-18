@@ -225,6 +225,24 @@ export function ReviewFlow({
     openCurZoom();
   }, [idx, signed]);
 
+  // ── 判定落账尾段（单判与改类共用）：条目窄写回队列 + 自动前进 + 详情刷新 + 大图跟随挂起
+  const settleDecision = useCallback(
+    (image: string, decided: { state: ReviewState; effective: ReviewState; reason: string }) => {
+      setItems((prev) =>
+        prev.map((it) =>
+          it.image === image
+            ? { ...it, state: decided.state, effective: decided.effective, reason: decided.reason, modified: false }
+            : it,
+        ),
+      );
+      go(1);
+      void queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
+      followPendingRef.current = true;
+      onChanged();
+    },
+    [go, meta.name, onChanged, queryClient],
+  );
+
   const decide = useCallback(
     async (state: ReviewState, reason = "") => {
       const c = curRef.current;
@@ -232,13 +250,6 @@ export function ReviewFlow({
       setBusy(true);
       try {
         const r = await datasetsApi.reviewDecide(meta.name, { image: c.image, state, reason });
-        setItems((prev) =>
-          prev.map((it) =>
-            it.image === c.image
-              ? { ...it, state: r.state, effective: r.effective, reason: r.reason, modified: false }
-              : it,
-          ),
-        );
         // 确认不弹 toast 收进「上次判定」pill：键盘流连续判定时通知会盖住画布与判定按钮
         const t = new Date();
         const pad = (n: number) => String(n).padStart(2, "0");
@@ -246,17 +257,14 @@ export function ReviewFlow({
           `${pad(t.getHours())}:${pad(t.getMinutes())} ${REVIEW_STATE_ZH[r.effective]}${reason ? `（${reason}）` : ""}`,
         );
         setRejectOpen(false);
-        go(1);
-        void queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
-        followPendingRef.current = true;
-        onChanged();
+        settleDecision(c.image, r);
       } catch (e) {
         onMessage(e instanceof Error ? e.message : "判定失败", "error");
       } finally {
         setBusy(false);
       }
     },
-    [meta.name, go, onMessage, onChanged, queryClient],
+    [meta.name, onMessage, settleDecision],
   );
 
   // ── classify 改类即判定（#131）：类选择器 → 写 flags 真键 + vt_review=approved
@@ -268,25 +276,15 @@ export function ReviewFlow({
       setBusy(true);
       try {
         const r = await datasetsApi.reviewReclassify(meta.name, { image: c.image, label });
-        setItems((prev) =>
-          prev.map((it) =>
-            it.image === c.image
-              ? { ...it, state: r.state, effective: r.effective, reason: "", modified: false }
-              : it,
-          ),
-        );
+        settleDecision(c.image, { ...r, reason: "" }); // 改类不写 reason（判定说明收进 pill 文案）
         setLastDecide(`${new Date().toTimeString().slice(0, 5)} 通过（改类 ${label}）`);
-        go(1);
-        void queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
-        followPendingRef.current = true;
-        onChanged();
       } catch (e) {
         onMessage(e instanceof Error ? e.message : "改类失败", "error");
       } finally {
         setBusy(false);
       }
     },
-    [meta.name, go, onMessage, onChanged, queryClient],
+    [meta.name, onMessage, settleDecision],
   );
 
   // ── 批量通过（#131）：当前过滤子集整体判定 approved——逐图走单判同一写路径，
@@ -568,7 +566,7 @@ export function ReviewFlow({
               </button>
               {meta.task_type === "classify" && cur && (
                 <label
-                  style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 8 }}
                   title="classify 改类即判定：写 flags 真键并标记通过（人工改类即人工判定）"
                 >
                   <span style={{ color: "var(--chrome-text-dim)" }}>改类</span>

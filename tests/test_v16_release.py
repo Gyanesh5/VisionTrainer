@@ -114,6 +114,41 @@ def test_release_signed_url_download_and_expiry(release_client):
     assert c.get(expired).status_code == 403
 
 
+def test_release_list_rows_carry_signed_download_url(release_client):
+    """清单面带签名下载 URL（契约 §5.4，VM #146 拉取台）：exp 与账目 url_expires_at
+    一致、凭清单 URL 可直接拉取（对端不用自拼 HMAC）；过期记录 URL 如实 403。"""
+    from datetime import datetime, timedelta
+
+    from visiontrainer.db.models import ModelRelease
+
+    c, tmp_path, app = release_client
+    uid = _train_one(c)
+    out = c.post(f"/api/v1/runs/{uid}/release").json()
+
+    row = next(r for r in c.get("/api/v1/releases").json()["releases"]
+               if r["release_id"] == out["release_id"])
+    assert row["download_url"].startswith("/api/v1/releases/download?")
+    assert f"rid={out['release_id']}" in row["download_url"]
+    # token exp 与记录 url_expires_at 一致（epoch 秒）
+    token = row["download_url"].rsplit("t=", 1)[1]
+    assert int(token[:11]) == int(datetime.fromisoformat(row["url_expires_at"]).timestamp())
+
+    # 未过期：清单 URL 直接可拉（zip 发布包）
+    r = c.get(row["download_url"])
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("application/zip")
+
+    # 记录过期（账目留档）：url_expired 翻真，清单 URL 拉取如实 403
+    with app.state.manager.Session() as s:
+        rec = s.get(ModelRelease, out["release_id"])
+        rec.url_expires_at = datetime.now() - timedelta(seconds=60)
+        s.commit()
+    row = next(r for r in c.get("/api/v1/releases").json()["releases"]
+               if r["release_id"] == out["release_id"])
+    assert row["url_expired"] is True
+    assert c.get(row["download_url"]).status_code == 403
+
+
 def test_release_records_append_only_and_row_history(release_client):
     """发布记录只增不改（验收 2）：重复发布同一 Run 生成新记录；run-weights 行带发布历史。"""
     c, tmp_path, app = release_client

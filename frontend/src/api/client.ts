@@ -178,6 +178,8 @@ export interface ProbeClassesResult {
 export interface ProducerPullFilters {
   task?: string | null;
   status?: "confirmed" | "corrected" | null;
+  /** 样本直选（契约 §5.2）：上限 500（对端导出 API 上限），有值才随载荷带上 */
+  sample_ids?: string[] | null;
   created_from?: number | null;
   created_to?: number | null;
 }

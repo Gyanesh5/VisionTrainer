@@ -36,6 +36,7 @@ export function ProducerPullDialog({
   const [status, setStatus] = useState<"" | "confirmed" | "corrected">("");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
+  const [sampleIdsText, setSampleIdsText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<ProducerPullResult | null>(null);
@@ -51,6 +52,7 @@ export function ProducerPullDialog({
       setStatus("");
       setCreatedFrom("");
       setCreatedTo("");
+      setSampleIdsText("");
       setBusy(false);
       setError(null);
       setResult(null);
@@ -70,6 +72,18 @@ export function ProducerPullDialog({
     return Number.isNaN(t) ? null : t / 1000;
   }
 
+  /** 样本直选输入 → id 清单（契约 §5.2 直选面）：逗号/分号/空白分隔，去空白去重 */
+  function parseSampleIds(text: string): string[] {
+    return Array.from(
+      new Set(
+        text
+          .split(/[\s,，;；]+/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
   async function submit() {
     if (mode === "create" && !name.trim()) {
       setError("请填写数据集名");
@@ -77,6 +91,11 @@ export function ProducerPullDialog({
     }
     if (mode === "add" && !target) {
       setError("请选择要加图的数据集");
+      return;
+    }
+    const sampleIds = parseSampleIds(sampleIdsText);
+    if (sampleIds.length > 500) {
+      setError("样本直选超出上限 500（对端导出 API 上限，契约 §5.2）");
       return;
     }
     setBusy(true);
@@ -88,6 +107,7 @@ export function ProducerPullDialog({
       created_from: epochOf(createdFrom),
       created_to: epochOf(createdTo),
     };
+    if (sampleIds.length > 0) filters.sample_ids = sampleIds; // 有值才带上（直选面）
     try {
       const got = await datasetsApi.producerPull({
         mode,
@@ -227,6 +247,16 @@ export function ProducerPullDialog({
             type="datetime-local"
             value={createdTo}
             onChange={(e) => setCreatedTo(e.target.value)}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="pull-sample-ids">样本直选（可选，逗号/换行分隔，≤500）</label>
+          <textarea
+            id="pull-sample-ids"
+            value={sampleIdsText}
+            placeholder="推理端样本 id 直选清单（契约 §5.2），留空按其余过滤拉取"
+            rows={2}
+            onChange={(e) => setSampleIdsText(e.target.value)}
           />
         </div>
 

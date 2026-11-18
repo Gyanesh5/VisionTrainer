@@ -284,14 +284,19 @@ def _stem_plan(unpack: Path, source: Path) -> tuple[list[Path], list[str], int, 
 
 
 def _manifest_stem_map(manifest: dict) -> dict[str, str]:
-    """manifest 样本清单的 词干→sample_id 映射（词干是回写归因的 join 键，GLOSSARY 联动域口径）。"""
+    """manifest 样本清单的 词干→sample_id 映射（词干是回写归因的 join 键，GLOSSARY 联动域口径）。
+
+    images 条目键按契约 §4.4 冻结格式读 ``file``（``images[{file, source}]``）——拒收
+    归因（`_finish_import`）靠它把被拒词干映射回 sample_id 剔出回写；读错键映射恒空，
+    被拒样本会混进 ingested 回写。
+    """
     out: dict[str, str] = {}
     for s in manifest.get("samples") or []:
         sid = s.get("sample_id")
         if not sid:
             continue
         for img in s.get("images") or []:
-            stem = Path(str(img.get("path", ""))).stem
+            stem = Path(str(img.get("file", ""))).stem
             if stem:
                 out[stem] = str(sid)
     return out
@@ -353,6 +358,11 @@ def writeback_ingested(base: str, sample_ids: list[str]) -> dict:
 # ---------------------------------------------------------------- 主流程
 
 
+def _with_staged_pull_id(exc: DatasetError, pull_id: str) -> DatasetError:
+    """导入链阻断的错误加暂存定位（拉取/重导共用段）：pull_id 随 detail 外露供重导。"""
+    return DatasetError(exc.code, exc.message, {**exc.detail, "staged_pull_id": pull_id})
+
+
 def pull_import(
     *,
     mode: str,
@@ -411,8 +421,7 @@ def pull_import(
                                       progress_cb=progress_cb)
         except DatasetError as exc:
             # 导入链阻断：暂存 ZIP 留在暂存区，pull_id 随错误 detail 外露供重导定位
-            raise DatasetError(exc.code, exc.message,
-                               {**exc.detail, "staged_pull_id": pull_id}) from exc
+            raise _with_staged_pull_id(exc, pull_id) from exc
         _discard_staged(pull_id, root)  # 成功即焚：重导使命已尽（保留策略）
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)  # 临时包用完即焚，真源只留拷贝
@@ -595,8 +604,7 @@ def reimport_staged(*, name: str, pull_id: str, task_type: str | None = None,
                                       progress_cb=progress_cb)
         except DatasetError as exc:
             # 重导仍被阻断：暂存 ZIP 保留（保留策略），pull_id 继续随错误外露
-            raise DatasetError(exc.code, exc.message,
-                               {**exc.detail, "staged_pull_id": pull_id}) from exc
+            raise _with_staged_pull_id(exc, pull_id) from exc
         _discard_staged(pull_id, root)  # 成功即焚：重导使命已尽（保留策略）
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)

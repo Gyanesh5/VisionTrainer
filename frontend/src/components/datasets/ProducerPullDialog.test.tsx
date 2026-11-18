@@ -139,4 +139,45 @@ describe("ProducerPullDialog", () => {
     expect(screen.getByTestId("pull-error").textContent).toContain("数据集名");
     expect(pull).not.toHaveBeenCalled();
   });
+
+  it("样本直选（契约 §5.2）有值才随载荷带上：去空白去重逐字进 filters", async () => {
+    pull.mockResolvedValue({
+      name: "mfd",
+      mode: "create",
+      pulled: 2,
+      added: 2,
+      skipped_existing: 0,
+      writeback: { ok: true, detail: "HTTP 200", sample_ids: ["s-1", "s-2"] },
+    });
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByLabelText("数据集名"), "mfd");
+    await user.type(screen.getByLabelText(/样本直选/), "s-1, s-2\ns-1 ");
+    await user.click(screen.getByTestId("pull-submit"));
+    await waitFor(() => expect(pull).toHaveBeenCalledTimes(1));
+    expect(pull).toHaveBeenCalledWith({
+      mode: "create",
+      name: "mfd",
+      task_type: "detect",
+      filters: {
+        task: null,
+        status: null,
+        sample_ids: ["s-1", "s-2"],
+        created_from: null,
+        created_to: null,
+      },
+    });
+  });
+
+  it("样本直选超上限 500：本地校验拦截，不发请求", async () => {
+    const user = userEvent.setup();
+    setup();
+    await user.type(screen.getByLabelText("数据集名"), "mfd");
+    const box = screen.getByLabelText(/样本直选/);
+    await user.click(box);
+    await user.paste(Array.from({ length: 501 }, (_, i) => `s-${i}`).join(","));
+    await user.click(screen.getByTestId("pull-submit"));
+    expect(screen.getByTestId("pull-error").textContent).toContain("500");
+    expect(pull).not.toHaveBeenCalled();
+  });
 });

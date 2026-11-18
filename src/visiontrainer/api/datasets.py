@@ -45,6 +45,21 @@ def _error_response(exc: DatasetError) -> JSONResponse:
         "code": exc.code, "message": exc.message, "detail": exc.detail}})
 
 
+def _base_url_error(base_url: str | None) -> JSONResponse | None:
+    """拉取/重导两端点共用的显式 base_url 校验（同一段规则）：非法值 400 invalid_args
+    响应，缺省（走系统域连接配置）或合法返回 None 放行。"""
+    if not base_url:
+        return None
+    from ..config import ConfigError
+    from ..core import producer as producer_lib
+
+    try:
+        producer_lib.validate_base_url(base_url)
+    except ConfigError as exc:
+        return _error_response(DatasetError("invalid_args", exc.message))
+    return None
+
+
 def _action_classes(body: ClassActionBody) -> list[str]:
     """append/rename/reorder 三个动作共用的取参：清单缺失即 invalid_args，不由服务侧猜。"""
     if not body.classes:
@@ -631,10 +646,15 @@ def delete_dataset(name: str, force: bool = False):
 
 
 class ProducerPullFilters(BaseModel):
-    """拉取过滤（推理端导出 API 逐字转发，None 侧不带上）：任务 / 状态 / 时间窗（epoch 秒）。"""
+    """拉取过滤（推理端导出 API 逐字转发，None 侧不带上）：任务 / 状态 / 时间窗（epoch 秒）。
+
+    `sample_ids` 直选（契约 §5.2）：上限 500（对端导出 API 上限），逐字转发由对端选集。
+    `status` 枚举当前与对端导出 API 现状（confirmed|corrected）对齐，随其状态机收缩票
+    （VM #145）改写。"""
 
     task: str | None = None
     status: Literal["confirmed", "corrected"] | None = None
+    sample_ids: list[str] | None = Field(default=None, max_length=500)
     created_from: float | None = None
     created_to: float | None = None
 
@@ -665,16 +685,12 @@ def pull_from_producer(body: ProducerPullBody, request: Request):
     五相 operation.updated）。推理端不可达/坏包/空范围分别 502/502/404；回写失败
     告警降级不阻断（响应 writeback.ok=false 带原因）。下载成功且结构校验通过即落
     本地暂存（#132 契约 §5.5），导入链阻断时错误 detail 带 staged_pull_id 供重导。"""
-    from ..config import ConfigError
-    from ..core import producer as producer_lib
     from ..datasets import producer_pull
 
     cfg = getattr(request.app.state, "cfg", None)
-    if body.base_url:
-        try:
-            producer_lib.validate_base_url(body.base_url)
-        except ConfigError as exc:
-            return _error_response(DatasetError("invalid_args", exc.message))
+    bad = _base_url_error(body.base_url)
+    if bad is not None:
+        return bad
     try:
         with long_op(f"ds:{body.name}:producer-pull",
                      f"从推理端拉取导入 · {body.name}", scope=body.name) as op:
@@ -717,16 +733,12 @@ def reimport_staged_pull(body: ProducerReimportBody, request: Request):
     """从暂存 ZIP 重试导入（#132，契约 §5.5 主路径）：拉取导入同一套解包/归一/词干
     幂等/落账/回写，成功即焚暂存；再失败暂存保留（staged_pull_id 随错误外露可再试）。
     登记 `ds:{name}:producer-reimport` 长操作。"""
-    from ..config import ConfigError
-    from ..core import producer as producer_lib
     from ..datasets import producer_pull
 
     cfg = getattr(request.app.state, "cfg", None)
-    if body.base_url:
-        try:
-            producer_lib.validate_base_url(body.base_url)
-        except ConfigError as exc:
-            return _error_response(DatasetError("invalid_args", exc.message))
+    bad = _base_url_error(body.base_url)
+    if bad is not None:
+        return bad
     try:
         with long_op(f"ds:{body.name}:producer-reimport",
                      f"暂存重导 · {body.name}", scope=body.name) as op:
