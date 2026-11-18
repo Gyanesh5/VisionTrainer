@@ -1500,7 +1500,7 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         target.mkdir(parents=True, exist_ok=False)
         shutil.copy2(best_pt, target / "best.pt")
         meta = {
-            "version": fingerprint,  # version 标签 = 指纹：监控端 models.yaml 对账键
+            "version": fingerprint,  # version 标签 = 指纹：推理端 models.yaml 对账键
             "fingerprint": fingerprint,
             "run_uid": uid,
             "task_name": task.name if task else None,

@@ -4,20 +4,20 @@ import {
   TASK_TYPE_ZH,
   datasetsApi,
   type DatasetBrief,
-  type MonitorPullFilters,
-  type MonitorPullResult,
+  type ProducerPullFilters,
+  type ProducerPullResult,
   type TaskType,
 } from "../../api/client";
 
 /**
- * 从 vision-monitor 拉取导入（票 124，ADR 0015 Decision 3/4 的 G 形态）：
- * 过滤（任务 / 状态 / 时间窗）→ 监控端导出包 → 平台托管导入链（新建或加图）。
+ * 从推理端拉取导入（票 124，ADR 0015 Decision 3/4 的 G 形态；#129 命名泛化）：
+ * 过滤（任务 / 状态 / 时间窗）→ 推理端导出包 → 平台托管导入链（新建或加图）。
  *
  * 模式两态：create 新建托管数据集（task_type 必选、类别表由导出包派生）；
  * add 加图进既有托管数据集（同批重复拉取按文件名去重）。地址走系统域连接
  * 配置（票 122），表单不暴露地址覆盖。回写失败是告警不是错误：导入照常完成。
  */
-export function MonitorPullDialog({
+export function ProducerPullDialog({
   open,
   datasets,
   onClose,
@@ -38,7 +38,7 @@ export function MonitorPullDialog({
   const [createdTo, setCreatedTo] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<MonitorPullResult | null>(null);
+  const [result, setResult] = useState<ProducerPullResult | null>(null);
 
   // 每次打开复位（一次拉取一单，不留上次残值）
   useEffect(() => {
@@ -63,7 +63,7 @@ export function MonitorPullDialog({
     [datasets],
   );
 
-  /** datetime-local → epoch 秒（监控端时间窗契约；空串 = 该侧无界） */
+  /** datetime-local → epoch 秒（推理端时间窗契约；空串 = 该侧无界） */
   function epochOf(v: string): number | null {
     if (!v.trim()) return null;
     const t = new Date(v).getTime();
@@ -82,14 +82,14 @@ export function MonitorPullDialog({
     setBusy(true);
     setError(null);
     setResult(null);
-    const filters: MonitorPullFilters = {
+    const filters: ProducerPullFilters = {
       task: task.trim() || null,
       status: status || null,
       created_from: epochOf(createdFrom),
       created_to: epochOf(createdTo),
     };
     try {
-      const got = await datasetsApi.monitorPull({
+      const got = await datasetsApi.producerPull({
         mode,
         name: mode === "create" ? name.trim() : target,
         task_type: mode === "create" ? taskType : undefined,
@@ -116,11 +116,11 @@ export function MonitorPullDialog({
         className="dialog"
         role="dialog"
         aria-modal="true"
-        aria-label="从 vision-monitor 拉取导入"
-        data-testid="monitor-pull-dialog"
+        aria-label="从推理端拉取导入"
+        data-testid="producer-pull-dialog"
       >
         <div className="dialog-head">
-          <h2>从 vision-monitor 拉取导入</h2>
+          <h2>从推理端拉取导入</h2>
           <span className="dialog-head-note">
             过滤 → 导出包 → 托管导入链；manifest 与样本清单随数据集留账，导入成功回写 ingested
           </span>
@@ -191,7 +191,7 @@ export function MonitorPullDialog({
         )}
 
         <div className="form-row">
-          <label htmlFor="pull-task">任务过滤（监控端任务 id，留空不过滤）</label>
+          <label htmlFor="pull-task">任务过滤（推理端任务 id，留空不过滤）</label>
           <input
             id="pull-task"
             value={task}
@@ -233,7 +233,7 @@ export function MonitorPullDialog({
         {error && <p className="error-note" data-testid="pull-error">{error}</p>}
         {result && (
           <div className="block-card" data-testid="pull-writeback-warn">
-            <p className="block-title">导入已完成，但 ingested 回写监控端失败（已降级为告警）</p>
+            <p className="block-title">导入已完成，但 ingested 回写推理端失败（已降级为告警）</p>
             <p className="form-hint">{result.writeback.detail}——可稍后重拉同一批（去重）补回写。</p>
             <button
               type="button"

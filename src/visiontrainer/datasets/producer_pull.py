@@ -1,21 +1,22 @@
-"""从 vision-monitor 拉取导入（票 124，ADR 0015 Decision 3/4，GLOSSARY 联动域）。
+"""从推理端拉取导入（票 124，ADR 0015 Decision 3/4，GLOSSARY 联动域；#129 命名泛化）。
 
-链路（平台发起拉取，监控端无入站写面）：监控端导出 API（``POST {base}/api/samples/export``，
+链路（平台发起拉取，推理端无入站写面）：推理端导出 API（``POST {base}/api/samples/export``，
 地址取票 122 系统域连接配置）→ ZIP 解包临时目录 → 审查键归一 + manifest 校验 → 走既有
 托管导入链（`svc.create_dataset` / `svc.add_images`，票 03/04 唯一入口，不另起路径）→
 导出包 manifest 四要素（工位、模型指纹、时间窗、样本清单）追加进 dataset meta 的
-``monitor_imports``（逐条样本不建独立表）→ ``POST {base}/api/samples/status`` 回写
-ingested。回写失败告警不阻断导入主流程（与通知域一致的降级口径）。出站回写（ingested
-与 trained 两态）的共享实现在 `datasets.monitor_writeback`（票 125 提取），trained 态
-由 Run 生命周期终态钩子（`training.manager`）触发。
+``producer_imports``（逐条样本不建独立表；#129 前旧键 ``core.producer.LEGACY_IMPORTS_META_KEY``
+读兼容，落账恒新键）→ ``POST {base}/api/samples/status`` 回写 ingested。回写失败告警
+不阻断导入主流程（与通知域一致的降级口径）。出站回写（ingested 与 trained 两态）的
+共享实现在 `datasets.producer_writeback`（票 125 提取），trained 态由 Run 生命周期终态
+钩子（`training.manager`）触发。
 
-导出包契约（vision-monitor 侧 exporter，已实查）：``images/{样本id}_{序号}_{词干}.jpg``
+导出包契约（推理端侧 exporter，已实查）：``images/{样本id}_{序号}_{词干}.jpg``
 + 同词干 LabelMe JSON + ``classes.txt``（行序即类别 id）+ ``manifest.yaml``；导出请求体
-``{task?, status?, created_from?, created_to?}``（status ∈ confirmed/corrected），204 =
-范围内无样本。审查键形态：JSON 顶层 ``checked: true`` + ``vt_review`` 为**字符串态**
-生命周期状态——平台 `review.read_state` 只认字典态 ``vt_review``（ADR 0003），字符串态
-会让审查队列 AttributeError，故解包后归一：剥除非字典 ``vt_review``，``checked: true``
-经 XAL 互认口径继承为 approved（confirmed/corrected 都是轻量标注复核通过）。
+``{task?, status?, created_from?, created_to?}``，204 = 范围内无样本。审查键形态：JSON
+顶层 ``checked: true`` + ``vt_review`` 为**字符串态**生命周期状态——平台 `review.read_state`
+只认字典态 ``vt_review``（ADR 0003），字符串态会让审查队列 AttributeError，故解包后归一：
+剥除非字典 ``vt_review``，``checked: true`` 经 XAL 互认口径继承为 approved（人工判定复核
+通过）。
 """
 
 from __future__ import annotations
@@ -31,8 +32,8 @@ from pathlib import Path
 import httpx
 import yaml
 
-from ..core import monitor
-from . import monitor_writeback
+from ..core import producer
+from . import producer_writeback
 from . import service as svc
 from .service import DatasetError
 
@@ -46,11 +47,11 @@ EXPORT_TIMEOUT = httpx.Timeout(120.0, connect=5.0)
 
 
 def _fetch_bundle(base: str, filters: dict) -> tuple[Path, Path]:
-    """调监控端导出 API 取 ZIP：过滤参数逐字转发；返回 (zip 路径, 临时根)。
+    """调推理端导出 API 取 ZIP：过滤参数逐字转发；返回 (zip 路径, 临时根)。
 
     Raises:
-        DatasetError: monitor_unreachable 连不上 / monitor_http_error 非 2xx /
-            monitor_empty 范围内无样本（204）。
+        DatasetError: producer_unreachable 连不上 / producer_http_error 非 2xx /
+            producer_empty 范围内无样本（204）。
     """
     url = base.rstrip("/") + "/api/samples/export"
     try:
@@ -59,17 +60,17 @@ def _fetch_bundle(base: str, filters: dict) -> tuple[Path, Path]:
     except httpx.HTTPError as exc:
         reason = str(exc) or type(exc).__name__
         raise DatasetError(
-            "monitor_unreachable",
-            f"监控端不可达：{base}（{type(exc).__name__}: {reason}）"
-            "——检查系统页的监控端连接配置") from exc
+            "producer_unreachable",
+            f"推理端不可达：{base}（{type(exc).__name__}: {reason}）"
+            "——检查系统页的推理端连接配置") from exc
     if resp.status_code == 204:
         raise DatasetError(
-            "monitor_empty",
-            f"监控端该过滤范围内没有可导出的样本（{base} 返回 204）——放宽时间窗或状态再试")
+            "producer_empty",
+            f"推理端该过滤范围内没有可导出的样本（{base} 返回 204）——放宽时间窗或状态再试")
     if resp.status_code != 200:
         raise DatasetError(
-            "monitor_http_error", f"监控端导出 API 返回 HTTP {resp.status_code}（{base}）")
-    tmp_root = Path(tempfile.mkdtemp(prefix="vt-monitor-pull-"))
+            "producer_http_error", f"推理端导出 API 返回 HTTP {resp.status_code}（{base}）")
+    tmp_root = Path(tempfile.mkdtemp(prefix="vt-producer-pull-"))
     zip_path = tmp_root / "bundle.zip"
     zip_path.write_bytes(resp.content)
     return zip_path, tmp_root
@@ -85,17 +86,17 @@ def _parse_manifest(unpack: Path) -> dict:
         manifest = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, yaml.YAMLError) as exc:
         raise DatasetError(
-            "monitor_bad_bundle",
+            "producer_bad_bundle",
             f"导出包缺少可解析的 manifest.yaml（{type(exc).__name__}: {exc}）") from exc
     if not isinstance(manifest, dict) or not isinstance(manifest.get("samples"), list):
         raise DatasetError(
-            "monitor_bad_bundle", "导出包 manifest.yaml 不是合法的导出清单（缺 samples 列表）")
+            "producer_bad_bundle", "导出包 manifest.yaml 不是合法的导出清单（缺 samples 列表）")
     if not manifest["samples"]:
-        raise DatasetError("monitor_bad_bundle", "导出包样本清单为空")
+        raise DatasetError("producer_bad_bundle", "导出包样本清单为空")
     for key in ("site", "models", "time_window"):
         if key not in manifest:
             raise DatasetError(
-                "monitor_bad_bundle", f"导出包 manifest 缺少「{key}」要素，不做半截导入")
+                "producer_bad_bundle", f"导出包 manifest 缺少「{key}」要素，不做半截导入")
     return manifest
 
 
@@ -107,14 +108,14 @@ def _unpack(zip_path: Path, tmp_root: Path) -> Path:
             zf.extractall(unpack)
     except (zipfile.BadZipFile, OSError) as exc:
         raise DatasetError(
-            "monitor_bad_bundle",
+            "producer_bad_bundle",
             f"导出包不是有效的 ZIP 归档（{type(exc).__name__}: {exc}）"
-            "——监控端可能返回了错误页或包在传输中损坏") from exc
+            "——推理端可能返回了错误页或包在传输中损坏") from exc
     return unpack
 
 
 def _normalize_review_keys(unpack: Path) -> int:
-    """审查键归一：剥除非字典态 ``vt_review``（监控端字符串态与平台 ADR 0003 字典态冲突）。
+    """审查键归一：剥除非字典态 ``vt_review``（推理端字符串态与平台 ADR 0003 字典态冲突）。
 
     ``checked: true`` 原样保留——平台经 XAL 互认口径继承为 approved。Returns: 改写文件数。
     """
@@ -179,9 +180,10 @@ def _count_images(ds_dir: Path) -> int:
 def _append_manifest_meta(ds_dir: Path, manifest: dict, *, mode: str, base: str,
                           filters: dict) -> None:
     """manifest 四要素（工位/模型指纹/时间窗/样本清单）追加进 dataset meta
-    ``monitor_imports``——只进 dataset meta，逐条样本不建独立表、不进真源。"""
-    meta = json.loads((ds_dir / "dataset.json").read_text(encoding="utf-8"))
-    imports = meta.setdefault("monitor_imports", [])
+    ``producer_imports``——只进 dataset meta，逐条样本不建独立表、不进真源。
+    落账恒新键（#129）；旧键记录由 meta 读侧并入（`svc._read_meta`），不丢历史批次。"""
+    meta = svc._read_meta(ds_dir / "dataset.json")
+    imports = meta.setdefault("producer_imports", [])
     imports.append({
         "at": datetime.now().isoformat(timespec="seconds"),
         "mode": mode,
@@ -204,14 +206,14 @@ def _append_manifest_meta(ds_dir: Path, manifest: dict, *, mode: str, base: str,
 
 
 def writeback_ingested(base: str, sample_ids: list[str]) -> dict:
-    """回写监控端样本状态 ingested（``POST {base}/api/samples/status``）。
+    """回写推理端样本状态 ingested（``POST {base}/api/samples/status``）。
 
-    出站契约与失败降级口径见 `datasets.monitor_writeback`（票 125 提取为共享单一
+    出站契约与失败降级口径见 `datasets.producer_writeback`（票 125 提取为共享单一
     实现，ingested/trained 两态共用）：body ``{"status": "ingested", "sample_ids":
     [...]}``。失败只告警不阻断导入主流程（通知域同口径降级）：返回
     ``{ok, detail, sample_ids}``，ok=False 时 detail 人读、已告警留日志。
     """
-    return monitor_writeback.writeback_ingested(base, sample_ids)
+    return producer_writeback.writeback_ingested(base, sample_ids)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -239,11 +241,11 @@ def pull_import(
     if mode not in ("create", "add"):
         raise DatasetError("invalid_args", f"mode 必须是 create 或 add，得到 {mode!r}")
     filters = {k: v for k, v in (filters or {}).items() if v is not None}
-    base = base_url or monitor.get_monitor_base_url(cfg)
+    base = base_url or producer.get_producer_base_url(cfg)
     if not base:
         raise DatasetError(
-            "monitor_unreachable",
-            "监控端连接地址未配置——先在系统页填写 vision-monitor 地址")
+            "producer_unreachable",
+            "推理端连接地址未配置——先在系统页填写推理端地址")
     if mode == "add" and not svc._ds_dir(name, root).exists():
         raise DatasetError("not_found", f"数据集不存在：{name}")  # 先于出站拉取快速失败
 

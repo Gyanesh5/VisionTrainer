@@ -1,7 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MonitorPullDialog } from "./MonitorPullDialog";
+import { ProducerPullDialog } from "./ProducerPullDialog";
 import { datasetsApi, type DatasetBrief } from "../../api/client";
 
 vi.mock("../../api/client", async (importOriginal) => {
@@ -10,12 +10,12 @@ vi.mock("../../api/client", async (importOriginal) => {
     ...actual,
     datasetsApi: {
       ...actual.datasetsApi,
-      monitorPull: vi.fn(),
+      producerPull: vi.fn(),
     },
   };
 });
 
-const pull = vi.mocked(datasetsApi.monitorPull);
+const pull = vi.mocked(datasetsApi.producerPull);
 
 const sampleDatasets: DatasetBrief[] = [
   { name: "plate", form: "managed", task_type: "detect", created_at: "2026-01-01T00:00:00" } as DatasetBrief,
@@ -24,7 +24,7 @@ const sampleDatasets: DatasetBrief[] = [
 
 function setup() {
   return render(
-    <MonitorPullDialog
+    <ProducerPullDialog
       open
       datasets={sampleDatasets}
       onClose={() => {}}
@@ -41,7 +41,7 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("MonitorPullDialog", () => {
+describe("ProducerPullDialog", () => {
   it("create 模式提交：过滤字段逐字进载荷（status/时间窗空值不带上）", async () => {
     pull.mockResolvedValue({
       name: "mfd",
@@ -100,7 +100,7 @@ describe("MonitorPullDialog", () => {
       pulled: 1,
       added: 1,
       skipped_existing: 0,
-      writeback: { ok: false, detail: "监控端状态回写 API 返回 HTTP 500", sample_ids: ["s1"] },
+      writeback: { ok: false, detail: "推理端状态回写 API 返回 HTTP 500", sample_ids: ["s1"] },
     });
     const user = userEvent.setup();
     setup();
@@ -113,14 +113,14 @@ describe("MonitorPullDialog", () => {
     expect(screen.queryByTestId("pull-error")).not.toBeInTheDocument();
   });
 
-  it("拉取失败（监控端不可达 502 信封）：错误信息可读、不发导航", async () => {
+  it("拉取失败（推理端不可达 502 信封）：错误信息可读、不发导航", async () => {
     pull.mockRejectedValue(
       new (class extends Error {
         status = 502;
-        code = "monitor_unreachable";
+        code = "producer_unreachable";
         detail = {};
         constructor() {
-          super("监控端不可达：http://… ——检查系统页的监控端连接配置");
+          super("推理端不可达：http://… ——检查系统页的推理端连接配置");
         }
       })(),
     );
@@ -129,7 +129,7 @@ describe("MonitorPullDialog", () => {
     await user.type(screen.getByLabelText("数据集名"), "mfd");
     await user.click(screen.getByTestId("pull-submit"));
     await waitFor(() => expect(screen.getByTestId("pull-error")).toBeInTheDocument());
-    expect(screen.getByTestId("pull-error").textContent).toContain("监控端不可达");
+    expect(screen.getByTestId("pull-error").textContent).toContain("推理端不可达");
   });
 
   it("create 模式缺数据集名：本地校验拦截，不发请求", async () => {

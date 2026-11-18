@@ -35,6 +35,7 @@ from pathlib import Path
 
 from PIL import Image
 
+from ..core import producer as producer_core
 from . import classops
 from . import drops as drops_lib
 from . import pool as pool_lib
@@ -63,7 +64,8 @@ SPLIT_MODES = split_lib.SPLIT_MODES  # 新建切分两模式：fresh（全部重
 # dataset.json 的落盘字段集（spec §3.1 唯一键集；票 05 起不再有清单两字段）
 _META_KEYS = ("name", "task_type", "form", "created_at", "origin", "validation_summary",
               "tiling", "flip_idx",
-              "monitor_imports")  # 票 124：导出包 manifest 四要素落账（逐次拉取一条记录）
+              "producer_imports")  # 票 124：导出包 manifest 四要素落账（逐次拉取一条记录；
+                                   # #129 改名后恒写新键，旧导入键读侧迁移，见 _read_meta）
 
 
 class DatasetError(Exception):
@@ -88,8 +90,24 @@ def _ds_dir(name: str, root: Path | None = None) -> Path:
     return (root or get_datasets_root()) / name
 
 
+def _migrate_imports_key(meta: dict) -> dict:
+    """#129 改名兼容：旧导入键记录并入 ``producer_imports``（旧批次在前、新键记录随后）。
+
+    只动内存视图——盘上 dataset.json 保持原样，下次经 `_write_meta` 落盘时记录自然
+    迁到新键（旧键不在 `_META_KEYS` 白名单，盘上旧键随首次写消失、记录不丢），
+    trained 回写归因对改名前的老 dataset.json 不断链。
+    """
+    legacy = meta.pop(producer_core.LEGACY_IMPORTS_META_KEY, None)
+    if isinstance(legacy, list) and legacy:
+        merged = [rec for rec in legacy if isinstance(rec, dict)]
+        merged.extend(rec for rec in (meta.get("producer_imports") or [])
+                      if isinstance(rec, dict))
+        meta["producer_imports"] = merged
+    return meta
+
+
 def _read_meta(path: Path) -> dict:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return _migrate_imports_key(json.loads(path.read_text(encoding="utf-8")))
 
 
 def _read_json(path_text: str | None) -> dict:

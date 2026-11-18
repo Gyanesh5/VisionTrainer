@@ -150,7 +150,7 @@ sha256 前 8 位；只算字节内容，与文件名/路径/mtime 无关；样�
 | 4 | 推理端 | 导出 API status 过滤参数（confirmed/corrected）语义失效 | 改按采集态过滤+恒排除已导出态（§5.2） |
 | 5 | 推理端 | 「重置 exported」管理动作缺失 | 待补票；须校验底图在档 |
 | 6 | 推理端 | external-integration-api.md 第 7 章（训练请求三端点契约）与本文冲突 | 收缩为指针章指向本文 |
-| 7 | 训练平台 | 平台内以 monitor 类词命名对端（连接配置键、/monitor-pull、monitor_pull.py、monitor_writeback.py、monitor_imports meta、UI 文案） | 命名泛化为角色词（实施票，代码 token 待定名） |
+| 7 | 训练平台 | 平台内以 monitor 类词命名对端（连接配置键、/monitor-pull、monitor_pull.py、monitor_writeback.py、monitor_imports meta、UI 文案） | 已完成（实施票 #129：代码 token=`producer`、中文=推理端；旧 runtime_settings 键/config.toml 旧节/meta 旧键读兼容，写恒新键） |
 | 8 | 训练平台 | classify 消费面缺失（审查页渲染态/改类动作/批量通过/label→flags 投影） | 待建票；格式义务已冻结，推理端可先行出包 |
 | 9 | 训练平台 | 拉取 ZIP 暂存+幂等重导缺失 | 待建票（§5.5 主路径） |
 

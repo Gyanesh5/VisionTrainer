@@ -17,7 +17,7 @@ import { useEvents } from "../ws/useEvents";
  * sha256 前 8 位指纹），全部 Run 都在列（未入库未发布、权重缺失的也如实标注）；
  * 模型库目录与发布目录降为派生分区——部署组装物/发布打包物，可清理重建，账目以
  * Run 权重为准。发布（票 123，ADR 0015 Decision 1）与部署是两个动作：发布打包
- * best.pt + 元数据并配限时签名 URL 供监控端拉取，发布记录只增不改。
+ * best.pt + 元数据并配限时签名 URL 供推理端拉取，发布记录只增不改。
  * 数据纪律（map §5/§6）：事件当门铃、REST 取数据，不轮询；长操作（部署导出/
  * 发布打包/清理删除）由 API 薄层 opctx 登记，进度经 operation.updated 事件载荷显示。
  * 状态徽章颜色 + 形状 + 文字三重编码（DESIGN.md §3），数值 tabular-nums。
@@ -446,7 +446,7 @@ export function ModelsPage() {
                           type="button"
                           className="btn btn-ghost"
                           data-testid={`weight-release-${w.run_uid}`}
-                          title="打包 best.pt + 元数据进发布目录，配限时签名 URL 供监控端拉取（票 123）"
+                          title="打包 best.pt + 元数据进发布目录，配限时签名 URL 供推理端拉取（票 123）"
                           onClick={() => {
                             setReleaseError(null);
                             setReleaseTarget(w);
@@ -482,7 +482,7 @@ export function ModelsPage() {
         <h2 className="card-title">发布记录</h2>
         <p className="placeholder-note">
           发布与部署是两个动作：发布把 best 权重与元数据（类别表、建议置信度、指纹）打包进
-          发布目录并生成限时签名 URL 供监控端拉取；记录只增不改，URL 过期只影响拉取。
+          发布目录并生成限时签名 URL 供推理端拉取；记录只增不改，URL 过期只影响拉取。
         </p>
         {relsQ.isError ? (
           <div>
@@ -493,7 +493,7 @@ export function ModelsPage() {
           <p className="placeholder-note">读取发布记录…</p>
         ) : releases.length === 0 ? (
           <div className="empty-state" data-testid="release-empty-first">
-            <p>还没有发布记录——对权重在盘的 Run 发起发布（状态不限，票 123），监控端即可凭签名 URL 拉取。</p>
+            <p>还没有发布记录——对权重在盘的 Run 发起发布（状态不限，票 123），推理端即可凭签名 URL 拉取。</p>
           </div>
         ) : (
           <table className="data-table">
@@ -827,7 +827,7 @@ export function ModelsPage() {
 
       {releaseTarget && (
         <ConfirmDialog
-          title="发布给监控端？"
+          title="发布给推理端？"
           confirmLabel="发布"
           busy={releaseBusy}
           error={releaseError}
@@ -839,7 +839,7 @@ export function ModelsPage() {
                 <span className="tnum">{releaseTarget.classes.length}</span> 类）
               </li>
               <li>发布包：best.pt + metadata.json（类别表、建议置信度、指纹）+ classes.txt。</li>
-              <li>拉取：生成限时签名 URL（24 小时有效）供监控端免凭据下载。</li>
+              <li>拉取：生成限时签名 URL（24 小时有效）供推理端免凭据下载。</li>
             </>
           }
           consequence="发布目录是派生产物，可清理后重新发布；发布记录只增不改，重复发布生成新记录。"

@@ -227,7 +227,8 @@ class RuntimeSetting(Base):
     """运行期可变设置键值表（票 122）：Web 可改、改后即生效的设置落这里。
 
     config.toml 同名键只作兜底默认（文件在启动装配，改文件须重启）——运行期真源在本表，
-    读取侧每次现查（键量个位数，无缓存必要）。首个键 `monitor.base_url`（监控端连接地址）。
+    读取侧每次现查（键量个位数，无缓存必要）。首个键 `producer.base_url`（推理端连接地址；
+    #129 改名前旧键读兼容见 `core.producer`）。
     """
 
     __tablename__ = "runtime_settings"

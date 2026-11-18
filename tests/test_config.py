@@ -90,3 +90,21 @@ def test_api_config_get_put(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cli
     assert r.status_code == 400 and r.json()["error"]["code"] == "unknown_key"
     r = client.put("/api/v1/config", json={"server": {"port": 70000}})
     assert r.status_code == 400 and r.json()["error"]["code"] == "invalid_value"
+
+
+def test_load_config_migrates_legacy_producer_section(tmp_path: Path):
+    """#129 改名兼容：config.toml 只写旧节（#129 前命名）时并入 producer 节作兜底。"""
+    from visiontrainer.core.producer import LEGACY_CONFIG_SECTION
+
+    legacy = f'[{LEGACY_CONFIG_SECTION}]\nbase_url = "http://192.168.1.50:8610"\n'
+    p = tmp_path / "config.toml"
+    _write(p, f'[server]\nport = 8600\n\n{legacy}')
+    cfg = load_config(p)
+    assert cfg["producer"]["base_url"] == "http://192.168.1.50:8610"  # 旧节值入新节
+    assert cfg[LEGACY_CONFIG_SECTION]["base_url"] == "http://192.168.1.50:8610"  # 原节保留（展示）
+
+    # 新节显式在场时旧节不并入（新键优先，deprecated 旧节仅作展示）
+    p2 = tmp_path / "config2.toml"
+    _write(p2, f'{legacy}[producer]\nbase_url = "http://10.0.0.2:8610"\n')
+    cfg2 = load_config(p2)
+    assert cfg2["producer"]["base_url"] == "http://10.0.0.2:8610"

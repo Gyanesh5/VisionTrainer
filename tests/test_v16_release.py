@@ -1,7 +1,7 @@
 """模型发布测试（票 123，ADR 0015 Decision 1：发布与部署分立）。
 
 发布 = best 权重 + 类别表 + 建议置信度 + 模型指纹打包进发布目录（派生产物），
-配限时签名 URL 供监控端免凭据拉取；发布记录只增不改，重复发布生成新记录。
+配限时签名 URL 供推理端免凭据拉取；发布记录只增不改，重复发布生成新记录。
 """
 
 from __future__ import annotations
@@ -67,7 +67,7 @@ def test_release_packaging_and_metadata(release_client):
     out = r.json()
     assert out["run_uid"] == uid
     assert out["fingerprint"] == STUB_FP
-    assert out["version"] == STUB_FP  # version 标签 = 指纹（监控端 models.yaml 对账键）
+    assert out["version"] == STUB_FP  # version 标签 = 指纹（推理端 models.yaml 对账键）
     assert out["download_url"].startswith("/api/v1/releases/download?")
     assert "t=" in out["download_url"]
 

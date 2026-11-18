@@ -78,15 +78,15 @@ export interface SelfcheckResult {
   error_count: number;
 }
 
-/** 监控端连接配置（票 122）：source=config 为文件兜底默认，runtime 为运行期已改（SQLite） */
-export interface MonitorConfig {
+/** 推理端连接配置（票 122；#129 命名泛化）：source=config 为文件兜底默认，runtime 为运行期已改（SQLite） */
+export interface ProducerConfig {
   base_url: string;
   source: "runtime" | "config";
   updated_at: string | null;
 }
 
 /** 探测结果（GET {base}/api/health）：失败原因在 detail，不外抛 */
-export interface MonitorProbeResult {
+export interface ProducerProbeResult {
   base_url: string;
   reachable: boolean;
   detail: string;
@@ -174,15 +174,15 @@ export interface ProbeClassesResult {
   images: number;
 }
 
-/** POST /datasets/monitor-pull：从 vision-monitor 拉取导入（票 124，联动域） */
-export interface MonitorPullFilters {
+/** POST /datasets/producer-pulls：从推理端拉取导入（票 124，联动域；#129 命名泛化） */
+export interface ProducerPullFilters {
   task?: string | null;
   status?: "confirmed" | "corrected" | null;
   created_from?: number | null;
   created_to?: number | null;
 }
 
-export interface MonitorPullResult {
+export interface ProducerPullResult {
   name: string;
   mode: "create" | "add";
   pulled: number;
@@ -636,16 +636,16 @@ export const datasetsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ src_dir: srcDir, task_type: taskType }),
     }),
-  /** 从 vision-monitor 拉取导入（票 124）：过滤拉取 → 托管导入链 → manifest 落账 → ingested 回写 */
-  monitorPull: (body: {
+  /** 从推理端拉取导入（票 124）：过滤拉取 → 托管导入链 → manifest 落账 → ingested 回写 */
+  producerPull: (body: {
     mode: "create" | "add";
     name: string;
     task_type?: TaskType;
     classes?: string[];
     base_url?: string | null;
-    filters: MonitorPullFilters;
+    filters: ProducerPullFilters;
   }) =>
-    request<MonitorPullResult>("/api/v1/datasets/monitor-pull", {
+    request<ProducerPullResult>("/api/v1/datasets/producer-pulls", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -1104,7 +1104,7 @@ export interface RunWeightDeployment {
 export interface RunWeightRelease {
   release_id: number;
   fingerprint: string;
-  /** version 标签 = 指纹（监控端 models.yaml 对账键） */
+  /** version 标签 = 指纹（推理端 models.yaml 对账键） */
   version: string;
   created_at: string | null;
   /** 签名 URL 是否已过有效期（读时计算） */
@@ -1239,7 +1239,7 @@ export interface ReleaseItem {
   task_name: string | null;
   round_no: number | null;
   fingerprint: string;
-  /** version 标签 = 指纹（监控端 models.yaml 对账键） */
+  /** version 标签 = 指纹（推理端 models.yaml 对账键） */
   version: string;
   release_dir: string;
   primary_metric: number | null;
@@ -1340,16 +1340,16 @@ export const api = {
   },
   getSelfcheck: () => request<SelfcheckResult>("/api/v1/selfcheck"),
   getConfig: () => request<Record<string, unknown>>("/api/v1/config"),
-  /** 监控端连接（票 122）：读生效地址；写落 SQLite 改后即生效；探测 GET /api/health */
-  getMonitorConfig: () => request<MonitorConfig>("/api/v1/system/monitor"),
-  putMonitorConfig: (base_url: string) =>
-    request<MonitorConfig>("/api/v1/system/monitor", {
+  /** 推理端连接（票 122）：读生效地址；写落 SQLite 改后即生效；探测 GET /api/health */
+  getProducerConfig: () => request<ProducerConfig>("/api/v1/system/producer"),
+  putProducerConfig: (base_url: string) =>
+    request<ProducerConfig>("/api/v1/system/producer", {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ base_url }),
     }),
-  probeMonitor: (base_url?: string) =>
-    request<MonitorProbeResult>("/api/v1/system/monitor/probe", {
+  probeProducer: (base_url?: string) =>
+    request<ProducerProbeResult>("/api/v1/system/producer/probe", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(base_url === undefined ? {} : { base_url }),

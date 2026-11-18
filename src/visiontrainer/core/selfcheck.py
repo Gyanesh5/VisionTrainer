@@ -112,23 +112,23 @@ def _check_llm(cfg: dict) -> dict:
             "summary": f"{llm.get('model')} @ {llm.get('base_url')}", "detail": ""}
 
 
-def _check_monitor(cfg: dict) -> dict:
-    """监控端（vision-monitor）可达性探测（票 122）：GET /api/health，短超时。
+def _check_producer(cfg: dict) -> dict:
+    """推理端可达性探测（票 122）：GET /api/health，短超时。
 
     不可达只降级为 warning——拉取导入/回写不可用，不影响平台本职（与出站回写
     「告警不阻断」同口径）。生效地址读 runtime_settings（Web 可改即生效）→ config 兜底。
     """
-    from .monitor import get_monitor_base_url, probe_monitor
+    from .producer import get_producer_base_url, probe_producer
 
-    base = get_monitor_base_url(cfg)
-    probe = probe_monitor(base, cfg=cfg)
+    base = get_producer_base_url(cfg)
+    probe = probe_producer(base, cfg=cfg)
     if probe["reachable"]:
-        return {"key": "monitor", "label": "监控端连接", "severity": "ok",
+        return {"key": "producer", "label": "推理端连接", "severity": "ok",
                 "summary": f"{base} 可达（{probe['detail']}）", "detail": ""}
     return {
-        "key": "monitor", "label": "监控端连接", "severity": "warning",
+        "key": "producer", "label": "推理端连接", "severity": "warning",
         "summary": f"{base} 不可达：{probe['detail']}——拉取导入/回写不可用（训练不受影响）",
-        "detail": "修复：系统页「监控端连接」→ 修正监控端地址，或确认 vision-monitor 已启动",
+        "detail": "修复：系统页「推理端连接」→ 修正推理端地址，或确认推理端平台已启动",
     }
 
 
@@ -138,7 +138,7 @@ def run_selfcheck(cfg: dict | None = None) -> dict:
 
     cfg = cfg or load_config()
     items = []
-    for fn in (_check_training_python, _check_entry_files, _check_dirs, _check_llm, _check_monitor):
+    for fn in (_check_training_python, _check_entry_files, _check_dirs, _check_llm, _check_producer):
         try:
             items.append(fn(cfg))
         except Exception as exc:  # noqa: BLE001

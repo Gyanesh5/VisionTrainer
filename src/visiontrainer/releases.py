@@ -45,7 +45,7 @@ def verify(release_id: int, token: str) -> bool:
 
 
 def release_url(release_id: int) -> str:
-    """监控端拉取入口：签名 URL（免凭据，过期即 403）。"""
+    """推理端拉取入口：签名 URL（免凭据，过期即 403）。"""
     return f"{ROUTE}?rid={release_id}&t={sign(release_id)}"
 
 

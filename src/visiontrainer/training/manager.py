@@ -26,7 +26,7 @@ from pathlib import Path
 
 from ..datasets import service as ds
 from ..datasets.formats import DEFAULT_FORMAT_ID
-from ..datasets import monitor_writeback
+from ..datasets import producer_writeback
 from ..datasets import split as split_ent
 from ..datasets.service import DatasetError
 from . import naming
@@ -662,7 +662,7 @@ class TrainingManager:
                                f"「{task_name}」Run {cur.uid} 完成"
                                + (f"，主指标 {primary:.3f}" if primary is not None else ""))
                 # trained 回写（票 125，ADR 0015 Decision 5）：Run 终态成功后异步回写
-                # 监控端样本状态，后台线程不阻塞收尾；失败告警不阻断（monitor_writeback
+                # 推理端样本状态，后台线程不阻塞收尾；失败告警不阻断（producer_writeback
                 # 与通知域一致的降级口径）
                 self._writeback_trained_async(cur.run_id)
             else:
@@ -673,9 +673,10 @@ class TrainingManager:
     def _writeback_trained_async(self, run_id: int) -> None:
         """Run 终态成功后的 trained 回写：后台 daemon 线程执行，不阻塞训练收尾链路。
 
-        归因与出站见 `datasets.monitor_writeback.writeback_trained_for_run`
-        （dataset meta ``monitor_imports`` 样本清单 ∩ 该 Run 实效名单）；失败告警
-        不阻断训练主流程（通知域一致降级口径），线程内异常也不外抛。
+        归因与出站见 `datasets.producer_writeback.writeback_trained_for_run`
+        （dataset meta ``producer_imports`` 样本清单 ∩ 该 Run 实效名单；#129 前旧键
+        读兼容见 `core.producer`）；失败告警不阻断训练主流程（通知域一致降级口径），
+        线程内异常也不外抛。
         """
 
         def _job():
@@ -687,7 +688,7 @@ class TrainingManager:
                     task = s.get(Task, run.task_id)
                     dataset, run_dir = (task.dataset if task else None), run.run_dir
                 if dataset:
-                    monitor_writeback.writeback_trained_for_run(dataset, run_dir)
+                    producer_writeback.writeback_trained_for_run(dataset, run_dir)
             except Exception:  # noqa: BLE001 —— 回写线程永不外抛，不压队列不炸收尾
                 _logger.exception("trained 回写后台异常（不阻断训练）：%s", run_id)
 
