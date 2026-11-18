@@ -4,13 +4,13 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RunDetailPage } from "./RunDetailPage";
-import { runsApi, signThumbUrls, type RunDetail } from "../api/client";
+import { api, runsApi, signThumbUrls, ApiRequestError, type RunDetail } from "../api/client";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
   return {
     ...actual,
-    api: { ...actual.api, deployRun: vi.fn(), openDir: vi.fn() },
+    api: { ...actual.api, deployRun: vi.fn(), openDir: vi.fn(), releaseRun: vi.fn() },
     runsApi: {
       get: vi.fn(),
       gpu: vi.fn(),
@@ -271,9 +271,33 @@ describe("RunDetailPage 动作", () => {
     await waitFor(() => expect(screen.getByText("training-list")).toBeInTheDocument());
   });
 
+  it("done_run_offers_release_with_intent_confirm_then_calls_api", async () => {
+    mockRun(); // done + best_pt 在
+    const user = userEvent.setup();
+    renderRun();
+    const btn = await screen.findByTestId("run-release");
+    expect(btn).toBeEnabled();
+    await user.click(btn);
+    // 确认门是意图清单：发布对象 + 发布包内容 + 限时签名 URL
+    const dialog = screen.getByTestId("confirm-dialog");
+    expect(dialog.textContent).toContain("Run aaaa1111");
+    expect(dialog.textContent).toContain("发布包");
+    expect(dialog.textContent).toContain("签名");
+    await user.click(within(dialog).getByRole("button", { name: "发布" }));
+    await waitFor(() => expect(api.releaseRun).toHaveBeenCalledWith("aaaa1111"));
+    await waitFor(() => expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument());
+  });
+
+  it("non_done_run_hides_release_entry", async () => {
+    mockRun({ status: "running" });
+    renderRun();
+    await screen.findByTestId("run-stop");
+    expect(screen.queryByTestId("run-release")).not.toBeInTheDocument();
+  });
+
   it("delete_flow_confirms_with_intent_then_calls_delete_default_keep_files", async () => {
     mockRun();
-    deleteRun.mockResolvedValue({ deleted: "aaaa1111" });
+    deleteRun.mockResolvedValue({ deleted: "aaaa1111", invalidated: { deployments: 0, releases: 0 } });
     const user = userEvent.setup();
     renderRun();
     await user.click(await screen.findByTestId("run-delete"));
@@ -281,7 +305,36 @@ describe("RunDetailPage 动作", () => {
     expect(dialog.textContent).toContain("共 3 epoch");
     expect(dialog.textContent).toContain("只删该轮");
     await user.click(within(dialog).getByTestId("confirm-accept"));
-    await waitFor(() => expect(deleteRun).toHaveBeenCalledWith("aaaa1111", false));
+    await waitFor(() => expect(deleteRun).toHaveBeenCalledWith("aaaa1111", false, false));
     expect(screen.getByText("training-list")).toBeInTheDocument();
+  });
+
+  it("delete_conflict_shows_records_then_override_passes_force", async () => {
+    // 票 126：删除已发布/已部署的 Run 默认被后端阻止（409 delete_conflict）——
+    // 对话框如实转述记录要点，并给出显式放行入口（仍要删除 → force=true）
+    mockRun();
+    deleteRun.mockRejectedValueOnce(new ApiRequestError(
+      "删除冲突：Run aaaa1111 已有产线账目——部署 1 条（yolo11n_detect_aaaa1111）；"
+      + "发布 1 条（指纹 ab12cd34）。放行后部署/发布记录随 Run 标注失效（物理拷贝留在派生目录，"
+      + "可追溯）；确认删除请带 force=true 重试。",
+      409, "delete_conflict", {}));
+    deleteRun.mockResolvedValueOnce({ deleted: "aaaa1111", invalidated: { deployments: 1, releases: 1 } });
+    const user = userEvent.setup();
+    renderRun();
+    await user.click(await screen.findByTestId("run-delete"));
+    const dialog = screen.getByTestId("confirm-dialog");
+    await user.click(within(dialog).getByTestId("confirm-accept"));
+
+    // 冲突提示在对话框内转述（不静默失败、不静默重试）
+    const conflictDialog = await screen.findByTestId("confirm-dialog");
+    expect(conflictDialog.textContent).toContain("部署 1 条");
+    expect(conflictDialog.textContent).toContain("ab12cd34");
+    expect(conflictDialog.textContent).toContain("失效");
+
+    // 放行路径：确认按钮变为「仍要删除（放行）」，再次确认带 force=true
+    const acceptBtn = within(conflictDialog).getByTestId("confirm-accept");
+    expect(acceptBtn.textContent).toContain("仍要删除");
+    await user.click(acceptBtn);
+    await waitFor(() => expect(deleteRun).toHaveBeenLastCalledWith("aaaa1111", false, true));
   });
 });

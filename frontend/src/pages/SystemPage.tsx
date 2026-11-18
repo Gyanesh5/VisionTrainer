@@ -1,7 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
-import { api } from "../api/client";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useState } from "react";
+import { api, type MonitorProbeResult } from "../api/client";
 
-/** 系统页（票 107）：启动自检卡 + 配置视图（GET /api/v1/selfcheck 与 /api/v1/config）。 */
+/** 系统页（票 107）：启动自检卡 + 监控端连接卡（票 122）+ 配置视图。 */
 
 const SEVERITY_LABEL = { ok: "正常", warning: "警告", error: "错误" } as const;
 const SENSITIVE_KEYS = new Set(["api_key"]);
@@ -19,6 +20,101 @@ export function configRows(config: Record<string, unknown>): Array<{ section: st
     }
   }
   return rows;
+}
+
+/** 监控端连接卡（票 122）：查看/修改监控端地址（改后即生效）+ 可达性探测。 */
+export function MonitorCard() {
+  const queryClient = useQueryClient();
+  const monitor = useQuery({ queryKey: ["system", "monitor"], queryFn: api.getMonitorConfig });
+  const [draft, setDraft] = useState<string | null>(null);
+  const [probe, setProbe] = useState<MonitorProbeResult | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  const save = useMutation({
+    mutationFn: () => api.putMonitorConfig((draft ?? monitor.data?.base_url ?? "").trim()),
+    onSuccess: (saved) => {
+      setSaveError(null);
+      setDraft(null);
+      setProbe(null);
+      queryClient.setQueryData(["system", "monitor"], saved);
+      void queryClient.invalidateQueries({ queryKey: ["system", "selfcheck"] });
+    },
+    onError: (exc) => setSaveError(exc.message),
+  });
+
+  const test = useMutation({
+    mutationFn: () => api.probeMonitor(draft === null ? undefined : draft.trim()),
+    onSuccess: (result) => setProbe(result),
+    onError: (exc) => setProbe({ base_url: draft ?? "", reachable: false, detail: exc.message }),
+  });
+
+  const value = draft ?? monitor.data?.base_url ?? "";
+  const dirty = draft !== null && draft.trim() !== (monitor.data?.base_url ?? "");
+
+  return (
+    <div className="card" data-testid="monitor-card">
+      <h2 className="card-title">监控端连接</h2>
+      {monitor.isPending ? (
+        <p className="placeholder-note">读取监控端地址…</p>
+      ) : monitor.isError ? (
+        <p className="error-note">监控端地址读取失败：{monitor.error.message}</p>
+      ) : (
+        <>
+          <div className="form-row">
+            <label htmlFor="monitor-base-url">监控端地址（vision-monitor，工位）</label>
+            <input
+              id="monitor-base-url"
+              data-testid="monitor-url-input"
+              className="tnum"
+              type="text"
+              value={value}
+              onChange={(e) => setDraft(e.target.value)}
+              placeholder="http://127.0.0.1:8610"
+            />
+            <p className="form-hint">
+              {monitor.data.source === "runtime"
+                ? "运行期已改，立即生效"
+                : "当前为配置文件兜底默认（保存后改存数据库、立即生效）"}
+            </p>
+          </div>
+          <div className="btn-row">
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="monitor-save"
+              disabled={!dirty || save.isPending}
+              onClick={() => save.mutate()}
+            >
+              {save.isPending ? "保存中…" : "保存"}
+            </button>
+            <button
+              type="button"
+              className="btn"
+              data-testid="monitor-probe"
+              disabled={test.isPending}
+              onClick={() => test.mutate()}
+            >
+              {test.isPending ? "探测中…" : "测试连接"}
+            </button>
+          </div>
+          {saveError ? <p className="error-note" data-testid="monitor-save-error">{saveError}</p> : null}
+          {save.isSuccess && !dirty ? (
+            <p className="state-text ok" data-testid="monitor-saved">已保存，改后即生效</p>
+          ) : null}
+          {probe ? (
+            <p
+              className={probe.reachable ? "state-text ok" : "state-text error"}
+              data-testid="monitor-probe-result"
+            >
+              {probe.reachable
+                ? `可达：${probe.base_url}（${probe.detail}）`
+                : `不可达：${probe.base_url}——${probe.detail}`}
+            </p>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
 }
 
 export function SystemPage() {
@@ -57,6 +153,8 @@ export function SystemPage() {
           </>
         )}
       </div>
+
+      <MonitorCard />
 
       <div className="card">
         <h2 className="card-title">配置</h2>

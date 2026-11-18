@@ -4,7 +4,9 @@ import { useEvents, formatClock } from "../ws/useEvents";
 
 /**
  * 六导航壳（票 107）：62px 顶栏（品牌 + 后台状态灯）+ 左侧分组导航
- * （工作区组：数据集/训练/部署/Agent/日志；设置组：系统）+ 主区 Outlet。
+ * （工作区组：数据集/训练/模型/Agent/日志；设置组：系统）+ 主区 Outlet。
+ * 票 121：导航「部署」改名「模型」——页面以 Run 权重为模型真源，路由路径保持
+ * /deploy 不动（深链与测试基线不变，只换门牌）。
  *
  * 状态灯是 D 族硬指标：WS 事件通道连接态顶栏常显——在线绿点（state-ok）、
  * 失联灰褐点（state-stale，悬停给停更时刻），文字双编码（DESIGN.md §3）。
@@ -44,7 +46,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <span className="nav-group-label">工作区</span>
             <NavItem to="/datasets" label="数据集" icon={<DatasetIcon />} />
             <NavItem to="/training" label="训练" icon={<TrainingIcon />} />
-            <NavItem to="/deploy" label="部署" icon={<DeployIcon />} />
+            <NavItem to="/deploy" label="模型" icon={<DeployIcon />} />
             <NavItem to="/agent" label="Agent" icon={<AgentIcon />} />
             <NavItem to="/logs" label="日志" icon={<LogsIcon />} />
             <span className="nav-group-label">设置</span>

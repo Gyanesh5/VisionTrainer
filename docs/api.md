@@ -18,7 +18,7 @@
 | GET | `/api/v1/operations` | 进行中操作登记表全量快照（阶段 1c）：`{running:[按登记序], last:最近终态\|null}`；`operation.updated` 只在登记/换阶段/终态发，细粒度进度消费方逢事件读本端点刷新 |
 | POST | `/api/v1/system/open-dir` | 服务端文件管理器打开目录（阶段 1c）：body `{path}`；fire-and-forget（xdg-open），目录不存在 400 `invalid_args`，无桌面环境 500 |
 | GET | `/api/v1/system/logs` | 运行日志尾部读取（票 107 日志页）：query `tail`(1–5000, 默认 300)/`level`(DEBUG\|INFO\|WARNING\|ERROR, ==匹配)/`q`(子串，大小写不敏感)；返回 `{path, tail, level, q, lines[], matched, total}`——筛选后取最近 N 条，堆栈续行随前一行入选，文件缺失返回空集 |
-| GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地） |
+| GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地；monitor 节为兜底默认，运行期生效值见 `GET /system/monitor`，票 122） |
 | PUT | `/api/v1/config` | 白名单部分更新。body: `{server?:{host,port}, llm?:{base_url,api_key,model}, training?:{python,trainer_entry,export_entry,datasets_dir,runs_dir,model_lib_dir,check_occupancy}}`（节/键均可省略）；返回 `{config, restart_required}`——llm 即存即生效，server/training 改动须重启（设置页，2026-09-20） |
 | POST | `/api/v1/config/llm-test` | LLM 连通性测试（阶段 1c）：按当前 [llm] 发一条探测消息，返回 `{reply}`；未配置/不可达 502 `llm_unavailable`；多模态链路可达数十秒（长操作，登记 `llm:test`） |
 
@@ -103,7 +103,33 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/selfcheck` | 按需自检（M6 07）：训练 python（子进程探针）/入口文件/三目录可写/LLM 完整性，`{items[], ok, problems, error_count}`；severity ∈ ok/warning/error，error 项带修复指引 detail |
+| GET | `/api/v1/selfcheck` | 按需自检（M6 07）：训练 python（子进程探针）/入口文件/三目录可写/LLM 完整性/监控端可达性（票 122，`key=monitor`，不可达为 warning 带原因——拉取导入/回写不可用，训练不受影响），`{items[], ok, problems, error_count}`；severity ∈ ok/warning/error，error 项带修复指引 detail |
+
+### 系统域票 122 增补（监控端连接，2026-11-18）
+
+监控端（vision-monitor，工位）连接配置：运行期真源 = SQLite `runtime_settings`（Alembic b0002），config.toml `[monitor] base_url` 同名键只作兜底默认（不进 `PUT /config` 白名单——文件改动须重启，与本配置「改后即生效」语义冲突，Web 修改走本组端点）。探测 = HTTP GET `{base}/api/health`（vision-monitor 侧契约），短超时（2s）、失败带原因。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/system/monitor` | 读监控端连接地址：`{base_url, source, updated_at}`——source ∈ `runtime`（运行期已改）/ `config`（文件兜底默认，updated_at 为 null） |
+| PUT | `/api/v1/system/monitor` | 写运行期地址（upsert runtime_settings，改后即生效无需重启）。body `{base_url}`；返回同 GET（source 恒 `runtime`）；非 http(s) 或空串 400 `invalid_value`；config.toml 不被写 |
+| POST | `/api/v1/system/monitor/probe` | 可达性探测：返回 `{base_url, reachable, detail}`——detail 人读（`HTTP 200` 或异常类型+原因）。body 可缺省 `{base_url?}`：带则探未保存草稿值（不落库），缺省探当前生效地址；草稿非法 400 `invalid_value` |
+
+### 数据集域票 124 增补（从 vision-monitor 拉取导入，2026-11-18）
+
+联动域主动学习环的样本回流入口（ADR 0015 Decision 3/4）：后端按过滤条件调监控端导出 API（地址取系统域连接配置，票 122），解包 → 审查键归一（监控端 LabelMe JSON 的 `vt_review` 为字符串态生命周期状态，平台按 ADR 0003 字典态消费——归一剥除非字典态 `vt_review`，`checked: true` 经 XAL 互认口径继承为 approved）→ 走既有托管导入链（新建/加图，与手工导入同质量同路径）→ 导出包 manifest 四要素（工位 site、模型指纹 models[].model_sha8、时间窗 time_window、样本清单 samples）追加进 dataset meta 的 `monitor_imports`（逐次拉取一条记录，逐条样本不建独立表）→ 回写监控端样本状态 ingested。重复拉取同批：add 模式按文件名与既有真源去重（同批重复 added=0）。临时包用完即焚，失败不留半成品。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/v1/datasets/monitor-pull` | 拉取导入（长操作，登记 `ds:{name}:monitor-pull`，相：拉取导出包/解包归一/入图/校验标注/回写状态）。body: `{mode:create\|add, name, task_type?(create), classes?(create，缺省由导出包派生), base_url?(本次覆盖，不落库), filters:{task?, status?:confirmed\|corrected, created_from?, created_to?}}`；返回 `{name, mode, pulled, added, skipped_existing, site, models, time_window, writeback:{ok,detail,sample_ids}, validation_summary}`。错误：502 `monitor_unreachable`（连不上）/ `monitor_http_error`（导出 API 非 2xx）/ `monitor_bad_bundle`（坏 ZIP 或 manifest 缺四要素），404 `monitor_empty`（204 无样本）与 add 目标不存在 `not_found`，400 `invalid_args`；导入链阻断（表外类别 409、同名冲突 409）按票 03/04 契约原样返回 |
+
+**出站回写契约**（监控端样本状态 API，监控端侧待实现、本仓先钉形状）：导入成功后平台发起 `POST {monitor基址}/api/samples/status`，body `{"status": "ingested", "sample_ids": [manifest 样本清单的逐条 sample_id]}`。回写失败告警降级不阻断导入主流程（与通知域一致口径）：响应 `writeback.ok=false` 带 detail，操作仍 done；重复拉取同一批（全量去重）也会再发回写，可补前次失败。
+
+### 训练域票 125 增补（trained 回写，2026-11-18）
+
+联动域状态回写第二态（ADR 0015 Decision 5，无新增 REST 端点——回写为平台后台出站动作）：消费某数据集的 Run 生命周期终态成功（done，含平台重启后孤儿按产物判定 done）后，按归因交集回写监控端样本状态 trained。归因口径：该数据集 meta `monitor_imports` 样本清单 ∩ 该 Run 实际消费名单（运行快照 `run_manifest.json` 的 `effective` 冻结段，相对 `source/` 文件名）——只有本次训练真正进 train/val 的样本才回写（盘上缺图/排除在册的剔除样本不回写），且只碰该 Run 消费数据集的清单，其他导入批次与其他数据集不受误伤；数据集无联动导入记录或 Run 无实效快照（外部数据集/历史 Run）则不回写。非 done 终态（failed/cancelled/stopping）不回写。回写由后台线程执行，不阻塞训练收尾链路；失败只告警不阻断训练主流程（桌面通知 + 日志 warning，与通知域一致降级口径），可在修复监控端连接后重训补写。
+
+**出站回写契约（trained 态）**：Run 终态成功后平台发起 `POST {monitor基址}/api/samples/status`，body `{"status": "trained", "sample_ids": [归因交集的逐条 sample_id]}`（与 ingested 态同一端点同一形状，`status` 换 `trained`；共享出站实现 `datasets/monitor_writeback.py`）。响应不进入任何 REST 响应面——结果只落日志与告警；样本状态机 `exported → ingested → trained` 中 ingested 见票 124 段。
 
 ### 任务域 M8 增补（错误分析 / 试跑 / 模型库，2026-09-21）
 
@@ -116,7 +142,7 @@
 | POST | `/api/v1/runs/{uid}/analysis/export` | 导出 FN/FP 改标清单 markdown 至 Run 目录 |
 | POST | `/api/v1/runs/{uid}/test-infer` | 训后试跑（M8 05）：body `{image, conf?, iou?}`；image 支持单图/图片目录（递归取前 30 张，响应附 `dir_total` 供截断提示）/视频（抽帧）；按需导出 ONNX 缓存 + 叠框图 |
 | GET | `/api/v1/model-library` | 模型库目录视图（M8 07）：items[{name,size_mb,mtime,run_uid,verified,is_latest}] |
-| DELETE | `/api/v1/model-library/{name}` | 删除模型目录（防穿越校验），同步删 deployments 记录，返回 removed_deployments |
+| DELETE | `/api/v1/model-library/{name}` | 清理模型库派生目录（防穿越校验）；票 126 对齐派生语义：只删派生物，deployments 记录（真源账目）保留，返回 `{deleted, kept_deployments}`（保留的记录条数），事件 `deployment.updated action=dir_removed` |
 
 M8 同批契约变化：`GET /tasks/{id}/comparison` 与 `GET /compare` 增加 metrics_summary（最优 Run 逐指标 Best/Last/Min/Max）；deployments 条目增加 task_id；复盘报告 LLM 输入增加 error_stats 且固定「下一步实验推荐」章节；部署 payload conf 优先取分析建议阈值；DB schema v4（run_sample_errors 表）；`POST /tasks` 无变化（实验模板为 UI 层批量创建）。
 
@@ -138,13 +164,13 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 | GET | `/api/v1/tasks` | 列表（status、source、primary_metric、dataset、split_uid、format_id、created_at；**2026-10-30 起每任务附 `runs` Run 概要列表**——uid/round_no/status/pruned/primary_metric/error/epochs（实际产出 epoch 数）/started_at/finished_at，在跑轮带 progress/prog_frac、排队轮带位次与 block_reason——与 `rounds` 计数并存，训练页按数据集分组每 Run 一行渲染；取消轮一律保留） |
 | GET | `/api/v1/queue` | 队列当前态快照（阶段 1c）：`{running_uid, queued_uids:[按入队序], block_reason}`——`queue.updated` 事件的 REST 补齐源（事件无回放，初始加载与断线重连读这里），口径与出队循环的发布载荷逐字一致 |
 | GET | `/api/v1/tasks/{id}` | 详情（含 runs 概要、Agent 轮次时间线数据与 `decisions` 决策归档——changes/clamps/analysis/param_importance 快照，M7 06） |
-| DELETE | `/api/v1/tasks/{id}?delete_files=` | 删除（级联删行，磁盘默认保留） |
+| DELETE | `/api/v1/tasks/{id}?delete_files=&force=` | 删除（级联删行，磁盘默认保留）；票 126：含已部署/已发布 Run 时默认 409 `delete_conflict`（提示列记录要点），`force=true` 显式放行——部署/发布记录标注失效、物理拷贝留派生目录，响应附 `invalidated` |
 | POST | `/api/v1/tasks/{id}/approve` | 审批门裁决（ADR 0007 四态）：body `{action: "approve" \| "approve_with_changes", hyperparameters?} \| {action: "reject"} \| {action: "stop"}`（manual 模式；旧 continue/stop 值在循环读侧兼容映射）；`approve_with_changes` 附调整后超参 |
 | POST | `/api/v1/tasks/{id}/preapproval` | 批量预审授权（ADR 0007）：body `{rounds: N}`——接下来 N 轮一次放行，流水留档可审计 |
 | DELETE | `/api/v1/tasks/{id}/preapproval` | 撤销批量预审：下一轮立即回到逐轮审批 |
 | POST | `/api/v1/tasks/{id}/agent-mode` | 自主档位切换（ADR 0007）：body `{approval: "autonomous" \| "supervised"}`，下一轮生效 |
 | GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照，v1.4 冻结三段：`split{uid,params,memo,grouped}` / `effective{train[],val[],dropped{missing[],excluded[]}}` / `format{format_id,converter_version,projection_version,class_map,entry_path}`，连同当轮参数、权重标识、类别表哈希与标签聚合哈希 `labels`；早于该功能的 Run 为 null）；失败原因在 `error` 字段行内展示（阶段 3c）；出队新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
-| DELETE | `/api/v1/runs/{uid}?delete_files=` | 删除单条训练记录（2026-10-31）：仅终态（done/failed/cancelled）可删，queued/running/stopping 409；只删该轮，其余轮次不受影响；子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策/部署登记）一并清理；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；`delete_files=true` 另删该轮 run_dir（删空任务时整任务目录）；磁盘默认保留 |
+| DELETE | `/api/v1/runs/{uid}?delete_files=&force=` | 删除单条训练记录（2026-10-31）：仅终态（done/failed/cancelled）可删，queued/running/stopping 409；只删该轮，其余轮次不受影响；子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策）一并清理；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；`delete_files=true` 另删该轮 run_dir（删空任务时整任务目录）；磁盘默认保留。票 126：已部署/已发布的 Run 默认 409 `delete_conflict`（可读提示列出部署目录与发布指纹要点），`force=true` 显式放行——部署/发布记录保留并标注失效（`invalidated_at` + 冗余 `run_uid` 可对账），物理拷贝留在模型库/发布目录，响应 `{deleted, invalidated:{deployments, releases}}` |
 | GET | `/api/v1/runs/{uid}/logs?tail=200` | 日志尾读（配合日志页轮询） |
 | POST | `/api/v1/runs/{uid}/stop` | 优雅停止：SIGTERM → trainer.stop → killpg（04） |
 | POST | `/api/v1/runs/{uid}/force-stop` | 强制终止：跳过优雅停止直接 killpg SIGKILL，watchdog 不在场时就地落 cancelled（stopping 卡死的兜底出口，2026-09-21） |
@@ -158,7 +184,35 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | POST | `/api/v1/runs/{uid}/deploy` | 导出 ONNX + 组装模型库目录 + 导出验证（后台任务链）；类别名回查读该 Run 快照的 `format.class_map`，不回读当前类别表 |
-| GET | `/api/v1/deployments` | 已部署清单（含 LRU 提示依据的顺序） |
+| GET | `/api/v1/deployments` | 已部署清单（含 LRU 提示依据的顺序）；条目增 `invalidated`（票 126：所属 Run 被放行删除的记录留账，`run_uid` 取冗余列可对账，task 信息可能为 null） |
+
+### 模型发布（票 123，2026-11-18）
+
+发布（ADR 0015 Decision 1）与部署是两个动作：发布 = best 权重 + 类别表 + 阈值探索器建议置信度 + 模型指纹打包进发布目录（派生产物，可清理重建，不动模型真源）+ 限时签名 URL 供监控端免凭据拉取；部署维持「导出 ONNX 组装进标注端」。发布记录只增不改（时间、指纹、run 标识、拉取 URL 状态），重复发布同一 Run 生成新目录（`{family}_{task_type}_{run_uid}_{seq}` 序号递增）与新记录。签名 URL 复用缩略图签名管线模式（HMAC 限时 + 不带凭据，密钥同源 `server.thumb_secret`），24 小时有效，过期/篡改一律 403。建议置信度口径同部署（M8 04）：阈值探索器 `recommended_conf`（F1 最大点）优先，无分析回退 `train_args.conf`。`version` 标签 = 指纹（监控端 models.yaml 对账键）。发布目录配置键 `training.release_dir`（缺省 `~/visiontrainer/releases`，设置页可改）。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/v1/runs/{uid}/release` | 发起发布（同步）：打包落盘 + 登记记录，返回 `{release_id, run_uid, fingerprint, version, release_dir, bundle_path, download_url, url_expires_at, ...元数据}`；发布目录含 `best.pt`/`metadata.json`/`classes.txt`/`bundle.zip`。资格（review 修复）：权重文件在盘即可，状态不限——cancelled 但权重在盘的 Run 可发布（与票 121 真源清单「缺失如实标注」同口径）；权重缺失 400。长操作登记 `run:{uid}:release` |
+| GET | `/api/v1/releases` | 发布记录清单（只增不改账目，新在前）：`{release_id, run_uid, task_id, task_name, round_no, fingerprint, version, release_dir, primary_metric, created_at, url_expires_at, url_expired, recommended_conf, classes}`；`url_expired` 读时计算（过期只影响拉取，记录留档）；票 126 增 `invalidated`（所属 Run 被放行删除的记录留账，`run_uid` 取冗余列可对账，task 信息可能为 null）；review 修复增 `dir_cleared`（发布目录派生物已经平台清理的留档标注） |
+| GET | `/api/v1/releases/download?rid=&t=` | 凭限时签名 URL 拉取发布包 `bundle.zip`（`application/zip`，含 best.pt + metadata.json + classes.txt）；验签失败/过期 403，记录不存在或发布包已被清理 404（派生产物可重新发布重建） |
+| GET | `/api/v1/release-library` | 发布目录视图（review 修复，与 `/model-library` 同款读法）：`{root, items:[{name, path, size_mb, mtime, run_uid, task_name, release_ids}]}`——发布派生物的管理数据面，`release_ids` 按 `release_dir` 关联在账记录可对账 |
+| DELETE | `/api/v1/release-library/{name}` | 发布目录清理（review 修复，票 126 派生语义）：只删物理产物，`model_releases` 账目不动——匹配记录写 `cleared_at` 留档标注，返回 `{deleted, kept_releases}`；签名 URL 拉取如实 404，重新发布生成新目录新记录（序号递增）可重建。非法名 400、目录不存在 404；长操作登记 `release:purge` |
+
+### 模型页真源化（票 121，2026-11-18）
+
+模型真源 = Run 产物权重（ADR 0015 Decision 2）：模型库目录与发布目录降为派生产物（部署组装物/发布打包物，可清理重建），账目以 Run 权重为准。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| GET | `/api/v1/run-weights` | 模型真源清单：全部 Run 的权重行（未入库未发布、权重缺失的也在列）。行字段：`run_uid`/`task_id`/`task_name`/`round_no`/`status`/`created_at`/`weight_path`/`weight_present`/`fingerprint`/`classes`/`primary_metric`/`deployments`/`releases`。`fingerprint` = 模型指纹（权重文件 sha256 前 8 位，进程内按 mtime+size 缓存）；权重缺失（cancelled/failed 无 best.pt、文件被删）时 `weight_present=false` 且 `fingerprint=null`；`classes` 读 Run 快照 `format.class_map`（无快照回退当前类别表）；`deployments` = 该 Run 的部署历史（`deployment_id`/`model_lib_dir`/`verified`/`created_at`，新在前）；`releases` = 该 Run 的发布历史（票 123：`release_id`/`fingerprint`/`version`/`created_at`/`url_expired`，新在前） |
+
+### 删除冲突与派生目录治理（票 126，2026-11-18）
+
+ADR 0015 Decision 2 后果：部署/发布记录挂 Run 权重是产线账目，模型库目录与发布目录是派生产物（部署组装物/发布打包物）。账目处置原则——真源账目永不静默消失（失效标注可查），派生清理可重建可追溯：
+
+- **删除冲突门**：`DELETE /runs/{uid}` 与 `DELETE /tasks/{id}` 遇已部署/已发布对象默认 409 `delete_conflict`，可读提示列出记录要点（部署目录名、发布指纹、条数）与放行路径；`force=true` 显式放行。
+- **放行后的账目处置**：部署/发布记录保留并写 `invalidated_at`（失效标注），`run_uid` 冗余列随记录留档（Run 行删除后仍可对账）；发布/部署的物理拷贝留在派生目录不动；清单（`/deployments`、`/releases`）经 outerjoin 如实列出失效记录（task 信息可能为 null）。DB 迁移 b0004 为两表补列并回填历史行 run_uid。
+- **派生清理**：`DELETE /model-library/{name}` 只删派生目录、保留部署记录（返回 `kept_deployments`，事件 `dir_removed`）；`DELETE /release-library/{name}` 同语义清发布目录（review 修复补齐此前只能手工删盘的缺口）：保留发布记录并写 `cleared_at` 标注（返回 `kept_releases`），拉取入口如实 404，可重新发布重建（新目录新记录序号递增，旧记录留档可追溯）。DB 迁移 b0005 为 model_releases 补 `cleared_at` 列。
 
 ### 训练域元数据（阶段 1c，2026-11-17）
 
@@ -185,7 +239,7 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 {"type": "queue.updated", "running_uid": "3f9a2c1b",
  "queued_uids": ["a1b2c3d4"], "block_reason": null}           // 外部占用时填原因
 {"type": "deployment.updated", "deployment_id": 3,
- "action": "verified"}                                        // created 登记 / updated 验证落定 / removed 清理删除
+ "action": "verified"}                                        // created 登记 / updated 验证落定 / dir_removed 派生目录清理（票 126：记录保留，不再发 removed）
 {"type": "operation.updated", "op_id": 12, "key": "ds:plate:validate",
  "label": "重新校验 · plate", "scope": "plate", "phase": "扫描校验",
  "cur": 240, "total": 1200, "status": "running", "error": null}
@@ -196,7 +250,7 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 UI 进程内 0.3~0.5s 读登记表刷新。`key` 幂等：同 key 已在进行中时重复登记返回既有实例（重复提交闸）。
 
 - 断线补齐：**REST 拉全量**（`GET /runs/{uid}`），WS 不回放。
-- 自带 UI 的训练页与部署区以此通道事件驱动刷新（事件当门铃、REST 取数据 + 低频兜底），不周期轮询；`deployment.updated` 补齐部署记录后台落定（导出验证异步）与清理删除的即时通知。
+- 自带 UI 的训练页与部署区以此通道事件驱动刷新（事件当门铃、REST 取数据 + 低频兜底），不周期轮询；`deployment.updated` 补齐部署记录后台落定（导出验证异步）与派生目录清理（dir_removed）的即时通知。
 - 日志流：独立通道（实现层可为 WS `/ws/logs/{uid}` 或 SSE），不走事件通道。
 - 骨架期 `/ws/echo` 保留至实装时移除。
 

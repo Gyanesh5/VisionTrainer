@@ -22,7 +22,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -38,7 +38,9 @@ router = APIRouter(prefix="/datasets", tags=["datasets"])
 def _error_response(exc: DatasetError) -> JSONResponse:
     """统一错误信封：detail 随错误携带（阻断类别清单、Run 引用计数等确认门数据）。"""
     status = {"invalid_args": 400, "not_found": 404, "state_conflict": 409,
-              "runs_referenced": 409}.get(exc.code, 500)
+              "runs_referenced": 409,
+              "monitor_unreachable": 502, "monitor_http_error": 502,
+              "monitor_bad_bundle": 502, "monitor_empty": 404}.get(exc.code, 500)
     return JSONResponse(status_code=status, content={"error": {
         "code": exc.code, "message": exc.message, "detail": exc.detail}})
 
@@ -591,6 +593,60 @@ def delete_dataset(name: str, force: bool = False):
     """
     try:
         return svc.delete_dataset(name, force=force)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+class MonitorPullFilters(BaseModel):
+    """拉取过滤（监控端导出 API 逐字转发，None 侧不带上）：任务 / 状态 / 时间窗（epoch 秒）。"""
+
+    task: str | None = None
+    status: Literal["confirmed", "corrected"] | None = None
+    created_from: float | None = None
+    created_to: float | None = None
+
+
+class MonitorPullBody(BaseModel):
+    """从 vision-monitor 拉取导入（票 124）：create 新建 / add 加图，过滤与目标二段一体。
+
+    `base_url` 缺省走系统域连接配置（#122 runtime_settings → config 兜底），
+    显式给值即本次拉取覆盖（不落库）。`classes` 仅 create 生效，缺省由导出包派生。
+    """
+
+    mode: Literal["create", "add"] = "create"
+    name: str
+    task_type: str = "detect"
+    classes: list[str] | None = None
+    base_url: str | None = None
+    filters: MonitorPullFilters = MonitorPullFilters()
+
+
+@router.post("/monitor-pull")
+def pull_from_monitor(body: MonitorPullBody, request: Request):
+    """从 vision-monitor 拉取导入（票 124，ADR 0015 Decision 3/4）：过滤拉取 → 解包归一
+    → 既有托管导入链 → manifest 四要素落 dataset meta → ingested 回写。
+
+    全程进行中操作三层反馈：登记 `ds:{name}:monitor-pull`（拉取/解包/入图/校验/回写
+    五相 operation.updated）。监控端不可达/坏包/空范围分别 502/502/404；回写失败
+    告警降级不阻断（响应 writeback.ok=false 带原因）。"""
+    from ..config import ConfigError
+    from ..core import monitor as monitor_lib
+    from ..datasets import monitor_pull
+
+    cfg = getattr(request.app.state, "cfg", None)
+    if body.base_url:
+        try:
+            monitor_lib.validate_base_url(body.base_url)
+        except ConfigError as exc:
+            return _error_response(DatasetError("invalid_args", exc.message))
+    try:
+        with long_op(f"ds:{body.name}:monitor-pull",
+                     f"从 vision-monitor 拉取导入 · {body.name}", scope=body.name) as op:
+            return monitor_pull.pull_import(
+                mode=body.mode, name=body.name, task_type=body.task_type,
+                classes=body.classes, base_url=body.base_url,
+                filters=body.filters.model_dump(exclude_none=True),
+                cfg=cfg, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 

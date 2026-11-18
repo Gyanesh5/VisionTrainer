@@ -9,6 +9,7 @@ import {
 } from "../api/client";
 import { OpLines, useOpLines } from "../components/OpProgress";
 import { CreateDatasetDialog } from "../components/datasets/CreateDatasetDialog";
+import { MonitorPullDialog } from "../components/datasets/MonitorPullDialog";
 
 /**
  * 数据集列表（票 109 批 1，总貌档）：托管数据集卡片网格 + 新建向导入口。
@@ -70,6 +71,7 @@ export function DatasetsPage() {
   const queryClient = useQueryClient();
   const opLines = useOpLines("ds:");
   const [createOpen, setCreateOpen] = useState(false);
+  const [pullOpen, setPullOpen] = useState(false);
   const [externalOpen, setExternalOpen] = useState(false);
   const [extName, setExtName] = useState("");
   const [extTask, setExtTask] = useState<TaskType>("detect");
@@ -113,6 +115,9 @@ export function DatasetsPage() {
           onClick={() => setCreateOpen(true)}
         >
           新建数据集
+        </button>
+        <button type="button" className="btn" onClick={() => setPullOpen(true)}>
+          从 vision-monitor 拉取
         </button>
         <button type="button" className="btn" onClick={() => setExternalOpen(true)}>
           注册外部目录
@@ -165,6 +170,17 @@ export function DatasetsPage() {
         onClose={() => setCreateOpen(false)}
         onCreated={(name) => {
           setCreateOpen(false);
+          void queryClient.invalidateQueries({ queryKey: ["datasets"] });
+          navigate(`/datasets/${encodeURIComponent(name)}`);
+        }}
+      />
+
+      <MonitorPullDialog
+        open={pullOpen}
+        datasets={items}
+        onClose={() => setPullOpen(false)}
+        onCreated={(name) => {
+          setPullOpen(false);
           void queryClient.invalidateQueries({ queryKey: ["datasets"] });
           navigate(`/datasets/${encodeURIComponent(name)}`);
         }}

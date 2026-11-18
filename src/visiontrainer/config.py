@@ -14,6 +14,10 @@ from pathlib import Path
 
 DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8600},
+    # 票 122：监控端（vision-monitor）连接兜底默认。运行期真源在 SQLite runtime_settings
+    # （系统页 Web 可改、改后即生效）；config.toml [monitor] 同名键作兜底默认，不进
+    # EDITABLE 白名单（改文件须重启，与本键「即改即生效」语义冲突，Web 修改走 /system/monitor）。
+    "monitor": {"base_url": "http://127.0.0.1:8610"},
     # M7：桌面通知（notify-send）与烂轮早停的全局开关/参数（按任务可在 Agent 对话框覆盖）
     "notifications": {"desktop": True},
     "agent": {"prune_enabled": True, "prune_delta": 0.05, "provider": "llm",
@@ -26,7 +30,7 @@ EDITABLE: dict[str, set[str]] = {
     "server": {"host", "port"},
     "llm": {"base_url", "api_key", "model"},
     "training": {"python", "trainer_entry", "export_entry", "datasets_dir",
-                 "runs_dir", "model_lib_dir", "check_occupancy"},
+                 "runs_dir", "model_lib_dir", "release_dir", "check_occupancy"},
     "notifications": {"desktop"},
     "agent": {"prune_enabled", "prune_delta", "provider",
               "budget_round_seconds", "budget_total_tokens", "context_budget_chars"},

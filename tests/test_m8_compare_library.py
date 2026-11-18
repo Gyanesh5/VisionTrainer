@@ -70,9 +70,9 @@ def test_model_library_view_and_delete(cmp_client):
     item = next(i for i in r["items"] if i["name"] == "family_detect_aaaa1111")
     assert item["size_mb"] > 0 and item["mtime"]
 
-    # 删除 + 二次确认后记录同步（此处无部署记录 → removed_deployments=0）
+    # 清理派生目录（票 126 对齐派生语义）：此处无部署记录 → kept_deployments=0
     r2 = c.delete("/api/v1/model-library/family_detect_aaaa1111")
-    assert r2.status_code == 200 and r2.json()["removed_deployments"] == 0
+    assert r2.status_code == 200 and r2.json()["kept_deployments"] == 0
     assert not d1.exists() and d2.exists()
 
     # 越界名拒绝

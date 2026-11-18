@@ -152,9 +152,11 @@ def get_task(task_id: int, request: Request):
 
 @router.delete("/tasks/{task_id}")
 @_maps_errors
-def delete_task(task_id: int, request: Request, delete_files: bool = False):
-    tsvc.delete_task(_manager(request), task_id, delete_files)
-    return {"deleted": task_id}
+def delete_task(task_id: int, request: Request, delete_files: bool = False, force: bool = False):
+    """删除任务（级联删行，磁盘默认保留）；含已部署/已发布 Run 时默认阻止
+    （票 126：409 delete_conflict），force=true 显式放行并标注账目失效。"""
+    out = tsvc.delete_task(_manager(request), task_id, delete_files, force=force)
+    return {"deleted": task_id, **out}
 
 
 @router.get("/runs/{uid}")
@@ -165,11 +167,13 @@ def get_run(uid: str, request: Request):
 
 @router.delete("/runs/{uid}")
 @_maps_errors
-def delete_run(uid: str, request: Request, delete_files: bool = False):
+def delete_run(uid: str, request: Request, delete_files: bool = False, force: bool = False):
     """删除单条训练记录（Run）：仅终态可删，其余轮次保留（2026-10-31 用户反馈：
-    多轮任务删一轮不该连坐全部轮次）；任务被删空时连任务本身移除。"""
-    tsvc.delete_run(_manager(request), uid, delete_files)
-    return {"deleted": uid}
+    多轮任务删一轮不该连坐全部轮次）；任务被删空时连任务本身移除。
+    已部署/已发布的 Run 默认阻止（票 126：409 delete_conflict，提示列部署/发布
+    记录要点），force=true 显式放行——部署/发布记录标注失效、物理拷贝留派生目录。"""
+    out = tsvc.delete_run(_manager(request), uid, delete_files, force=force)
+    return {"deleted": uid, **out}
 
 
 @router.get("/runs/{uid}/logs")
@@ -301,6 +305,45 @@ def deploy_run(uid: str, request: Request, body: dict | None = None):
         return tsvc.deploy_run(_manager(request), uid, model_lib_dir=body.get("model_lib_dir"))
 
 
+@router.post("/runs/{uid}/release")
+@_maps_errors
+def release_run(uid: str, request: Request, body: dict | None = None):
+    """模型发布（票 123，ADR 0015 Decision 1）：与部署分立——best 权重+元数据打包进发布目录
+    （派生产物）+ 限时签名 URL + 发布记录（只增不改）。长操作登记 `run:{uid}:release`。
+    发布目录取 body 注入 → app 配置（`training.release_dir`）→ load_config 兜底，
+    与 model-library 同款读法（票 126：派生目录位置须可注入，测试与盘上配置解耦）。"""
+    body = body or {}
+    cfg = (getattr(request.app.state, "cfg", {}) or {}).get("training", {})
+    with long_op(f"run:{uid}:release", f"模型发布 · {uid}", scope=uid):
+        return tsvc.release_run(_manager(request), uid,
+                                release_dir=body.get("release_dir") or cfg.get("release_dir"))
+
+
+@router.get("/releases")
+def list_releases(request: Request):
+    """发布记录清单（票 123）：只增不改账目（时间/指纹/run 标识/URL 状态），新在前。"""
+    return tsvc.list_releases(_manager(request))
+
+
+@router.get("/release-library")
+def release_library(request: Request):
+    """发布目录视图（review 修复）：发布派生物的管理数据面，与 model-library 同款读法。"""
+    cfg = getattr(request.app.state, "cfg", {}) or {}
+    return tsvc.release_library(_manager(request),
+                                cfg.get("training", {}).get("release_dir"))
+
+
+@router.delete("/release-library/{name}")
+@_maps_errors
+def clear_release_dir(name: str, request: Request):
+    """发布目录清理（review 修复，票 126 派生语义）：只删物理产物，发布记录留档标注
+    （cleared_at）不动账目；重新发布可重建。长操作：登记 `release:purge`。"""
+    cfg = getattr(request.app.state, "cfg", {}) or {}
+    with long_op("release:purge", f"清理发布目录 · {name}"):
+        return tsvc.clear_release_dir(_manager(request), name,
+                                      cfg.get("training", {}).get("release_dir"))
+
+
 @router.post("/runs/{uid}/clear-last-pt")
 @_maps_errors
 def clear_last_pt(uid: str, request: Request):
@@ -311,6 +354,12 @@ def clear_last_pt(uid: str, request: Request):
 @router.get("/deployments")
 def list_deployments(request: Request):
     return tsvc.list_deployments(_manager(request))
+
+
+@router.get("/run-weights")
+def run_weights(request: Request):
+    """模型真源清单（票 121）：全部 Run 的权重行（指纹/类别表/主指标/部署历史），缺失如实标注。"""
+    return tsvc.run_weights(_manager(request))
 
 
 @router.post("/runs/{uid}/report")
