@@ -58,6 +58,7 @@ export function ReviewFlow({
   const [filter, setFilter] = useState<FilterKey>("pending");
   const [idx, setIdx] = useState(0);
   const [rejectOpen, setRejectOpen] = useState(false);
+  const [batchConfirmOpen, setBatchConfirmOpen] = useState(false);
   const [lastDecide, setLastDecide] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -467,13 +468,40 @@ export function ReviewFlow({
             disabled={busy}
             title="当前过滤子集整体通过——逐图写判定（已通过的保持不变）；含已驳回图时会翻转为通过"
             onClick={() => {
-              if (window.confirm(`当前过滤子集 ${filtered.length} 张全部通过？（已通过的保持不变，其余判定翻转为通过）`)) {
-                void batchApprove();
-              }
+              // 应用内确认门（实点联调裁决：原生 confirm 在内嵌浏览器/自动化环境
+              // 阻塞主线程且不可应答，判定操作不可依赖原生对话框）
+              setBatchConfirmOpen(true);
             }}
           >
             批量通过（{filtered.length}）
           </button>
+        )}
+        {batchConfirmOpen && (
+          <div className="filter-row" data-testid="batch-confirm" style={{ marginTop: 8 }}>
+            <span>
+              当前过滤子集 {filtered.length} 张全部通过？（已通过的保持不变，其余判定翻转为通过）
+            </span>
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="batch-confirm-yes"
+              disabled={busy}
+              onClick={() => {
+                setBatchConfirmOpen(false);
+                void batchApprove();
+              }}
+            >
+              确认通过
+            </button>
+            <button
+              type="button"
+              className="btn"
+              data-testid="batch-confirm-no"
+              onClick={() => setBatchConfirmOpen(false)}
+            >
+              取消
+            </button>
+          </div>
         )}
       </div>
 
