@@ -2,7 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ProducerPullDialog } from "./ProducerPullDialog";
-import { datasetsApi, type DatasetBrief } from "../../api/client";
+import { ApiRequestError, datasetsApi, type DatasetBrief } from "../../api/client";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/client")>();
@@ -55,7 +55,7 @@ describe("ProducerPullDialog", () => {
     setup();
     await user.type(screen.getByLabelText("数据集名"), "mfd");
     await user.type(screen.getByLabelText(/任务过滤/), "task-abc");
-    await user.selectOptions(screen.getByLabelText("状态过滤"), "corrected");
+    await user.selectOptions(screen.getByLabelText("状态过滤"), "collected");
     await user.click(screen.getByTestId("pull-submit"));
 
     await waitFor(() => expect(pull).toHaveBeenCalledTimes(1));
@@ -63,8 +63,50 @@ describe("ProducerPullDialog", () => {
       mode: "create",
       name: "mfd",
       task_type: "detect",
-      filters: { task: "task-abc", status: "corrected", created_from: null, created_to: null },
+      filters: { task: "task-abc", status: "collected", created_from: null, created_to: null },
     });
+  });
+
+  it("状态过滤=采集态 collected（对端状态机收缩后唯一枚举值，推理端 PR #148）", async () => {
+    pull.mockResolvedValue({
+      name: "mfd",
+      mode: "create",
+      pulled: 1,
+      added: 1,
+      skipped_existing: 0,
+      writeback: { ok: true, detail: "HTTP 200", sample_ids: ["s1"] },
+    });
+    const user = userEvent.setup();
+    setup();
+    const statusSelect = screen.getByLabelText("状态过滤") as HTMLSelectElement;
+    // 旧枚举已退役：下拉只余采集态
+    expect(Array.from(statusSelect.options).map((o) => o.value)).toEqual(["", "collected"]);
+    await user.selectOptions(statusSelect, "collected");
+    await user.type(screen.getByLabelText("数据集名"), "mfd");
+    await user.click(screen.getByTestId("pull-submit"));
+    await waitFor(() => expect(pull).toHaveBeenCalledTimes(1));
+    const body = pull.mock.calls[0][0];
+    expect(body.filters.status).toBe("collected");
+  });
+
+  it("add 模式追加类别输入：有值才随载荷带上（逗号分隔去空白去重）", async () => {
+    pull.mockResolvedValue({
+      name: "plate",
+      mode: "add",
+      pulled: 2,
+      added: 2,
+      skipped_existing: 0,
+      writeback: { ok: true, detail: "HTTP 200", sample_ids: [] },
+    });
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByLabelText("加图到既有数据集（同批重复拉取自动去重）"));
+    await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
+    await user.type(screen.getByTestId("pull-append-classes"), " car, bus，car ");
+    await user.click(screen.getByTestId("pull-submit"));
+    await waitFor(() => expect(pull).toHaveBeenCalledTimes(1));
+    const body = pull.mock.calls[0][0];
+    expect(body.append_classes).toEqual(["car", "bus"]);
   });
 
   it("add 模式：目标下拉只列托管数据集，提交不带 task_type", async () => {
@@ -179,5 +221,37 @@ describe("ProducerPullDialog", () => {
     await user.click(screen.getByTestId("pull-submit"));
     expect(screen.getByTestId("pull-error").textContent).toContain("500");
     expect(pull).not.toHaveBeenCalled();
+  });
+
+  it("表外类别 409（#131 偏离补完）：block 卡片一键回填重发，第二次载荷带 append_classes", async () => {
+    const err = new ApiRequestError("导入链阻断：表外类别", 409, "class_not_registered", {
+      source_labels: ["pole_ng", "busbar"],
+    });
+    pull.mockRejectedValueOnce(err).mockResolvedValueOnce({
+      name: "plate",
+      mode: "add",
+      pulled: 2,
+      added: 2,
+      skipped_existing: 0,
+      writeback: { ok: true, detail: "HTTP 200", sample_ids: [] },
+    });
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByLabelText("加图到既有数据集（同批重复拉取自动去重）"));
+    await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
+    await user.click(screen.getByTestId("pull-submit"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("pull-append-block")).toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("pull-error")).not.toBeInTheDocument();
+    await user.click(screen.getByTestId("pull-retry-append"));
+    // 一键回填：追加类别输入可见即所得（点击重发时回填）
+    const input = screen.getByTestId("pull-append-classes") as HTMLInputElement;
+    expect(input.value).toBe("pole_ng, busbar");
+    await waitFor(() => expect(pull).toHaveBeenCalledTimes(2));
+    const retryBody = pull.mock.calls[1][0];
+    expect(retryBody.append_classes).toEqual(["pole_ng", "busbar"]);
+    expect(screen.queryByTestId("pull-append-block")).not.toBeInTheDocument();
   });
 });

@@ -174,13 +174,28 @@ def _pull(client: TestClient, base_url: str, **overrides) -> object:
 # ---------------------------------------------------------------- 端到端（验收①②）
 
 
+def test_pull_filters_forwarded_verbatim(pull_client, fake_producer, datasets_root):
+    """过滤逐字转发（契约 §5.2）：status=collected 与 sample_ids 直选面原样抵达导出 API。"""
+    FakeProducerHandler.bundle = b""
+    FakeProducerHandler.export_status = 204  # 空选集：转发断言不需要真包
+    resp = _pull(pull_client, fake_producer,
+                 filters={"task": TASK, "status": "collected",
+                          "sample_ids": ["s-1", "s-2"], "created_from": 1.0})
+    assert resp.status_code == 404, resp.text  # producer_empty（204 无样本）
+    sent = FakeProducerHandler.export_bodies[-1]
+    assert sent["task"] == TASK
+    assert sent["status"] == "collected"
+    assert sent["sample_ids"] == ["s-1", "s-2"]
+    assert sent["created_from"] == 1.0
+
+
 def test_pull_create_end_to_end(pull_client, fake_producer, datasets_root):
     """过滤拉取 → 数据集可见样本（审查状态继承）→ ingested 回写载荷正确 → manifest 落 meta。"""
     samples = [
-        sample_entry("s-aaaa", "confirmed",
+        sample_entry("s-aaaa", "collected",
                      shapes=[{"label": "car", "shape_type": "rectangle",
                               "points": [[10, 10], [110, 90]], "flags": {}}]),
-        sample_entry("s-bbbb", "corrected", vt_review="corrected",
+        sample_entry("s-bbbb", "collected", vt_review="corrected",
                      shapes=[{"label": "person", "shape_type": "rectangle",
                               "points": [[20, 20], [80, 120]], "flags": {}}]),
     ]
@@ -212,7 +227,8 @@ def test_pull_create_end_to_end(pull_client, fake_producer, datasets_root):
     assert meta["classes"] == ["car", "person"]
     assert meta["validation_summary"]["total_images"] == 2
 
-    # 审查状态继承：confirmed/corrected → approved（人工判定复核通过）
+    # 审查状态继承（legacy 键兼容覆盖）：契约 §4.5 起新包不携带 checked/vt_review
+    # （推理端 PR #146 已卸除），存量带 checked 的包仍走 XAL 互认 → approved
     q = pull_client.get("/api/v1/datasets/mfd/review").json()
     assert q["counts"]["approved"] == 2
 
@@ -233,7 +249,7 @@ def test_pull_create_end_to_end(pull_client, fake_producer, datasets_root):
 
 def test_pull_add_mode_and_dedup_on_repeat(pull_client, fake_producer, datasets_root):
     """add 模式加图进既有数据集；同批重复拉取 added=0、数据集无重复图。"""
-    samples = [sample_entry("s-cccc", "confirmed",
+    samples = [sample_entry("s-cccc", "collected",
                             shapes=[{"label": "car", "shape_type": "rectangle",
                                      "points": [[10, 10], [110, 90]], "flags": {}}])]
     FakeProducerHandler.bundle = build_bundle(samples, ["car", "person"])
@@ -264,7 +280,7 @@ def test_pull_add_mode_and_dedup_on_repeat(pull_client, fake_producer, datasets_
 def test_pull_add_mode_unknown_dataset(pull_client, fake_producer):
     """add 模式目标数据集不存在 404，不产生任何落盘。"""
     FakeProducerHandler.bundle = build_bundle(
-        [sample_entry("s-dddd", "confirmed")], ["car"])
+        [sample_entry("s-dddd", "collected")], ["car"])
     r = _pull(pull_client, fake_producer, mode="add", name="ghost")
     assert r.status_code == 404
     assert r.json()["error"]["code"] == "not_found"
@@ -325,7 +341,7 @@ def test_pull_empty_range_204(pull_client, fake_producer, datasets_root):
 
 def test_pull_writeback_failure_degrades_not_blocks(pull_client, fake_producer, datasets_root):
     """回写失败（推理端回 500）：告警降级不阻断，导入照常完成、writeback.ok=false 带原因。"""
-    samples = [sample_entry("s-eeee", "confirmed")]
+    samples = [sample_entry("s-eeee", "collected")]
     FakeProducerHandler.bundle = build_bundle(samples, ["car"])
     FakeProducerHandler.writeback_status = 500
     r = _pull(pull_client, fake_producer, name="mfd3")

@@ -649,11 +649,11 @@ class ProducerPullFilters(BaseModel):
     """拉取过滤（推理端导出 API 逐字转发，None 侧不带上）：任务 / 状态 / 时间窗（epoch 秒）。
 
     `sample_ids` 直选（契约 §5.2）：上限 500（对端导出 API 上限），逐字转发由对端选集。
-    `status` 枚举当前与对端导出 API 现状（confirmed|corrected）对齐，随其状态机收缩票
-    （VM #145）改写。"""
+    `status` 枚举=采集态 collected（对端状态机收缩四态后，推理端 PR #148；契约 §5.2
+    状态过滤即采集态，选集恒排除 exported/ingested/trained）。"""
 
     task: str | None = None
-    status: Literal["confirmed", "corrected"] | None = None
+    status: Literal["collected"] | None = None
     sample_ids: list[str] | None = Field(default=None, max_length=500)
     created_from: float | None = None
     created_to: float | None = None

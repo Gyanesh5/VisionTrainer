@@ -16,6 +16,9 @@ import {
  * 模式两态：create 新建托管数据集（task_type 必选、类别表由导出包派生）；
  * add 加图进既有托管数据集（同批重复拉取按文件名去重）。地址走系统域连接
  * 配置（票 122），表单不暴露地址覆盖。回写失败是告警不是错误：导入照常完成。
+ * 状态过滤=采集态 collected（对端状态机收缩后唯一枚举值，推理端 PR #148）。
+ * add 模式带追加类别输入（#131 偏离补完）：拉取包携带类别表之外类别被 409 阻断时，
+ * 错误 detail 可读即出一键回填重发。
  */
 export function ProducerPullDialog({
   open,
@@ -33,12 +36,14 @@ export function ProducerPullDialog({
   const [target, setTarget] = useState("");
   const [taskType, setTaskType] = useState<TaskType>("detect");
   const [task, setTask] = useState("");
-  const [status, setStatus] = useState<"" | "confirmed" | "corrected">("");
+  const [status, setStatus] = useState<"" | "collected">("");
   const [createdFrom, setCreatedFrom] = useState("");
   const [createdTo, setCreatedTo] = useState("");
   const [sampleIdsText, setSampleIdsText] = useState("");
+  const [appendClassesText, setAppendClassesText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [block, setBlock] = useState<{ labels: string[] } | null>(null);
   const [result, setResult] = useState<ProducerPullResult | null>(null);
 
   // 每次打开复位（一次拉取一单，不留上次残值）
@@ -53,8 +58,10 @@ export function ProducerPullDialog({
       setCreatedFrom("");
       setCreatedTo("");
       setSampleIdsText("");
+      setAppendClassesText("");
       setBusy(false);
       setError(null);
+      setBlock(null);
       setResult(null);
     }
   }, [open]);
@@ -84,7 +91,19 @@ export function ProducerPullDialog({
     );
   }
 
-  async function submit() {
+  /** 追加类别输入 → 类名清单：逗号/分号/空白分隔，去空白去重 */
+  function parseClassNames(text: string): string[] {
+    return Array.from(
+      new Set(
+        text
+          .split(/[\s,，;；]+/)
+          .map((s) => s.trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  async function submit(appendOverride?: string[]) {
     if (mode === "create" && !name.trim()) {
       setError("请填写数据集名");
       return;
@@ -98,8 +117,10 @@ export function ProducerPullDialog({
       setError("样本直选超出上限 500（对端导出 API 上限，契约 §5.2）");
       return;
     }
+    const append = appendOverride ?? parseClassNames(appendClassesText);
     setBusy(true);
     setError(null);
+    setBlock(null);
     setResult(null);
     const filters: ProducerPullFilters = {
       task: task.trim() || null,
@@ -108,13 +129,21 @@ export function ProducerPullDialog({
       created_to: epochOf(createdTo),
     };
     if (sampleIds.length > 0) filters.sample_ids = sampleIds; // 有值才带上（直选面）
+    const body: {
+      mode: "create" | "add";
+      name: string;
+      task_type?: TaskType;
+      append_classes?: string[];
+      filters: ProducerPullFilters;
+    } = {
+      mode,
+      name: mode === "create" ? name.trim() : target,
+      task_type: mode === "create" ? taskType : undefined,
+      filters,
+    };
+    if (append.length > 0) body.append_classes = append; // 有值才带键（同 sample_ids 载荷模式）
     try {
-      const got = await datasetsApi.producerPull({
-        mode,
-        name: mode === "create" ? name.trim() : target,
-        task_type: mode === "create" ? taskType : undefined,
-        filters,
-      });
+      const got = await datasetsApi.producerPull(body);
       if (!got.writeback.ok) {
         // 回写失败降级为告警：导入已完成，提示复检（不阻断、不标红）
         setResult(got);
@@ -122,10 +151,21 @@ export function ProducerPullDialog({
         onCreated(got.name);
       }
     } catch (e) {
-      setError(e instanceof ApiRequestError ? e.message : e instanceof Error ? e.message : "拉取失败");
+      if (e instanceof ApiRequestError && Array.isArray(e.detail.source_labels)) {
+        // 表外类别 409 阻断（#131 偏离补完）：detail.source_labels 可读 → 一键回填重发
+        setBlock({ labels: (e.detail.source_labels as unknown[]).map(String) });
+      } else {
+        setError(e instanceof ApiRequestError ? e.message : e instanceof Error ? e.message : "拉取失败");
+      }
     } finally {
       setBusy(false);
     }
+  }
+
+  /** 409 表外类别一键处置：回填追加类别输入（所见即所发）后按同一过滤条件重发 */
+  function retryWithAppend(labels: string[]) {
+    setAppendClassesText(labels.join(", "));
+    void submit(labels);
   }
 
   if (!open) return null;
@@ -224,13 +264,24 @@ export function ProducerPullDialog({
           <select
             id="pull-status"
             value={status}
-            onChange={(e) => setStatus(e.target.value as "" | "confirmed" | "corrected")}
+            onChange={(e) => setStatus(e.target.value as "" | "collected")}
           >
-            <option value="">全部（已确认 + 已修正）</option>
-            <option value="confirmed">已确认（confirmed）</option>
-            <option value="corrected">已修正（corrected）</option>
+            <option value="">全部（按其余过滤条件）</option>
+            <option value="collected">采集态（collected）</option>
           </select>
         </div>
+        {mode === "add" && (
+          <div className="form-row">
+            <label htmlFor="pull-append-classes">追加类别（可选，逗号分隔）</label>
+            <input
+              id="pull-append-classes"
+              data-testid="pull-append-classes"
+              value={appendClassesText}
+              placeholder="导出包携带类别表外类别会 409 拦下，登记于此随重试入库"
+              onChange={(e) => setAppendClassesText(e.target.value)}
+            />
+          </div>
+        )}
         <div className="form-row">
           <label htmlFor="pull-from">时间窗起（留空无下界）</label>
           <input
@@ -260,6 +311,21 @@ export function ProducerPullDialog({
           />
         </div>
 
+        {block && (
+          <div className="block-card" data-testid="pull-append-block">
+            <p className="block-title">拉取被拦下：导出包携带数据集类别表之外的类别</p>
+            <p className="form-hint">{block.labels.join("、")}——重发前回填追加类别输入，按同一过滤条件。</p>
+            <button
+              type="button"
+              className="btn btn-primary"
+              data-testid="pull-retry-append"
+              disabled={busy}
+              onClick={() => retryWithAppend(block.labels)}
+            >
+              登记类别并重发
+            </button>
+          </div>
+        )}
         {error && <p className="error-note" data-testid="pull-error">{error}</p>}
         {result && (
           <div className="block-card" data-testid="pull-writeback-warn">
