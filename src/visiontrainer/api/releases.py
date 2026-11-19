@@ -19,7 +19,7 @@ router = APIRouter(tags=["releases"])
 
 @router.get("/releases/download")
 def download_release(rid: int, t: str = "", request: Request = None):
-    """限时签名 URL 拉取发布包（监控端免凭据入口）：验签通过发 bundle.zip。"""
+    """限时签名 URL 拉取发布包（推理端免凭据入口）：验签通过发 bundle.zip。"""
     if not releases.verify(rid, t):
         return JSONResponse(status_code=403, content={"error": {"code": "forbidden",
                                                                 "message": "签名无效或已过期"}})

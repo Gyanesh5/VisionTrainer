@@ -44,9 +44,13 @@ def verify(release_id: int, token: str) -> bool:
     return hmac.compare_digest(sign(release_id, exp), token)
 
 
-def release_url(release_id: int) -> str:
-    """监控端拉取入口：签名 URL（免凭据，过期即 403）。"""
-    return f"{ROUTE}?rid={release_id}&t={sign(release_id)}"
+def release_url(release_id: int, exp: int | None = None) -> str:
+    """推理端拉取入口：签名 URL（免凭据，过期即 403）。
+
+    exp 缺省按当前签发口径（now+TTL）；清单面（契约 §5.4）传记录的 url_expires_at
+    时间戳——URL 有效期与账目字段一致，对端可凭列表直接拉取（VM #146 拉取台）。
+    """
+    return f"{ROUTE}?rid={release_id}&t={sign(release_id, exp)}"
 
 
 def expiry() -> "datetime":

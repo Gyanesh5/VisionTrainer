@@ -248,3 +248,107 @@ def test_export_review_rejects(tmp_path, tmp_db):
     text = Path(r["path"]).read_text(encoding="utf-8")
     assert "标注审查驳回清单" in text and "漏标" in text and "右下角缺一个" in text
     assert Path(q["items"][0]["image"]).name in text
+
+
+# ---------------------------------------------------------------- classify 改类即判定（#131）
+
+
+def _classify_src(tmp_path) -> Path:
+    """classify 真源：shapes 恒空、判类 = flags 布尔真键（契约 §4.5 投影后形态）。"""
+    src = tmp_path / "csrc"
+    src.mkdir(exist_ok=True)
+    _png(src / "a.png")
+    _png(src / "b.png")
+    _label(src / "a.json", [], flags={"occupied": True})
+    _label(src / "b.json", [], flags={"vacant": True})
+    return src
+
+
+def test_reclassify_writes_flag_and_approves(tmp_path, tmp_db):
+    """改类即判定：flags 真键切换（旧真键置假）+ vt_review=approved 同一次原子写。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    build_dataset("m9cls", "classify", str(_classify_src(tmp_path)), root=root)
+    q = svc.review_queue("m9cls", root=root)
+    assert q["counts"]["pending"] == 2
+
+    it = next(i for i in q["items"] if i["name"] == "a.png")
+    r = svc.review_reclassify("m9cls", it["image"], "vacant", root=root)
+    assert r["effective"] == "approved" and r["label"] == "vacant"
+    data = json.loads(Path(it["label"]).read_text(encoding="utf-8"))
+    assert data["flags"] == {"occupied": False, "vacant": True}  # 首真键口径下旧键不再竞争
+    assert data["checked"] is True and data["vt_review"]["state"] == "approved"
+
+    q2 = svc.review_queue("m9cls", root=root)
+    assert q2["counts"]["approved"] == 1 and q2["counts"]["pending"] == 1
+    # 判类消费面（pool._classify_flag_of 同口径）：改类后该图定类 vacant
+    from visiontrainer.datasets.pool import _classify_flag_of
+
+    assert _classify_flag_of(Path(it["label"])) == "vacant"
+
+
+def test_reclassify_guards_detect_dataset_unknown_label_and_excluded(tmp_path, tmp_db):
+    """detect 不扩（改类走 XAL 改标注）；表外类别拒绝；排除在册图拒绝。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    _import_two(tmp_path, root)
+    q = svc.review_queue("m9rev", root=root)
+    with pytest.raises(DatasetError) as ei:
+        svc.review_reclassify("m9rev", q["items"][0]["image"], "car", root=root)
+    assert ei.value.code == "invalid_args"
+
+    src2 = tmp_path / "csrc2"
+    src2.mkdir()
+    _png(src2 / "a.png")
+    _label(src2 / "a.json", [], flags={"occupied": True})
+    build_dataset("m9cls2", "classify", str(src2), root=root)
+    q2 = svc.review_queue("m9cls2", root=root)
+    with pytest.raises(DatasetError) as ei2:
+        svc.review_reclassify("m9cls2", q2["items"][0]["image"], "ghost", root=root)
+    assert ei2.value.code == "invalid_args"
+
+    # 排除在册图与判定同口径拒绝（既有排除机制不被改类绕开）
+    svc.exclude_files("m9cls2", [q2["items"][0]["name"]], "误导", root=root)
+    with pytest.raises(DatasetError) as ei3:
+        svc.review_reclassify("m9cls2", q2["items"][0]["image"], "occupied", root=root)
+    assert ei3.value.code == "invalid_args"
+
+
+# ---------------------------------------------------------------- 批量通过（#131）
+
+
+def test_batch_approve_subset_idempotent_for_approved(tmp_path, tmp_db):
+    """批量通过：子集整体判定 approved；已通过的幂等跳过（不刷新判定时间戳）。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    _import_two(tmp_path, root, name="m9ba")
+    q = svc.review_queue("m9ba", root=root)
+    first = next(i for i in q["items"] if i["name"] == "b.png")
+    svc.review_decide("m9ba", first["image"], "approved", root=root)
+    decided_at = json.loads(Path(first["label"]).read_text(encoding="utf-8"))["vt_review"]["decided_at"]
+
+    r = svc.review_batch_approve("m9ba", [it["image"] for it in q["items"]], root=root)
+    assert r["requested"] == 2 and r["approved"] == 1 and r["already"] == 1
+    q2 = svc.review_queue("m9ba", root=root)
+    assert q2["counts"]["approved"] == 2 and q2["done"] == 2
+    # 幂等跳过者判定时间戳未变（不重写）
+    rec = json.loads(Path(first["label"]).read_text(encoding="utf-8"))["vt_review"]
+    assert rec["decided_at"] == decided_at
+
+
+def test_batch_approve_guards_empty_and_excluded(tmp_path, tmp_db):
+    """空清单 invalid_args；含排除在册图整体拒绝（不部分通过）。"""
+    root = tmp_path / "root"
+    root.mkdir()
+    _import_two(tmp_path, root, name="m9bg")
+    with pytest.raises(DatasetError) as ei:
+        svc.review_batch_approve("m9bg", [], root=root)
+    assert ei.value.code == "invalid_args"
+
+    q = svc.review_queue("m9bg", root=root)
+    svc.exclude_files("m9bg", [q["items"][0]["name"]], "坏图", root=root)
+    with pytest.raises(DatasetError) as ei2:
+        svc.review_batch_approve("m9bg", [it["image"] for it in q["items"]], root=root)
+    assert ei2.value.code == "invalid_args"
+    q2 = svc.review_queue("m9bg", root=root)
+    assert q2["counts"]["approved"] == 0  # 整体拒绝：无部分通过

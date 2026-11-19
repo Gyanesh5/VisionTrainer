@@ -39,10 +39,25 @@ def _error_response(exc: DatasetError) -> JSONResponse:
     """统一错误信封：detail 随错误携带（阻断类别清单、Run 引用计数等确认门数据）。"""
     status = {"invalid_args": 400, "not_found": 404, "state_conflict": 409,
               "runs_referenced": 409,
-              "monitor_unreachable": 502, "monitor_http_error": 502,
-              "monitor_bad_bundle": 502, "monitor_empty": 404}.get(exc.code, 500)
+              "producer_unreachable": 502, "producer_http_error": 502,
+              "producer_bad_bundle": 502, "producer_empty": 404}.get(exc.code, 500)
     return JSONResponse(status_code=status, content={"error": {
         "code": exc.code, "message": exc.message, "detail": exc.detail}})
+
+
+def _base_url_error(base_url: str | None) -> JSONResponse | None:
+    """拉取/重导两端点共用的显式 base_url 校验（同一段规则）：非法值 400 invalid_args
+    响应，缺省（走系统域连接配置）或合法返回 None 放行。"""
+    if not base_url:
+        return None
+    from ..config import ConfigError
+    from ..core import producer as producer_lib
+
+    try:
+        producer_lib.validate_base_url(base_url)
+    except ConfigError as exc:
+        return _error_response(DatasetError("invalid_args", exc.message))
+    return None
 
 
 def _action_classes(body: ClassActionBody) -> list[str]:
@@ -164,6 +179,19 @@ class ReviewDecideBody(BaseModel):
     state: str  # pending / approved / rejected / skipped
     reason: str = ""
     note: str = ""
+
+
+class ReviewRelabelBody(BaseModel):
+    """classify 改类（#131）：人工改类即判定（flags 真键切换 + vt_review=approved）。"""
+
+    image: str
+    label: str
+
+
+class ReviewBatchBody(BaseModel):
+    """批量通过（#131）：审查页当前过滤子集的整体判定；逐图窄写 approved。"""
+
+    images: list[str]
 
 
 @router.get("")
@@ -519,6 +547,26 @@ def review_decide(name: str, body: ReviewDecideBody):
         return _error_response(exc)
 
 
+@router.post("/{name}/review/relabel")
+def review_relabel(name: str, body: ReviewRelabelBody):
+    """改类即判定（classify 首发，#131）：flags 真键切换 + vt_review=approved 原子落盘；
+    detect 不扩（detect 改类走 XAL 改标注）。"""
+    try:
+        return svc.review_reclassify(name, body.image, body.label)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+@router.post("/{name}/review/approve-batch")
+def review_approve_batch(name: str, body: ReviewBatchBody):
+    """批量通过（#131）：审查页当前过滤子集整体判定 approved；先整体校验再落笔
+    （任一图不可判 → 整体拒绝，不部分通过），已通过的幂等跳过。"""
+    try:
+        return svc.review_batch_approve(name, body.images)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
 @router.get("/{name}/annotation")
 def get_annotation(name: str, image: str):
     """读取真源标注 JSON 全文（阶段 3b 补只读缺口：审查画布叠加与大图合成的数据源）。
@@ -597,56 +645,107 @@ def delete_dataset(name: str, force: bool = False):
         return _error_response(exc)
 
 
-class MonitorPullFilters(BaseModel):
-    """拉取过滤（监控端导出 API 逐字转发，None 侧不带上）：任务 / 状态 / 时间窗（epoch 秒）。"""
+class ProducerPullFilters(BaseModel):
+    """拉取过滤（推理端导出 API 逐字转发，None 侧不带上）：任务 / 状态 / 时间窗（epoch 秒）。
+
+    `sample_ids` 直选（契约 §5.2）：上限 500（对端导出 API 上限），逐字转发由对端选集。
+    `status` 枚举当前与对端导出 API 现状（confirmed|corrected）对齐，随其状态机收缩票
+    （VM #145）改写。"""
 
     task: str | None = None
     status: Literal["confirmed", "corrected"] | None = None
+    sample_ids: list[str] | None = Field(default=None, max_length=500)
     created_from: float | None = None
     created_to: float | None = None
 
 
-class MonitorPullBody(BaseModel):
-    """从 vision-monitor 拉取导入（票 124）：create 新建 / add 加图，过滤与目标二段一体。
+class ProducerPullBody(BaseModel):
+    """从推理端拉取导入（票 124）：create 新建 / add 加图，过滤与目标二段一体。
 
     `base_url` 缺省走系统域连接配置（#122 runtime_settings → config 兜底），
-    显式给值即本次拉取覆盖（不落库）。`classes` 仅 create 生效，缺省由导出包派生。
+    显式给值即本次拉取覆盖（不落库）。`classes` 仅 create 生效，缺省由导出包派生；
+    `append_classes` 仅 add 生效——表外类别 409 拦下后的「一键追加后重试」载荷（#131）。
     """
 
     mode: Literal["create", "add"] = "create"
     name: str
     task_type: str = "detect"
     classes: list[str] | None = None
+    append_classes: list[str] | None = None
     base_url: str | None = None
-    filters: MonitorPullFilters = MonitorPullFilters()
+    filters: ProducerPullFilters = ProducerPullFilters()
 
 
-@router.post("/monitor-pull")
-def pull_from_monitor(body: MonitorPullBody, request: Request):
-    """从 vision-monitor 拉取导入（票 124，ADR 0015 Decision 3/4）：过滤拉取 → 解包归一
+@router.post("/producer-pulls")
+def pull_from_producer(body: ProducerPullBody, request: Request):
+    """从推理端拉取导入（票 124，ADR 0015 Decision 3/4）：过滤拉取 → 解包归一
     → 既有托管导入链 → manifest 四要素落 dataset meta → ingested 回写。
 
-    全程进行中操作三层反馈：登记 `ds:{name}:monitor-pull`（拉取/解包/入图/校验/回写
-    五相 operation.updated）。监控端不可达/坏包/空范围分别 502/502/404；回写失败
-    告警降级不阻断（响应 writeback.ok=false 带原因）。"""
-    from ..config import ConfigError
-    from ..core import monitor as monitor_lib
-    from ..datasets import monitor_pull
+    全程进行中操作三层反馈：登记 `ds:{name}:producer-pull`（拉取/解包/入图/校验/回写
+    五相 operation.updated）。推理端不可达/坏包/空范围分别 502/502/404；回写失败
+    告警降级不阻断（响应 writeback.ok=false 带原因）。下载成功且结构校验通过即落
+    本地暂存（#132 契约 §5.5），导入链阻断时错误 detail 带 staged_pull_id 供重导。"""
+    from ..datasets import producer_pull
 
     cfg = getattr(request.app.state, "cfg", None)
-    if body.base_url:
-        try:
-            monitor_lib.validate_base_url(body.base_url)
-        except ConfigError as exc:
-            return _error_response(DatasetError("invalid_args", exc.message))
+    bad = _base_url_error(body.base_url)
+    if bad is not None:
+        return bad
     try:
-        with long_op(f"ds:{body.name}:monitor-pull",
-                     f"从 vision-monitor 拉取导入 · {body.name}", scope=body.name) as op:
-            return monitor_pull.pull_import(
+        with long_op(f"ds:{body.name}:producer-pull",
+                     f"从推理端拉取导入 · {body.name}", scope=body.name) as op:
+            return producer_pull.pull_import(
                 mode=body.mode, name=body.name, task_type=body.task_type,
-                classes=body.classes, base_url=body.base_url,
+                classes=body.classes, append_classes=body.append_classes,
+                base_url=body.base_url,
                 filters=body.filters.model_dump(exclude_none=True),
                 cfg=cfg, progress_cb=op.progress)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
+class ProducerReimportBody(BaseModel):
+    """从暂存 ZIP 重试导入（#132，契约 §5.5）：pull_id 定位暂存包。
+
+    目标数据集存在 → add 语义（词干幂等：同词干同内容跳过、异内容拒收登记）；
+    不存在 → create 语义（任务形态沿暂存 sidecar、类别由包派生，可显式覆盖）。
+    `append_classes` 仅 add 重试生效（表外类别 409 拦下后的一键追加重试载荷）。"""
+
+    name: str
+    pull_id: str
+    task_type: str | None = None
+    classes: list[str] | None = None
+    append_classes: list[str] | None = None
+    base_url: str | None = None
+
+
+@router.get("/producer-pulls/staged")
+def list_staged_pulls():
+    """暂存区清单（#132 拉取恢复）：待重导的拉取包一览（pull_id/暂存时间/目标/模式/
+    任务形态/字节量，时间戳序）。超期（14 天）暂存顺带清扫。"""
+    from ..datasets import producer_pull
+
+    return producer_pull.list_staged()
+
+
+@router.post("/producer-pulls/reimport")
+def reimport_staged_pull(body: ProducerReimportBody, request: Request):
+    """从暂存 ZIP 重试导入（#132，契约 §5.5 主路径）：拉取导入同一套解包/归一/词干
+    幂等/落账/回写，成功即焚暂存；再失败暂存保留（staged_pull_id 随错误外露可再试）。
+    登记 `ds:{name}:producer-reimport` 长操作。"""
+    from ..datasets import producer_pull
+
+    cfg = getattr(request.app.state, "cfg", None)
+    bad = _base_url_error(body.base_url)
+    if bad is not None:
+        return bad
+    try:
+        with long_op(f"ds:{body.name}:producer-reimport",
+                     f"暂存重导 · {body.name}", scope=body.name) as op:
+            return producer_pull.reimport_staged(
+                name=body.name, pull_id=body.pull_id, task_type=body.task_type,
+                classes=body.classes, append_classes=body.append_classes,
+                base_url=body.base_url, cfg=cfg, progress_cb=op.progress)
     except DatasetError as exc:
         return _error_response(exc)
 

@@ -1,7 +1,7 @@
 """runtime_settings：运行期可变设置键值表（票 122）
 
 Web 可改、改后即生效的设置落这里，config.toml 同名键只作兜底默认。
-首个键 monitor.base_url（监控端连接地址）。
+首个键 producer.base_url（推理端连接地址；#129 改名，旧键读兼容见 core.producer）。
 
 Revision ID: b0002_runtime_settings
 Revises: b0001_baseline

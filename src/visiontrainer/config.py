@@ -14,10 +14,12 @@ from pathlib import Path
 
 DEFAULTS: dict = {
     "server": {"host": "127.0.0.1", "port": 8600},
-    # 票 122：监控端（vision-monitor）连接兜底默认。运行期真源在 SQLite runtime_settings
-    # （系统页 Web 可改、改后即生效）；config.toml [monitor] 同名键作兜底默认，不进
-    # EDITABLE 白名单（改文件须重启，与本键「即改即生效」语义冲突，Web 修改走 /system/monitor）。
-    "monitor": {"base_url": "http://127.0.0.1:8610"},
+    # 票 122：推理端连接兜底默认（#129 对端命名泛化，token=producer）。运行期真源在 SQLite
+    # runtime_settings（系统页 Web 可改、改后即生效）；config.toml [producer] 同名键作兜底
+    # 默认，不进 EDITABLE 白名单（改文件须重启，与本键「即改即生效」语义冲突，Web 修改走
+    # /system/producer）；旧对端节（#129 前命名，名取 core.producer 兼容常量）读兼容回退
+    # （load_config 归一，deprecated）。
+    "producer": {"base_url": "http://127.0.0.1:8610"},
     # M7：桌面通知（notify-send）与烂轮早停的全局开关/参数（按任务可在 Agent 对话框覆盖）
     "notifications": {"desktop": True},
     "agent": {"prune_enabled": True, "prune_delta": 0.05, "provider": "llm",
@@ -49,8 +51,23 @@ def load_config(path: Path | None = None) -> dict:
     cfg_path = path or Path("config.toml")
     cfg = {**DEFAULTS}
     if cfg_path.exists():
-        cfg.update(tomllib.loads(cfg_path.read_text(encoding="utf-8")))
+        file_cfg = tomllib.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg.update(file_cfg)
+        _migrate_legacy_producer_section(cfg, file_cfg)
     return cfg
+
+
+def _migrate_legacy_producer_section(cfg: dict, file_cfg: dict) -> None:
+    """#129 改名兼容：文件只写旧推理端节（#129 前命名）时并入 producer 节作兜底。
+
+    新节显式在场则旧节不并入（新键优先）；旧节本身原样保留在 cfg（GET /config
+    展示可见，deprecated）。旧节名字面量受 #129 grep 验收限制，取自 core.producer
+    兼容常量。"""
+    from .core.producer import LEGACY_CONFIG_SECTION
+
+    legacy = file_cfg.get(LEGACY_CONFIG_SECTION)
+    if isinstance(legacy, dict) and not isinstance(file_cfg.get("producer"), dict):
+        cfg["producer"] = {**DEFAULTS.get("producer", {}), **legacy}
 
 
 def _validate(section: str, key: str, value: object) -> None:

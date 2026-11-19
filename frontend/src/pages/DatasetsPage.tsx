@@ -9,7 +9,7 @@ import {
 } from "../api/client";
 import { OpLines, useOpLines } from "../components/OpProgress";
 import { CreateDatasetDialog } from "../components/datasets/CreateDatasetDialog";
-import { MonitorPullDialog } from "../components/datasets/MonitorPullDialog";
+import { ProducerPullDialog } from "../components/datasets/ProducerPullDialog";
 
 /**
  * 数据集列表（票 109 批 1，总貌档）：托管数据集卡片网格 + 新建向导入口。
@@ -117,7 +117,7 @@ export function DatasetsPage() {
           新建数据集
         </button>
         <button type="button" className="btn" onClick={() => setPullOpen(true)}>
-          从 vision-monitor 拉取
+          从推理端拉取
         </button>
         <button type="button" className="btn" onClick={() => setExternalOpen(true)}>
           注册外部目录
@@ -175,7 +175,7 @@ export function DatasetsPage() {
         }}
       />
 
-      <MonitorPullDialog
+      <ProducerPullDialog
         open={pullOpen}
         datasets={items}
         onClose={() => setPullOpen(false)}

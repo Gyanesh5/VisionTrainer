@@ -1500,7 +1500,7 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         target.mkdir(parents=True, exist_ok=False)
         shutil.copy2(best_pt, target / "best.pt")
         meta = {
-            "version": fingerprint,  # version 标签 = 指纹：监控端 models.yaml 对账键
+            "version": fingerprint,  # version 标签 = 指纹：推理端 models.yaml 对账键
             "fingerprint": fingerprint,
             "run_uid": uid,
             "task_name": task.name if task else None,
@@ -1536,7 +1536,12 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
 
 
 def list_releases(manager) -> dict:
-    """发布记录清单（票 123）：只增不改账目，新在前；URL 状态读时计算（过期标记）。"""
+    """发布记录清单（票 123）：只增不改账目，新在前；URL 状态读时计算（过期标记）。
+
+    每条带 `download_url`（契约 §5.4 模型发布面，VM #146 拉取台轮询消费）：签名
+    URL 的 exp 取记录的 url_expires_at——有效期与账目字段一致，对端不用自拼 HMAC。
+    """
+    from .. import releases as rel
     from visiontrainer.db.models import ModelRelease, Run, Task
 
     with manager.Session() as s:
@@ -1556,6 +1561,7 @@ def list_releases(manager) -> dict:
               "created_at": m.created_at.isoformat(timespec="seconds"),
               "url_expires_at": m.url_expires_at.isoformat(timespec="seconds"),
               "url_expired": m.url_expires_at < now,
+              "download_url": rel.release_url(m.id, int(m.url_expires_at.timestamp())),
               "recommended_conf": (m.payload or {}).get("recommended_conf"),
               "classes": (m.payload or {}).get("classes") or []} for m, r, t in rows]
     return {"releases": items}

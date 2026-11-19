@@ -18,7 +18,7 @@
 | GET | `/api/v1/operations` | 进行中操作登记表全量快照（阶段 1c）：`{running:[按登记序], last:最近终态\|null}`；`operation.updated` 只在登记/换阶段/终态发，细粒度进度消费方逢事件读本端点刷新 |
 | POST | `/api/v1/system/open-dir` | 服务端文件管理器打开目录（阶段 1c）：body `{path}`；fire-and-forget（xdg-open），目录不存在 400 `invalid_args`，无桌面环境 500 |
 | GET | `/api/v1/system/logs` | 运行日志尾部读取（票 107 日志页）：query `tail`(1–5000, 默认 300)/`level`(DEBUG\|INFO\|WARNING\|ERROR, ==匹配)/`q`(子串，大小写不敏感)；返回 `{path, tail, level, q, lines[], matched, total}`——筛选后取最近 N 条，堆栈续行随前一行入选，文件缺失返回空集 |
-| GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地；monitor 节为兜底默认，运行期生效值见 `GET /system/monitor`，票 122） |
+| GET | `/api/v1/config` | 读当前 config.toml 全量（明文含 api_key——单机无认证 Q4，密钥只存本地；producer 节为兜底默认（旧 monitor 节读兼容并入），运行期生效值见 `GET /system/producer`，票 122） |
 | PUT | `/api/v1/config` | 白名单部分更新。body: `{server?:{host,port}, llm?:{base_url,api_key,model}, training?:{python,trainer_entry,export_entry,datasets_dir,runs_dir,model_lib_dir,check_occupancy}}`（节/键均可省略）；返回 `{config, restart_required}`——llm 即存即生效，server/training 改动须重启（设置页，2026-09-20） |
 | POST | `/api/v1/config/llm-test` | LLM 连通性测试（阶段 1c）：按当前 [llm] 发一条探测消息，返回 `{reply}`；未配置/不可达 502 `llm_unavailable`；多模态链路可达数十秒（长操作，登记 `llm:test`） |
 
@@ -69,6 +69,8 @@
 | :--- | :--- | :--- |
 | GET | `/api/v1/datasets/{id}/review` | 审查队列读（M9）：`{counts{pending,approved,rejected,skipped,modified}, done, total, unlabeled, images[{image,label,name,state,effective,reason,note,decided_at,modified,source,susp,sources}]}`——迭代源为 `source/` 下带 JSON 的图（v1.4 去掉清单归属 `split` 维度）；有效状态按双指纹现算（shapes 哈希变更 → pending + modified 标记）；负样本（无标注 JSON）与排除在册图不入前进序列；可疑度分值与来源（校验/审计/错误分析）由平台聚合，队列按可疑度降序 |
 | POST | `/api/v1/datasets/{id}/review` | 判定。body: `{image, state: pending\|approved\|rejected\|skipped, reason?, note?}`；窄写白名单原子写回 JSON，rejected 必填 reason；图不在 source/ 审查集合 404 |
+| POST | `/api/v1/datasets/{id}/review/relabel` | classify 改类即判定（#131，classify 数据集专属）：body: `{image, label}`——flags 真键切换（旧真键置假、目标类唯一为真）+ `vt_review=approved` 同一次原子写（人工改类即人工判定）；label 须在类别表内（400），detect 数据集 400（detect 改类走 XAL 改标注），排除在册图 400；返回 `{image, label, state, effective, checked_synced}` |
+| POST | `/api/v1/datasets/{id}/review/approve-batch` | 批量通过（#131）：body: `{images: [...]}`（审查页当前过滤子集）；先整体校验再落笔——任一图不在审查集合（404）/排除在册（400）整体拒绝不部分通过，空清单 400；已通过的幂等跳过（不刷新 decided_at），返回 `{requested, approved, already}` |
 | GET | `/api/v1/datasets/{id}/annotation?image=` | 读取真源标注 JSON 全文（阶段 3b 补只读缺口，审查画布叠加/大图合成的数据源）：`image` 为 source/ 内图片 basename（同名校验防穿越）；返回 labelme JSON 原文；无标注 JSON（负样本）或图不在 source/ 404、坏 JSON 400。零写入 |
 | POST | `/api/v1/datasets/{id}/review/export` | 导出驳回清单 markdown 至数据集目录（与改标清单同构：逐项图名+理由+XAL 直达行） |
 | POST | `/api/v1/datasets/{id}/drops-ack` | 确认当前投影丢弃签名；待确认状态按 `drops.count>0 ∧ signature≠acked` 现算，提交训练时有未确认 drops 则 409 |
@@ -103,33 +105,37 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/selfcheck` | 按需自检（M6 07）：训练 python（子进程探针）/入口文件/三目录可写/LLM 完整性/监控端可达性（票 122，`key=monitor`，不可达为 warning 带原因——拉取导入/回写不可用，训练不受影响），`{items[], ok, problems, error_count}`；severity ∈ ok/warning/error，error 项带修复指引 detail |
+| GET | `/api/v1/selfcheck` | 按需自检（M6 07）：训练 python（子进程探针）/入口文件/三目录可写/LLM 完整性/推理端可达性（票 122，`key=producer`，不可达为 warning 带原因——拉取导入/回写不可用，训练不受影响），`{items[], ok, problems, error_count}`；severity ∈ ok/warning/error，error 项带修复指引 detail |
 
-### 系统域票 122 增补（监控端连接，2026-11-18）
+### 系统域票 122 增补（推理端连接，2026-11-18；#129 命名泛化 monitor→producer）
 
-监控端（vision-monitor，工位）连接配置：运行期真源 = SQLite `runtime_settings`（Alembic b0002），config.toml `[monitor] base_url` 同名键只作兜底默认（不进 `PUT /config` 白名单——文件改动须重启，与本配置「改后即生效」语义冲突，Web 修改走本组端点）。探测 = HTTP GET `{base}/api/health`（vision-monitor 侧契约），短超时（2s）、失败带原因。
-
-| 方法 | 路径 | 说明 |
-| :--- | :--- | :--- |
-| GET | `/api/v1/system/monitor` | 读监控端连接地址：`{base_url, source, updated_at}`——source ∈ `runtime`（运行期已改）/ `config`（文件兜底默认，updated_at 为 null） |
-| PUT | `/api/v1/system/monitor` | 写运行期地址（upsert runtime_settings，改后即生效无需重启）。body `{base_url}`；返回同 GET（source 恒 `runtime`）；非 http(s) 或空串 400 `invalid_value`；config.toml 不被写 |
-| POST | `/api/v1/system/monitor/probe` | 可达性探测：返回 `{base_url, reachable, detail}`——detail 人读（`HTTP 200` 或异常类型+原因）。body 可缺省 `{base_url?}`：带则探未保存草稿值（不落库），缺省探当前生效地址；草稿非法 400 `invalid_value` |
-
-### 数据集域票 124 增补（从 vision-monitor 拉取导入，2026-11-18）
-
-联动域主动学习环的样本回流入口（ADR 0015 Decision 3/4）：后端按过滤条件调监控端导出 API（地址取系统域连接配置，票 122），解包 → 审查键归一（监控端 LabelMe JSON 的 `vt_review` 为字符串态生命周期状态，平台按 ADR 0003 字典态消费——归一剥除非字典态 `vt_review`，`checked: true` 经 XAL 互认口径继承为 approved）→ 走既有托管导入链（新建/加图，与手工导入同质量同路径）→ 导出包 manifest 四要素（工位 site、模型指纹 models[].model_sha8、时间窗 time_window、样本清单 samples）追加进 dataset meta 的 `monitor_imports`（逐次拉取一条记录，逐条样本不建独立表）→ 回写监控端样本状态 ingested。重复拉取同批：add 模式按文件名与既有真源去重（同批重复 added=0）。临时包用完即焚，失败不留半成品。
+推理端（产线工位）连接配置：运行期真源 = SQLite `runtime_settings`（Alembic b0002，键 `producer.base_url`；#129 改名前旧键读回退），config.toml `[producer] base_url` 同名键只作兜底默认（不进 `PUT /config` 白名单——文件改动须重启，与本配置「改后即生效」语义冲突，Web 修改走本组端点；旧 `[monitor]` 节读兼容并入，deprecated）。探测 = HTTP GET `{base}/api/health`（推理端侧契约），短超时（2s）、失败带原因。
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| POST | `/api/v1/datasets/monitor-pull` | 拉取导入（长操作，登记 `ds:{name}:monitor-pull`，相：拉取导出包/解包归一/入图/校验标注/回写状态）。body: `{mode:create\|add, name, task_type?(create), classes?(create，缺省由导出包派生), base_url?(本次覆盖，不落库), filters:{task?, status?:confirmed\|corrected, created_from?, created_to?}}`；返回 `{name, mode, pulled, added, skipped_existing, site, models, time_window, writeback:{ok,detail,sample_ids}, validation_summary}`。错误：502 `monitor_unreachable`（连不上）/ `monitor_http_error`（导出 API 非 2xx）/ `monitor_bad_bundle`（坏 ZIP 或 manifest 缺四要素），404 `monitor_empty`（204 无样本）与 add 目标不存在 `not_found`，400 `invalid_args`；导入链阻断（表外类别 409、同名冲突 409）按票 03/04 契约原样返回 |
+| GET | `/api/v1/system/producer` | 读推理端连接地址：`{base_url, source, updated_at}`——source ∈ `runtime`（运行期已改）/ `config`（文件兜底默认，updated_at 为 null） |
+| PUT | `/api/v1/system/producer` | 写运行期地址（upsert runtime_settings，恒新键，改后即生效无需重启）。body `{base_url}`；返回同 GET（source 恒 `runtime`）；非 http(s) 或空串 400 `invalid_value`；config.toml 不被写 |
+| POST | `/api/v1/system/producer/probe` | 可达性探测：返回 `{base_url, reachable, detail}`——detail 人读（`HTTP 200` 或异常类型+原因）。body 可缺省 `{base_url?}`：带则探未保存草稿值（不落库），缺省探当前生效地址；草稿非法 400 `invalid_value` |
 
-**出站回写契约**（监控端样本状态 API，监控端侧待实现、本仓先钉形状）：导入成功后平台发起 `POST {monitor基址}/api/samples/status`，body `{"status": "ingested", "sample_ids": [manifest 样本清单的逐条 sample_id]}`。回写失败告警降级不阻断导入主流程（与通知域一致口径）：响应 `writeback.ok=false` 带 detail，操作仍 done；重复拉取同一批（全量去重）也会再发回写，可补前次失败。
+### 数据集域票 124 增补（从推理端拉取导入，2026-11-18；#129 命名泛化）
+
+联动域主动学习环的样本回流入口（ADR 0015 Decision 3/4）：后端按过滤条件调推理端导出 API（地址取系统域连接配置，票 122），解包 → 审查键归一（推理端 LabelMe JSON 的 `vt_review` 为字符串态生命周期状态，平台按 ADR 0003 字典态消费——归一剥除非字典态 `vt_review`，`checked: true` 经 XAL 互认口径继承为 approved）→ classify 消费投影（#131：task_type=classify 时包内顶层 `label` 键就地投影为 flags 布尔真键——契约 §4.5 包内形态 `{"shapes":[],"label":"X"}` 不投影会判无类负样本，`classes.txt` 行序登记类别表）→ 走既有托管导入链（新建/加图，与手工导入同质量同路径）→ 导出包 manifest 四要素（工位 site、模型指纹 models[].model_sha8、时间窗 time_window、样本清单 samples）追加进 dataset meta 的 `producer_imports`（逐次拉取一条记录，逐条样本不建独立表；#129 前旧 meta 键读侧迁移，写恒新键）→ 回写推理端样本状态 ingested。
+
+**拉取恢复（#132，契约 §5.5/§6.4）**：下载成功且结构校验（ZIP/manifest）通过、动真源之前，ZIP 先落本地暂存——数据根下独立目录 `producer_pulls/`（`<pull_id>.zip` + 同名 `.json` sidecar 记录重导上下文），不与数据集目录混居（无 dataset.json 不进数据集清单）；保留策略 = 成功即焚 + 超期 14 天清扫（随暂存/清单动作顺带执行）。逐文件幂等以词干为单位前置预检，只作用于拉取导入器（手工加图「同名冲突整批 409」不受影响）：同词干同内容 = 跳过（响应 `skipped` 词干清单）、同词干异内容 = 拒收登记（响应 `rejected` 清单 + meta 落账 `import_rejected`，真源一字节不动、被拒样本不回写 ingested——留在推理端 exported 态待人工处置）、其余照常入库；同批重复拉取零重复样本。导入链阻断（表外类别 409、重名 409 等）时暂存 ZIP 保留，错误 `detail.staged_pull_id` 外露供重导定位；坏包（无重导价值）不进暂存区。临时解包目录用完即焚，失败不留半成品数据集。
+
+| 方法 | 路径 | 说明 |
+| :--- | :--- | :--- |
+| POST | `/api/v1/datasets/producer-pulls` | 拉取导入（长操作，登记 `ds:{name}:producer-pull`，相：拉取导出包/解包归一/入图/校验标注/回写状态）。body: `{mode:create\|add, name, task_type?(create), classes?(create，缺省由导出包派生), append_classes?(add，表外类别 409 拦下后的追加重试载荷，#131), base_url?(本次覆盖，不落库), filters:{task?, status?, sample_ids?, created_from?, created_to?}}`——filters 逐字转发推理端导出 API（契约 §5.2）：`status` 枚举当前与推理端导出 API 现状（confirmed\|corrected）对齐，随其状态机收缩票（VM #145，改按采集态过滤）改写；`sample_ids` = 样本直选清单（上限 500，契约 §5.2 对端导出 API 上限，超出 422）。返回 `{name, mode, pulled, added, skipped_existing（逐文件跳过数：同词干同内容命中既有真源的图+同词干 JSON 逐文件计数）, skipped（跳过词干清单：同词干同内容被幂等跳过的词干，#132）, rejected（拒收清单：同词干异内容拒收登记 `[{stem, reason, files}]`，真源不动、被拒样本不回写 ingested，#132）, normalized_review_keys, projected_labels, site, models, time_window, writeback:{ok,detail,sample_ids}, validation_summary}`。classify 消费投影（#131，契约 §4.5）：task_type=classify（add 按目标数据集任务形态）时包内顶层 `label` 键就地投影为 flags 布尔真键（`projected_labels` = 改写文件数），classes.txt 行序登记类别表。错误：502 `producer_unreachable`（连不上）/ `producer_http_error`（导出 API 非 2xx）/ `producer_bad_bundle`（坏 ZIP 或 manifest 缺四要素），404 `producer_empty`（204 无样本）与 add 目标不存在 `not_found`，400 `invalid_args`；导入链阻断（表外类别 409 带 `detail.source_labels`、同名冲突 409）按票 03/04 契约原样返回，且 `detail.staged_pull_id` 指向暂存包（#132，可经 reimport 重导） |
+| GET | `/api/v1/datasets/producer-pulls/staged` | 暂存区清单（#132）：待重导的拉取包一览 `[{pull_id, staged_at, name, mode, task_type, size_bytes}]`，时间戳序（旧在前）；超期（14 天）暂存顺带清扫 |
+| POST | `/api/v1/datasets/producer-pulls/reimport` | 从暂存 ZIP 重试导入（#132，长操作，登记 `ds:{name}:producer-reimport`）：拉取导入同一套解包/归一/词干幂等/落账/回写，成功即焚暂存；再失败暂存保留（`detail.staged_pull_id` 外露可再试）。body: `{name, pull_id, task_type?(create 重建覆盖 sidecar), classes?(create 覆盖包派生), append_classes?(add 重试载荷), base_url?(本次覆盖)}`；返回同拉取导入，另带 `reimported_from=pull_id`、`mode` 为实际生效语义（目标存在=add/不存在=create）。错误：404 `not_found`（pull_id 不存在/已焚/已清扫） |
+
+**出站回写契约**（推理端样本状态 API，推理端侧契约见联动契约 §5.3）：导入成功后平台发起 `POST {推理端基址}/api/samples/status`，body `{"status": "ingested", "sample_ids": [manifest 样本清单的逐条 sample_id，#132 起被拒收词干的样本除外——拒收 ≠ ingested]}`。回写失败告警降级不阻断导入主流程（与通知域一致口径）：响应 `writeback.ok=false` 带 detail，操作仍 done；重复拉取同一批（全量跳过）也会再发回写，可补前次失败。
 
 ### 训练域票 125 增补（trained 回写，2026-11-18）
 
-联动域状态回写第二态（ADR 0015 Decision 5，无新增 REST 端点——回写为平台后台出站动作）：消费某数据集的 Run 生命周期终态成功（done，含平台重启后孤儿按产物判定 done）后，按归因交集回写监控端样本状态 trained。归因口径：该数据集 meta `monitor_imports` 样本清单 ∩ 该 Run 实际消费名单（运行快照 `run_manifest.json` 的 `effective` 冻结段，相对 `source/` 文件名）——只有本次训练真正进 train/val 的样本才回写（盘上缺图/排除在册的剔除样本不回写），且只碰该 Run 消费数据集的清单，其他导入批次与其他数据集不受误伤；数据集无联动导入记录或 Run 无实效快照（外部数据集/历史 Run）则不回写。非 done 终态（failed/cancelled/stopping）不回写。回写由后台线程执行，不阻塞训练收尾链路；失败只告警不阻断训练主流程（桌面通知 + 日志 warning，与通知域一致降级口径），可在修复监控端连接后重训补写。
+联动域状态回写第二态（ADR 0015 Decision 5，无新增 REST 端点——回写为平台后台出站动作）：消费某数据集的 Run 生命周期终态成功（done，含平台重启后孤儿按产物判定 done）后，按归因交集回写推理端样本状态 trained。归因口径：该数据集 meta `producer_imports` 样本清单 ∩ 该 Run 实际消费名单（运行快照 `run_manifest.json` 的 `effective` 冻结段，相对 `source/` 文件名）——只有本次训练真正进 train/val 的样本才回写（盘上缺图/排除在册的剔除样本不回写），且只碰该 Run 消费数据集的清单，其他导入批次与其他数据集不受误伤；数据集无联动导入记录或 Run 无实效快照（外部数据集/历史 Run）则不回写。非 done 终态（failed/cancelled/stopping）不回写。回写由后台线程执行，不阻塞训练收尾链路；失败只告警不阻断训练主流程（桌面通知 + 日志 warning，与通知域一致降级口径），可在修复推理端连接后重训补写。
 
-**出站回写契约（trained 态）**：Run 终态成功后平台发起 `POST {monitor基址}/api/samples/status`，body `{"status": "trained", "sample_ids": [归因交集的逐条 sample_id]}`（与 ingested 态同一端点同一形状，`status` 换 `trained`；共享出站实现 `datasets/monitor_writeback.py`）。响应不进入任何 REST 响应面——结果只落日志与告警；样本状态机 `exported → ingested → trained` 中 ingested 见票 124 段。
+**出站回写契约（trained 态）**：Run 终态成功后平台发起 `POST {推理端基址}/api/samples/status`，body `{"status": "trained", "sample_ids": [归因交集的逐条 sample_id]}`（与 ingested 态同一端点同一形状，`status` 换 `trained`；共享出站实现 `datasets/producer_writeback.py`）。响应不进入任何 REST 响应面——结果只落日志与告警；样本状态机 `exported → ingested → trained` 中 ingested 见票 124 段。
 
 ### 任务域 M8 增补（错误分析 / 试跑 / 模型库，2026-09-21）
 
@@ -188,12 +194,12 @@ v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + form
 
 ### 模型发布（票 123，2026-11-18）
 
-发布（ADR 0015 Decision 1）与部署是两个动作：发布 = best 权重 + 类别表 + 阈值探索器建议置信度 + 模型指纹打包进发布目录（派生产物，可清理重建，不动模型真源）+ 限时签名 URL 供监控端免凭据拉取；部署维持「导出 ONNX 组装进标注端」。发布记录只增不改（时间、指纹、run 标识、拉取 URL 状态），重复发布同一 Run 生成新目录（`{family}_{task_type}_{run_uid}_{seq}` 序号递增）与新记录。签名 URL 复用缩略图签名管线模式（HMAC 限时 + 不带凭据，密钥同源 `server.thumb_secret`），24 小时有效，过期/篡改一律 403。建议置信度口径同部署（M8 04）：阈值探索器 `recommended_conf`（F1 最大点）优先，无分析回退 `train_args.conf`。`version` 标签 = 指纹（监控端 models.yaml 对账键）。发布目录配置键 `training.release_dir`（缺省 `~/visiontrainer/releases`，设置页可改）。
+发布（ADR 0015 Decision 1）与部署是两个动作：发布 = best 权重 + 类别表 + 阈值探索器建议置信度 + 模型指纹打包进发布目录（派生产物，可清理重建，不动模型真源）+ 限时签名 URL 供推理端免凭据拉取；部署维持「导出 ONNX 组装进标注端」。发布记录只增不改（时间、指纹、run 标识、拉取 URL 状态），重复发布同一 Run 生成新目录（`{family}_{task_type}_{run_uid}_{seq}` 序号递增）与新记录。签名 URL 复用缩略图签名管线模式（HMAC 限时 + 不带凭据，密钥同源 `server.thumb_secret`），24 小时有效，过期/篡改一律 403。建议置信度口径同部署（M8 04）：阈值探索器 `recommended_conf`（F1 最大点）优先，无分析回退 `train_args.conf`。`version` 标签 = 指纹（推理端 models.yaml 对账键）。发布目录配置键 `training.release_dir`（缺省 `~/visiontrainer/releases`，设置页可改）。
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
 | POST | `/api/v1/runs/{uid}/release` | 发起发布（同步）：打包落盘 + 登记记录，返回 `{release_id, run_uid, fingerprint, version, release_dir, bundle_path, download_url, url_expires_at, ...元数据}`；发布目录含 `best.pt`/`metadata.json`/`classes.txt`/`bundle.zip`。资格（review 修复）：权重文件在盘即可，状态不限——cancelled 但权重在盘的 Run 可发布（与票 121 真源清单「缺失如实标注」同口径）；权重缺失 400。长操作登记 `run:{uid}:release` |
-| GET | `/api/v1/releases` | 发布记录清单（只增不改账目，新在前）：`{release_id, run_uid, task_id, task_name, round_no, fingerprint, version, release_dir, primary_metric, created_at, url_expires_at, url_expired, recommended_conf, classes}`；`url_expired` 读时计算（过期只影响拉取，记录留档）；票 126 增 `invalidated`（所属 Run 被放行删除的记录留账，`run_uid` 取冗余列可对账，task 信息可能为 null）；review 修复增 `dir_cleared`（发布目录派生物已经平台清理的留档标注） |
+| GET | `/api/v1/releases` | 发布记录清单（只增不改账目，新在前）：`{release_id, run_uid, task_id, task_name, round_no, fingerprint, version, release_dir, primary_metric, created_at, url_expires_at, url_expired, download_url, recommended_conf, classes}`；`url_expired` 读时计算（过期只影响拉取，记录留档）；`download_url` = 限时签名下载 URL（契约 §5.4 模型发布面，VM #146 拉取台轮询消费）：签名 exp 取该记录的 `url_expires_at`，有效期与账目字段一致，对端凭清单直接拉取、不必自拼 HMAC；过期记录 URL 仍在列，拉取如实 403；票 126 增 `invalidated`（所属 Run 被放行删除的记录留账，`run_uid` 取冗余列可对账，task 信息可能为 null）；review 修复增 `dir_cleared`（发布目录派生物已经平台清理的留档标注） |
 | GET | `/api/v1/releases/download?rid=&t=` | 凭限时签名 URL 拉取发布包 `bundle.zip`（`application/zip`，含 best.pt + metadata.json + classes.txt）；验签失败/过期 403，记录不存在或发布包已被清理 404（派生产物可重新发布重建） |
 | GET | `/api/v1/release-library` | 发布目录视图（review 修复，与 `/model-library` 同款读法）：`{root, items:[{name, path, size_mb, mtime, run_uid, task_name, release_ids}]}`——发布派生物的管理数据面，`release_ids` 按 `release_dir` 关联在账记录可对账 |
 | DELETE | `/api/v1/release-library/{name}` | 发布目录清理（review 修复，票 126 派生语义）：只删物理产物，`model_releases` 账目不动——匹配记录写 `cleared_at` 留档标注，返回 `{deleted, kept_releases}`；签名 URL 拉取如实 404，重新发布生成新目录新记录（序号递增）可重建。非法名 400、目录不存在 404；长操作登记 `release:purge` |

@@ -12,7 +12,13 @@ import json
 
 
 def shapes_hash(data: dict) -> str:
-    """shapes 序列化哈希——权威指纹：只动 checked/vt_review 等元数据不改变它。"""
+    """shapes 序列化哈希——权威指纹：只动 checked/vt_review 等元数据不改变它。
+
+    已登记偏差（#131 票内论证，不改）：classify 形态 shapes 恒空 → 本指纹恒常量，
+    flags 判类变更不触发「已修改」降级——与「改类即判定」语义一致（改类走
+    `review.write_review(flags=…)` 自带 approved 判定）；stat 指纹（mtime_ns+size）
+    仍能感知文件动过并触发哈希裁决路径，指纹防线不失效。
+    """
     return hashlib.sha256(
         json.dumps(data.get("shapes") or [], ensure_ascii=False, sort_keys=True).encode()
     ).hexdigest()

@@ -1,6 +1,6 @@
 # 0015 - 与 vision-monitor 联动：主动学习环的训练平台侧配套
 
-Status: accepted（2026-11-18，grill 定案；vision-monitor 侧对应其仓 ADR 0014/0015）
+Status: accepted（2026-11-18，grill 定案；vision-monitor 侧对应其仓 ADR 0014/0015）。2026-11-19 修订：复核位置翻案回归训练平台侧、训练请求控制面废除——Context 中「轻量标注留在监控侧」的表述随之失效，Decision 1–5 与 v3 张力挂账延续，翻案链见 [0016](0016-linkage-contract-v1.md)
 
 ## Context
 

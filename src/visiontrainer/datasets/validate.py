@@ -194,6 +194,15 @@ def _projected_lint(projected: dict | None) -> list[str]:
     return [f"{st}→{geom} {n} 个" for (st, geom), n in sorted(counts.items())]
 
 
+def _flag_truth_key(data: dict) -> str | None:
+    """classify 判类唯一口径的取值核：``flags`` 布尔真键的第一个真键。
+
+    单一实现两处消费：`pool._classify_flag_of`（判类消费面，按图路径读盘）与本模块
+    `scan_entries`（校验面负样本判据，已在内存的标注 dict）——收拢此前的两份就地拷贝。
+    """
+    return next((k for k, v in (data.get("flags") or {}).items() if v), None)
+
+
 def scan_entries(source_dir: Path, task_type: str, classes: list[str],
                  progress=None) -> dict:
     """扫描 source_dir：图片 + 同词干 JSON。返回 entries 与发现的问题清单。
@@ -247,8 +256,12 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
             entries.append(entry)
             continue
 
-        entry["has_shapes"] = bool(data.get("shapes"))
         shapes = data.get("shapes", [])
+        # 负样本判据按任务形态（#131 修正 classify 口径）：detect 系看 shapes；
+        # classify 判类 = flags 布尔真键（契约 §4.5 包内 shapes 恒空，纯 shapes 判据
+        # 会把有判类的图计入 background），取值核与判类消费面 pool._classify_flag_of 同源
+        cls_flag = _flag_truth_key(data) if task_type == "classify" else None
+        entry["has_shapes"] = bool(shapes) or cls_flag is not None
         shape_types = {s.get("shape_type") for s in shapes}
         if task_type != "classify" and shape_types and not shape_matches_task(task_type, shape_types):
             entry["problems"].append("no_matching_shape")  # 完全无 shapes = 负样本，不算问题
@@ -335,8 +348,7 @@ def scan_entries(source_dir: Path, task_type: str, classes: list[str],
 
         # ── 健康报告原料：同一次解析顺带提取（M6 一次遍历约定；M9 objs 带像素宽高）
         if task_type == "classify":
-            flag = next((k for k, v in (data.get("flags") or {}).items() if v), None)
-            entry["meta"] = {"flag": flag} if flag else None
+            entry["meta"] = {"flag": cls_flag} if cls_flag else None
         else:
             objs = []
             for s in shapes:

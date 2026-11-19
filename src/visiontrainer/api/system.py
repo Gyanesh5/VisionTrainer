@@ -1,5 +1,5 @@
 """系统域端点：启动自检（M6 07 号票）+ 进程内操作登记表读 + 桌面直达（阶段 1c 票 105）
-+ 运行日志尾部读取（票 107 日志页数据源）+ 监控端连接配置与探测（票 122）。"""
++ 运行日志尾部读取（票 107 日志页数据源）+ 推理端连接配置与探测（票 122）。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from .. import progress
 from ..config import ConfigError
-from ..core import desktop, monitor
+from ..core import desktop, producer
 from ..core.selfcheck import run_selfcheck
 
 router = APIRouter(tags=["system"])
@@ -35,49 +35,49 @@ def selfcheck(request: Request) -> dict:
     return run_selfcheck(getattr(request.app.state, "cfg", None))
 
 
-# ---------------------------------------------------------------- 监控端连接（票 122）
+# ---------------------------------------------------------------- 推理端连接（票 122）
 
 
-class MonitorBody(BaseModel):
+class ProducerBody(BaseModel):
     base_url: str
 
 
-class MonitorProbeBody(BaseModel):
+class ProducerProbeBody(BaseModel):
     """探测目标可缺省：缺省探当前生效地址；带 base_url 则测未保存的草稿值（不落库）。"""
 
     base_url: str | None = None
 
 
-@router.get("/system/monitor")
-def get_monitor(request: Request) -> dict:
-    """监控端连接地址读：生效值 + 来源（runtime=运行期已改 / config=文件兜底）+ 落库时间。"""
-    return monitor.monitor_status(getattr(request.app.state, "cfg", None))
+@router.get("/system/producer")
+def get_producer(request: Request) -> dict:
+    """推理端连接地址读：生效值 + 来源（runtime=运行期已改 / config=文件兜底）+ 落库时间。"""
+    return producer.producer_status(getattr(request.app.state, "cfg", None))
 
 
-@router.put("/system/monitor")
-def put_monitor(body: MonitorBody, request: Request) -> dict:
-    """监控端地址写：落 SQLite runtime_settings，改后即生效（无需重启）。
+@router.put("/system/producer")
+def put_producer(body: ProducerBody, request: Request) -> dict:
+    """推理端地址写：落 SQLite runtime_settings，改后即生效（无需重启）。
 
     非法地址 400 `invalid_value`（与 PUT /config 同错误约定）；config.toml 不被写。
     """
     try:
-        saved = monitor.set_monitor_base_url(body.base_url)
+        saved = producer.set_producer_base_url(body.base_url)
     except ConfigError as exc:
         return JSONResponse(status_code=400,
                             content={"error": {"code": exc.code, "message": exc.message, "detail": {}}})
     return {"base_url": saved["base_url"], "updated_at": saved["updated_at"], "source": "runtime"}
 
 
-@router.post("/system/monitor/probe")
-def probe_monitor_endpoint(body: MonitorProbeBody | None = None, request: Request = None) -> dict:
-    """监控端可达性探测：GET {base}/api/health（vision-monitor 契约），短超时。
+@router.post("/system/producer/probe")
+def probe_producer_endpoint(body: ProducerProbeBody | None = None, request: Request = None) -> dict:
+    """推理端可达性探测：GET {base}/api/health（推理端契约），短超时。
 
     探测目标：body.base_url（系统页草稿值）缺省 = 当前生效地址。结果
     {base_url, reachable, detail}——失败原因在 detail，不外抛。
     """
     target = body.base_url if body is not None else None
     try:
-        return monitor.probe_monitor(target, cfg=getattr(request.app.state, "cfg", None))
+        return producer.probe_producer(target, cfg=getattr(request.app.state, "cfg", None))
     except ConfigError as exc:
         return JSONResponse(status_code=400,
                             content={"error": {"code": exc.code, "message": exc.message, "detail": {}}})

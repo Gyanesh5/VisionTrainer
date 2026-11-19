@@ -74,12 +74,18 @@ def read_state(label_path: Path) -> dict:
             "modified": modified and stored != "pending", "source": "vt"}
 
 
-def write_review(label_path: Path, state: str, reason: str = "", note: str = "") -> dict:
+def write_review(label_path: Path, state: str, reason: str = "", note: str = "",
+                 flags: dict | None = None) -> dict:
     """窄写白名单两键（checked + vt_review）并原子落盘；返回写后的存储记录。
 
     mtime_ns/size 存的是**写前** stat：本次写入必然推进 mtime，下次读取走哈希裁决路径
     （shapes 未动 → 状态维持）——存陈旧 stat 无害，且免去「写后指纹回填再写一次又失效」
     的鸡生蛋问题（ADR 0003 备选实现，取更简者）。
+
+    flags（#131 classify 首发）：改类载荷与判定**同一次原子写**——人工改类即判定
+    （flags 真键切换 + vt_review=approved）。shapes_hash 只指纹 shapes（classify 恒
+    常量，见 `review_state.shapes_hash`），flags 变更不触发「已修改」降级，正是改类
+    即判定的语义。
     """
     if state not in REVIEW_STATES:
         raise ValueError(f"非法审查状态：{state}")
@@ -99,6 +105,8 @@ def write_review(label_path: Path, state: str, reason: str = "", note: str = "")
         "mtime_ns": st.st_mtime_ns,
         "size": st.st_size,
     }
+    if flags is not None:
+        data["flags"] = flags
     data["checked"] = state == "approved"  # XAL 官方字段：通过 ⇔ 绿标
     data["vt_review"] = record
     atomic_write_json(p, data)

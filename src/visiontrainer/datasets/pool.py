@@ -29,7 +29,7 @@ from .fileops import atomic_write_text as _atomic_text
 from .fileops import link_or_copy
 from .formats import DEFAULT_FORMAT_ID, adapter_for
 from .projection import PROJECTION_VERSION, TASK_MODE, project_file
-from .validate import list_images
+from .validate import _flag_truth_key, list_images
 
 _STEM_CONFLICT_HINT = ("同词干的图片只保留一张，再「重新校验」")
 
@@ -276,4 +276,4 @@ def _classify_flag_of(image: Path) -> str | None:
         data = json.loads(lbl.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
-    return next((k for k, v in (data.get("flags") or {}).items() if v), None)
+    return _flag_truth_key(data)  # 取值核与校验面同源（validate._flag_truth_key）
