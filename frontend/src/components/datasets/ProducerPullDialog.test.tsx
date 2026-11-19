@@ -255,3 +255,37 @@ describe("ProducerPullDialog", () => {
     expect(screen.queryByTestId("pull-append-block")).not.toBeInTheDocument();
   });
 });
+
+describe("失败保留表单（UI 实点联调打磨项）", () => {
+  it("producer_empty 404：错误显示且 add 表单值全保留（目标/状态/任务过滤）", async () => {
+    const user = userEvent.setup();
+    pull.mockRejectedValue(
+      new ApiRequestError("导出包样本清单为空", 404, "producer_empty", {}),
+    );
+    setup();
+    await screen.findByTestId("producer-pull-dialog");
+    await user.click(screen.getByRole("radio", { name: /加图到既有数据集/ }));
+    await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
+    await user.selectOptions(
+      screen.getByLabelText("状态过滤"),
+      "collected",
+    );
+    await user.type(screen.getByLabelText(/任务过滤/), "task-xyz");
+    await user.click(screen.getByTestId("pull-submit"));
+
+    await waitFor(() =>
+      expect(screen.getByTestId("pull-error").textContent).toContain("样本清单为空"),
+    );
+    // 失败不清表单：操作员改过滤条件即可原样重试
+    expect(
+      (screen.getByLabelText("目标数据集") as HTMLSelectElement).value,
+    ).toBe("plate");
+    expect((screen.getByLabelText("状态过滤") as HTMLSelectElement).value).toBe(
+      "collected",
+    );
+    expect((screen.getByLabelText(/任务过滤/) as HTMLInputElement).value).toBe(
+      "task-xyz",
+    );
+    expect(pull).toHaveBeenCalledTimes(1);
+  });
+});
