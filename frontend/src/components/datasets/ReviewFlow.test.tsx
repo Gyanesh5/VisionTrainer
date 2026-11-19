@@ -257,30 +257,34 @@ describe("classify reclassify (linkage #131)", () => {
 });
 
 describe("batch approve (linkage #131)", () => {
-  it("batch_button_posts_current_filtered_subset", async () => {
+  it("batch_button_opens_in_app_gate_then_confirm_posts_subset", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
     reviewBatchApprove.mockResolvedValue({ requested: 2, approved: 2, already: 0 });
     renderFlow();
     await screen.findByTestId("review-flow");
     // 默认 pending 过滤子集 = a/b 两张（c 已通过不在子集）
     await user.click(screen.getByRole("button", { name: /批量通过/ }));
+    // 应用内确认门（实点联调裁决：原生 confirm 在内嵌浏览器环境阻塞不可应答）
+    const gate = await screen.findByTestId("batch-confirm");
+    expect(gate.textContent).toContain("2 张");
+    await user.click(screen.getByTestId("batch-confirm-yes"));
     await waitFor(() =>
       expect(reviewBatchApprove).toHaveBeenCalledWith("plate", {
         images: [queue.items[0].image, queue.items[1].image],
       }),
     );
-    confirmSpy.mockRestore();
+    expect(screen.queryByTestId("batch-confirm")).not.toBeInTheDocument();
   });
 
-  it("batch_confirm_cancel_does_not_post", async () => {
+  it("batch_gate_cancel_does_not_post", async () => {
     const user = userEvent.setup();
-    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
     renderFlow();
     await screen.findByTestId("review-flow");
     await user.click(screen.getByRole("button", { name: /批量通过/ }));
+    await screen.findByTestId("batch-confirm");
+    await user.click(screen.getByTestId("batch-confirm-no"));
     expect(reviewBatchApprove).not.toHaveBeenCalled();
-    confirmSpy.mockRestore();
+    expect(screen.queryByTestId("batch-confirm")).not.toBeInTheDocument();
   });
 });
 
