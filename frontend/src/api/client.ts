@@ -177,7 +177,8 @@ export interface ProbeClassesResult {
 /** POST /datasets/producer-pulls：从推理端拉取导入（票 124，联动域；#129 命名泛化） */
 export interface ProducerPullFilters {
   task?: string | null;
-  status?: "confirmed" | "corrected" | null;
+  /** 状态过滤=采集态 collected（对端状态机收缩四态后，推理端 PR #148；契约 §5.2） */
+  status?: "collected" | null;
   /** 样本直选（契约 §5.2）：上限 500（对端导出 API 上限），有值才随载荷带上 */
   sample_ids?: string[] | null;
   created_from?: number | null;
@@ -664,6 +665,8 @@ export const datasetsApi = {
     name: string;
     task_type?: TaskType;
     classes?: string[];
+    /** add 模式表外类别 409 后的追加重试载荷（#131 偏离补完）：有值才随载荷带上 */
+    append_classes?: string[];
     base_url?: string | null;
     filters: ProducerPullFilters;
   }) =>

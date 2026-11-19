@@ -146,10 +146,10 @@ sha256 前 8 位；只算字节内容，与文件名/路径/mtime 无关；样�
 | :--- | :--- | :--- | :--- |
 | 1 | 推理端 | models.yaml 绝对路径引用训练平台 runs 目录（过渡形态） | 生产拓扑切换时改配置 |
 | 2 | 推理端 | 磁盘同名覆盖不触发模型重载 | 换模型走配置变更路径（既有机制） |
-| 3 | 推理端 | 训练请求出站通道（训练请求客户端+模型回传编排）——契约不设控制面 | 退役；其「自动建模型条目+人工切换」逻辑改接 §5.4 拉取 |
-| 4 | 推理端 | 导出 API status 过滤参数（confirmed/corrected）语义失效 | 改按采集态过滤+恒排除已导出态（§5.2） |
-| 5 | 推理端 | 「重置 exported」管理动作缺失 | 待补票；须校验底图在档 |
-| 6 | 推理端 | external-integration-api.md 第 7 章（训练请求三端点契约）与本文冲突 | 收缩为指针章指向本文 |
+| 3 | 推理端 | 训练请求出站通道（训练请求客户端+模型回传编排）——契约不设控制面 | 已完成（推理端 PR #148：training_service/training_store/model_return/training_api 退役，`release_pull` 拉取台改接 §5.4 发布面，「自动建模型条目+人工切换+一键回滚」保留） |
+| 4 | 推理端 | 导出 API status 过滤参数（confirmed/corrected）语义失效 | 已完成（推理端 PR #148：状态机收缩四态、采集态字面值=`collected`、选集恒排除 exported/ingested/trained 含 status=None 双闸；训练平台侧过滤枚举已同步） |
+| 5 | 推理端 | 「重置 exported」管理动作缺失 | 已完成（推理端 PR #148：`POST /api/samples/reset`，底图在档校验（`reexport_blocker` 与导出选图同源），actor=admin-reset 唯一受控回退边；与训练平台暂存重导构成 §5.5 恢复链闭环） |
+| 6 | 推理端 | external-integration-api.md 第 7 章（训练请求三端点契约）与本文冲突 | 已完成（推理端 PR #148：第 7 章收缩为指针章，四面对照表指向本文 §4/§5） |
 | 7 | 训练平台 | 平台内以 monitor 类词命名对端（连接配置键、/monitor-pull、monitor_pull.py、monitor_writeback.py、monitor_imports meta、UI 文案） | 已完成（实施票 #129：代码 token=`producer`、中文=推理端；旧 runtime_settings 键/config.toml 旧节/meta 旧键读兼容，写恒新键） |
 | 8 | 训练平台 | classify 消费面缺失（审查页渲染态/改类动作/批量通过/label→flags 投影） | 已完成（实施票 #131：pull 解包后顶层 label→flags 真键投影+classes.txt 登记、审查页 classify 渲染分支、改类即判定（review/relabel）、批量通过（review/approve-batch）；validate 对 classify 按 flags 定类计数） |
 | 9 | 训练平台 | 拉取 ZIP 暂存+幂等重导缺失 | 已完成（实施票 #132：下载成功且结构校验通过即落暂存 `producer_pulls/`（成功即焚+超期 14 天清扫）；逐文件幂等以词干为单位前置预检——同词干同内容跳过/异内容拒收登记进导入报告与 meta 落账，只作用拉取导入器；`GET producer-pulls/staged` + `POST producer-pulls/reimport` 从暂存重导，成功照常回写 ingested） |
