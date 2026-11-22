@@ -125,6 +125,22 @@ describe("DatasetsPage list", () => {
     expect(screen.getByText("可能有变更")).toBeInTheDocument();
   });
 
+  it("renders_cover_grid_when_cover_present_and_falls_back_to_task_placeholder", async () => {
+    const withCover: DatasetBrief[] = [
+      { ...sampleList[0], cover: ["/t/1.jpg", "/t/2.jpg"] }, // 不足 4 张 → 缺位占位
+      { ...sampleList[1] }, // 无 cover（空数据集/external）→ 任务类型占位底
+    ];
+    list.mockResolvedValue(withCover);
+    renderList();
+
+    const cards = await screen.findAllByTestId("dataset-card");
+    expect(cards[0].querySelector(".ds-card-cover")).not.toBeNull();
+    expect(cards[0].querySelectorAll("img")).toHaveLength(2);
+    expect(cards[0].querySelectorAll(".ds-cover-ph")).toHaveLength(2);
+    expect(cards[1].querySelector("img")).toBeNull();
+    expect(cards[1].querySelector(".ds-card-thumb")?.textContent).toContain("分割");
+  });
+
   it("shows_first_use_empty_state_when_no_datasets", async () => {
     list.mockResolvedValue([]);
     renderList();

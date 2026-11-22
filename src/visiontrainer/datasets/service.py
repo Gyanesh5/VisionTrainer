@@ -1907,6 +1907,27 @@ def export_review_rejects(name: str, root: Path | None = None) -> dict:
 
 # ---------------------------------------------------------------- 内部工具
 
+def _cover_urls(ds_dir: Path, sample: int = 4) -> list[str]:
+    """列表卡封面：source/ 均匀取样 N 张签名缩略图 URL（thumbs 管线，浏览器原生缓存）。
+
+    排除项（excluded.json）不进封面；XAL 回收区在数据集根 `<ds>/_delete_/`（source/
+    的兄弟目录），不在 source/ 列举范围内，天然不可见。0 张回 []——平台诚实原则
+    不放猜出来的内容。签名纯 HMAC 不触盘；URL 24h 过期，列表刷新即重签。
+    """
+    source = _source_dir(ds_dir)
+    if not source.is_dir():
+        return []
+    excluded = load_excluded(ds_dir)
+    imgs = [p for p in list_images(source) if p.name not in excluded]
+    n = len(imgs)
+    if n == 0:
+        return []
+    from .. import thumbs
+
+    picks = imgs if n < sample else [imgs[i * n // sample] for i in range(sample)]
+    return [thumbs.thumb_url(str(p), box=260) for p in picks]
+
+
 def _brief(meta: dict, ds_dir: Path | None = None) -> dict:
     """列表页摘要：validation_summary 直读落盘字段；「可能有变更」只做目录 mtime 粗判。"""
     keep = ["name", "task_type", "form", "created_at"]
@@ -1919,6 +1940,7 @@ def _brief(meta: dict, ds_dir: Path | None = None) -> dict:
         brief["origin"] = meta.get("origin")
         brief["images"] = summary.get("total_images")
         brief["may_have_changes"] = _may_have_changes(meta, ds_dir) if ds_dir else False
+        brief["cover"] = _cover_urls(ds_dir) if ds_dir else []
     else:
         brief["path"] = meta.get("path")
         brief["has_data_yaml"] = meta.get("has_data_yaml")

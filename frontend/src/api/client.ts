@@ -151,7 +151,7 @@ export const REVIEW_STATE_ZH: Record<ReviewState, string> = {
   skipped: "跳过",
 };
 
-/** GET /datasets 列表项（服务层 _brief：managed 带摘要，external 只带路径） */
+/** GET /datasets 列表项（服务层 _brief：managed 带摘要与 cover 封面，external 只带路径） */
 export interface DatasetBrief {
   name: string;
   task_type: TaskType;
@@ -163,6 +163,8 @@ export interface DatasetBrief {
   origin?: { mode?: string; transfer?: string; path?: string; at?: string };
   images?: number | null;
   may_have_changes?: boolean;
+  /** 列表卡封面：source/ 均匀取样的 ≤4 条签名缩略图 URL；空数据集为 []，external 无此字段 */
+  cover?: string[];
   path?: string;
   has_data_yaml?: boolean;
 }
