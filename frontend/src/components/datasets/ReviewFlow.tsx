@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   REVIEW_REASONS,
@@ -21,6 +21,8 @@ import { openZoom, setZoomFollow } from "./zoomViewer";
  * - 队列：source/ 下带 JSON 的图（负样本与已排除不入序列），可疑度降序（服务端排好）；
  * - 大图查看：Viewer.js 签名原图 box=0，follow 槽语义——大图开着才换图、关了不重开；
  * - 叠加色按类别序（专利 4）：同名类全数据集同色；
+ * - 画布固定窗口（--canvas-h）：图像按窗口 contain 放大（小图铺满不原尺寸居中），
+ *   控制按钮因此锚定工作区底部；classify 判类徽章贴图像右上角显眼展示（与叠加/图例同色板）；
  * - 滚动跟随（专利 5）：当前项不在胶片条可见窗内才跟随，用户滚动基线优先。
  */
 
@@ -65,6 +67,7 @@ export function ReviewFlow({
   const [error, setError] = useState<string | null>(null);
   const [signed, setSigned] = useState<Record<string, Signed>>({});
   const [annotation, setAnnotation] = useState<{ name: string; j: LabelJson | null } | null>(null);
+  const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
 
   // 面板重建即宣告旧 follow 闭包过期（其状态代已换新）——先摘除（旧 UI _VT.pop("follow") 语义）
@@ -397,6 +400,22 @@ export function ReviewFlow({
   // cur 锚定：默认过滤为空时 cur 与 annotation 同为 null，`?.name === cur?.name` 会
   // undefined===undefined 误判成立而读 null.j 炸整树（React 无 boundary 即白屏）
   const curSvg = cur && annotation && annotation.name === cur.name ? overlaySvgInner(annotation.j, meta.classes) : "";
+  // classify 判类徽章（图像右上角显眼）：同一 cur 锚定口径；色取类别序色板（与叠加/图例同色）
+  const curFlag =
+    cur && annotation && annotation.name === cur.name && meta.task_type === "classify"
+      ? classifyFlag(annotation.j)
+      : null;
+  const curFlagColor = curFlag
+    ? labelColors({ shapes: [{ label: curFlag }] }, meta.classes)[curFlag]
+    : undefined;
+  // 图像宽高比（stage contain 放大的驱动）：标注 JSON 优先（叠加同源），JSON 缺宽高时
+  // 回退 img 自然尺寸（onLoad 采集），都没有按 1:1
+  const curAr =
+    cur && annotation && annotation.name === cur.name && annotation.j?.imageWidth && annotation.j?.imageHeight
+      ? annotation.j.imageWidth / annotation.j.imageHeight
+      : natural
+        ? natural.w / natural.h
+        : 1;
 
   return (
     <div data-testid="review-flow">
@@ -520,8 +539,14 @@ export function ReviewFlow({
               title="单击弹出大图查看器——滚轮缩放 / 拖拽平移 / 1:1 看像素 / 旋转 / 全屏（Esc 退出）"
             >
               {canvasUrl ? (
-                <div className="review-stage">
-                  <img className="review-img" src={canvasUrl} alt={cur?.name} decoding="async" />
+                <div className="review-stage" style={{ "--img-ar": curAr } as CSSProperties}>
+                  <img
+                    className="review-img"
+                    src={canvasUrl}
+                    alt={cur?.name}
+                    decoding="async"
+                    onLoad={(e) => setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+                  />
                   {curSvg && (
                     <svg
                       className="review-overlay"
@@ -530,6 +555,15 @@ export function ReviewFlow({
                       // eslint-disable-next-line react/no-danger
                       dangerouslySetInnerHTML={{ __html: curSvg }}
                     />
+                  )}
+                  {curFlag && (
+                    <div
+                      className="review-class-badge"
+                      data-testid="review-class-badge"
+                      style={{ color: curFlagColor, borderColor: curFlagColor }}
+                    >
+                      {curFlag}
+                    </div>
                   )}
                 </div>
               ) : (
