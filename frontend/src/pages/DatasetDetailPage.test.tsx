@@ -39,6 +39,8 @@ vi.mock("../api/client", async (importOriginal) => {
       exportAnnotations: vi.fn(),
       tilePreview: vi.fn(),
       tile: vi.fn(),
+      reviewQueue: vi.fn(),
+      annotation: vi.fn(),
     },
     operationsApi: { snapshot: vi.fn() },
   };
@@ -319,6 +321,22 @@ describe("ClassTablePanel four actions", () => {
     );
   });
 
+  it("instance_badge_prefers_truth_source_counts_over_stale_profile", async () => {
+    // 回归（2026-11-22 plug579-cls）：画像按实效集计数，加图后未重切分时把新图计成 0，
+    // 徽章显示 0 实例而服务端删除门数真源拦下 409——徽章必须与服务端删除门同口径。
+    statsInstanceCounts.mockResolvedValue({ car: 96, person: 24, ghost: 0 });
+    renameSuspects.mockResolvedValue({ instances: { car: 96, person: 24, ghost: 1 } });
+    get.mockResolvedValue({ ...baseMeta, classes: ["car", "person", "ghost"] });
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByTestId("status-cards");
+    await user.click(screen.getByTestId("status-classes"));
+    const rows = await screen.findByTestId("cls-rows");
+    expect(rows.textContent).toContain("1 实例");
+    // 真源非零 → 删除按钮按服务端同一判据提前置灰
+    expect(screen.getByRole("button", { name: "删除 ghost" })).toBeDisabled();
+  });
+
   it("rename_suspects_pairs_offer_table_only_fix", async () => {
     renameSuspects.mockResolvedValue({
       unregistered: [{ label: "scratch", instances: 12 }],
@@ -557,5 +575,66 @@ describe("TilingPanel dry-run gate (batch 5)", () => {
     expect(screen.getByTestId("tile-confirm")).toBeDisabled();
     // 未手改名字时默认名跟行×列走
     expect((screen.getByLabelText("新数据集名") as HTMLInputElement).value).toBe("plate-tile3x2");
+  });
+});
+
+describe("ReviewFlow workspace", () => {
+  it("all_approved_open_renders_empty_pending_placeholder_without_crash", async () => {
+    // 回归（#137 同型实点白屏）：全量已审后打开标注审查——默认过滤 pending 为空，
+    // cur 与 annotation 同为 null，曾因 `annotation?.name === cur?.name` 误判读 null.j
+    // 渲染期炸树（无 error boundary 即整页白屏）。
+    get.mockResolvedValue({
+      ...baseMeta,
+      task_type: "classify",
+      classes: ["ng", "ok"],
+      review: {
+        counts: { pending: 0, approved: 2, rejected: 0, skipped: 0 },
+        done: 2,
+        total: 2,
+        unlabeled: 0,
+      },
+    });
+    vi.mocked(datasetsApi.reviewQueue).mockResolvedValue({
+      counts: { pending: 0, approved: 2, rejected: 0, skipped: 0, modified: 0 },
+      done: 2,
+      total: 2,
+      unlabeled: 0,
+      items: [
+        {
+          image: "/tmp/ds/plate/source/a.jpg",
+          label: "/tmp/ds/plate/source/a.json",
+          name: "a.jpg",
+          state: "approved",
+          effective: "approved",
+          reason: "",
+          note: "",
+          decided_at: "2026-11-22T10:00:00",
+          modified: false,
+          source: "",
+          susp: 0,
+          sources: [],
+        },
+        {
+          image: "/tmp/ds/plate/source/b.jpg",
+          label: "/tmp/ds/plate/source/b.json",
+          name: "b.jpg",
+          state: "approved",
+          effective: "approved",
+          reason: "",
+          note: "",
+          decided_at: "2026-11-22T10:00:00",
+          modified: false,
+          source: "",
+          susp: 0,
+          sources: [],
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    renderDetail();
+    await user.click(await screen.findByRole("button", { name: "标注审查 2/2" }));
+    // 待审过滤为空 → 空态占位而非炸树；页面其余部分仍在
+    expect(await screen.findByText(/该过滤下没有图片/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "标注审查 2/2" })).toHaveClass("active");
   });
 });

@@ -1,5 +1,6 @@
-import { BrowserRouter, Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { BrowserRouter, Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 import { AppShell } from "./shell/AppShell";
+import { ErrorBoundary } from "./shell/ErrorBoundary";
 import { OverviewPage } from "./pages/OverviewPage";
 import { DatasetsPage } from "./pages/DatasetsPage";
 import { DatasetDetailPage } from "./pages/DatasetDetailPage";
@@ -12,6 +13,18 @@ import { AgentPage } from "./pages/AgentPage";
 import { LogsPage } from "./pages/LogsPage";
 import { SystemPage } from "./pages/SystemPage";
 
+/** 布局路由：错误边界在壳内 Outlet 外——页内渲染异常保留侧栏/顶栏，换页自动复位 */
+function ShellLayout() {
+  const { pathname } = useLocation();
+  return (
+    <AppShell>
+      <ErrorBoundary resetKey={pathname}>
+        <Outlet />
+      </ErrorBoundary>
+    </AppShell>
+  );
+}
+
 /** v2 导航路由（Penpot「VisionTrainer v2」定稿）：/ 回落到总览；对比页留训练域
  * 不升导航（map §5 裁决）；日志退出侧导航但路由保留（入口在系统页）；
  * /deploy 页面为模型页（票 121），路由路径保持不变只换门牌。 */
@@ -19,7 +32,7 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route element={<AppShell><Outlet /></AppShell>}>
+        <Route element={<ShellLayout />}>
           <Route path="/" element={<Navigate to="/overview" replace />} />
           <Route path="/overview" element={<OverviewPage />} />
           <Route path="/datasets" element={<DatasetsPage />} />

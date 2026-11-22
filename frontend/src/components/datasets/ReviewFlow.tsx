@@ -394,7 +394,9 @@ export function ReviewFlow({
 
   const curSigned = cur ? signed[cur.image] : undefined;
   const canvasUrl = curSigned?.canvas?.url;
-  const curSvg = annotation?.name === cur?.name ? overlaySvgInner(annotation.j, meta.classes) : "";
+  // cur 锚定：默认过滤为空时 cur 与 annotation 同为 null，`?.name === cur?.name` 会
+  // undefined===undefined 误判成立而读 null.j 炸整树（React 无 boundary 即白屏）
+  const curSvg = cur && annotation && annotation.name === cur.name ? overlaySvgInner(annotation.j, meta.classes) : "";
 
   return (
     <div data-testid="review-flow">
