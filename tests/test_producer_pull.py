@@ -777,3 +777,35 @@ def test_staged_zip_expired_swept_on_list(pull_client, fake_producer, datasets_r
     assert [s["pull_id"] for s in pull_client.get(STAGED_PATH).json()] == [keep_id]
     assert not stale.exists()
     assert not stale.with_suffix(".json").exists()
+
+
+def test_discard_staged_pull_removes_zip_and_sidecar(pull_client, fake_producer, datasets_root):
+    """丢弃暂存包（人工处置出口）：DELETE 删 ZIP 与 sidecar、清单同步消失；
+    不动推理端样本状态（对端兜底是样本池重置，契约 §5.5）。再丢弃同包 404。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-drop", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="dropper").status_code == 200
+    r = _pull(pull_client, fake_producer, name="dropper")
+    assert r.status_code == 409
+    pull_id = r.json()["error"]["detail"]["staged_pull_id"]
+    stage = datasets_root / "producer_pulls"
+    assert (stage / f"{pull_id}.zip").is_file()
+
+    r = pull_client.delete(f"{STAGED_PATH}/{pull_id}")
+    assert r.status_code == 200, r.text
+    assert r.json() == {"discarded": pull_id}
+    assert not (stage / f"{pull_id}.zip").exists()
+    assert not (stage / f"{pull_id}.json").exists()
+    assert pull_client.get(STAGED_PATH).json() == []
+
+    # 再丢弃同一包：404 not_found（与已焚/已清扫同口径）
+    r = pull_client.delete(f"{STAGED_PATH}/{pull_id}")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"
+
+
+def test_discard_unknown_pull_id_404(pull_client):
+    """丢弃不存在的 pull_id（已焚/已清扫/写错）：404 not_found。"""
+    r = pull_client.delete(f"{STAGED_PATH}/nope")
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "not_found"

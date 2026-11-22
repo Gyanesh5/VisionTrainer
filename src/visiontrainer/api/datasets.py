@@ -750,4 +750,17 @@ def reimport_staged_pull(body: ProducerReimportBody, request: Request):
         return _error_response(exc)
 
 
+@router.delete("/producer-pulls/staged/{pull_id}")
+def discard_staged_pull(pull_id: str):
+    """丢弃暂存包（#132 保留策略的人工出口）：删本地 ZIP 与 sidecar，不动推理端
+    样本状态（对应样本停留 exported 态，重新进导出选集走对端样本池重置）。
+    pull_id 不存在（已焚/已清扫/写错）404 not_found。"""
+    from ..datasets import producer_pull
+
+    try:
+        return producer_pull.discard_staged(pull_id)
+    except DatasetError as exc:
+        return _error_response(exc)
+
+
 __all__ = ["router", "ErrorResponse"]

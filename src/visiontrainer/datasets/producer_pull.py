@@ -596,6 +596,23 @@ def list_staged(root: Path | None = None) -> list[dict]:
     return out
 
 
+def discard_staged(pull_id: str, root: Path | None = None) -> dict:
+    """丢弃暂存包（#132 保留策略的人工出口，与成功即焚/超期清扫并列）：删本地
+    ZIP 与 sidecar。
+
+    丢弃不回写推理端——对应样本停留在 exported 态待人工处置（重新进导出选集
+    的对端兜底是样本池重置动作，契约 §5.5）；pull_id 不存在（已焚/已清扫/写错）
+    → not_found。Returns: ``{"discarded": pull_id}``。
+    """
+    stage = _stage_dir(root)
+    zip_path = stage / f"{pull_id}.zip"
+    if not zip_path.is_file():
+        raise DatasetError("not_found", f"暂存包不存在或已清理：{pull_id}")
+    zip_path.unlink()
+    zip_path.with_suffix(".json").unlink(missing_ok=True)
+    return {"discarded": pull_id}
+
+
 def reimport_staged(*, name: str, pull_id: str, task_type: str | None = None,
                     classes: list[str] | None = None,
                     append_classes: list[str] | None = None,
