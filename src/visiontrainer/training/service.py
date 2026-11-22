@@ -607,6 +607,17 @@ def _snapshot_classes_of(run) -> list[str]:
     return ((snap or {}).get("classes") or {}).get("list") or []
 
 
+def _model_class_order(task_type: str, classes: list[str]) -> list[str]:
+    """发布面 classes 的 id 序对齐模型输出（ADR 0017）。
+
+    detect/segment/obb/pose = 表行序原样（txt-list + data.yaml，Ultralytics 认 yaml names，
+    模型 id 即行序）；classify = 字母序（训练目录真名，`check_cls_dataset` 按文件夹名
+    `sorted` 后 enumerate 编号）——XAL `*_cls` 按 `config.yaml classes[index]` 取名，
+    classes 序必须 = 模型输出 id 序，而非表序。
+    """
+    return sorted(classes) if task_type == "classify" else list(classes)
+
+
 def _dataset_meta_of_task(task) -> dict:
     """任务的数据集元数据（task_type/classes/source_dir…，读时组合视图）。
 
@@ -1362,7 +1373,8 @@ def deploy_run(manager, uid: str, model_lib_dir: str | None = None, wait: bool =
         "weights": best_pt, "run_dir": run.run_dir, "target_dir": str(target),
         "name": dir_name, "display_name": display_name, "family": family,
         "base_model": task.base_model, "task_type": task_type,
-        "classes": classes, "conf": conf, "iou": 0.45, "imgsz": imgsz,
+        "classes": _model_class_order(task_type, classes),
+        "conf": conf, "iou": 0.45, "imgsz": imgsz,
         "verify_image": verify_image,
     }
     export_dir = Path(run.run_dir) / "export"
@@ -1508,15 +1520,17 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
             "primary_metric": run.primary_metric,
             "base_model": task.base_model if task else None,
             "task_type": task_type,
-            "classes": classes,
+            "classes": _model_class_order(task_type, classes),
             "recommended_conf": conf,
             "recommended_conf_source": rec_source,
             "released_at": datetime.now().isoformat(timespec="seconds"),
         }
         (target / "metadata.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+        # 包内 classes.txt 行序 = 模型类别 id（契约 §4）：classify 按模型序（字母序，ADR 0017）
         (target / "classes.txt").write_text(
-            "\n".join(classes) + ("\n" if classes else ""), encoding="utf-8")
+            "\n".join(_model_class_order(task_type, classes)) + ("\n" if classes else ""),
+            encoding="utf-8")
         bundle = target / "bundle.zip"
         with zipfile.ZipFile(bundle, "w", zipfile.ZIP_STORED) as z:  # .pt 已压缩，STORED 快
             z.write(target / "best.pt", "best.pt")

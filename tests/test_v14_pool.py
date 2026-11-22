@@ -216,3 +216,45 @@ def test_float_canvas_size_not_broken(ctx):
     svc.validate_dataset_by_name("plate")
     run = _launch(ctx, _create(ctx, split_uid=ctx.split["uid"]))
     assert run["status"] == "done"
+
+
+# ---------------------------------------------------------------- classify 入口（ADR 0017：目录真名 + 字母序存档）
+
+
+def test_classify_run_entry_table_names_and_alphabetical_archive(tmp_path: Path):
+    """classify 逐 Run 入口（ADR 0017，#140）：目录名 = 类别表真名（无 {NN}_ 前缀，
+    Ultralytics 官方语义：文件夹字母序即模型 id）；data.yaml 仅作存档且 names 按
+    字母序记模型真实 id 语义；链接按标注 flags 真键归入对应类目录。"""
+    import yaml
+
+    from visiontrainer.datasets.pool import write_run_entry
+
+    ds_dir = tmp_path / "ds"
+    (ds_dir / "source").mkdir(parents=True)
+    images = ds_dir / "derived" / "yolo" / "images"
+    images.mkdir(parents=True)
+    for stem, flag in (("a", "zebra"), ("b", "apple")):
+        (images / f"{stem}.png").write_bytes(b"png")
+        (ds_dir / "source" / f"{stem}.json").write_text(json.dumps({
+            "version": "5.0.1", "shapes": [], "flags": {flag: True},
+            "imagePath": f"{stem}.png", "imageData": None}), encoding="utf-8")
+
+    run_dir = tmp_path / "run"
+    res = write_run_entry(run_dir, ds_dir, "classify",
+                          classes=["zebra", "apple"],
+                          class_map={"zebra": 0, "apple": 1},
+                          effective={"train": ["a.png"], "val": ["b.png"]})
+
+    entry = run_dir / "data"
+    # 目录真名：字母序 = apple:0, zebra:1（模型 id 语义）；旧 `{NN}_` 前缀目录不复活
+    assert sorted(p.name for p in (entry / "train").iterdir()) == ["apple", "zebra"]
+    assert sorted(p.name for p in (entry / "val").iterdir()) == ["apple", "zebra"]
+    assert not (entry / "train" / "00_zebra").exists()
+    # 链接按 flags 真键落位（symlink 优先、降级复制，exists 双兼容）
+    assert (entry / "train" / "zebra" / "a.png").exists()
+    assert (entry / "val" / "apple" / "b.png").exists()
+    # data.yaml 存档记模型真实 id 语义（字母序 names）；表行序回查唯一依据 = class_map 快照
+    meta = yaml.safe_load((entry / "data.yaml").read_text(encoding="utf-8"))
+    assert meta["names"] == ["apple", "zebra"]
+    assert res["data_yaml"] == str(entry)
+    assert res["format"]["class_map"] == {"zebra": 0, "apple": 1}
