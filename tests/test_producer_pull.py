@@ -441,6 +441,55 @@ def test_pull_classify_add_mode_out_of_table_blocks_then_append(pull_client, fak
     assert meta["validation_summary"]["total_images"] == 2
 
 
+def test_pull_classify_padded_alias_resolves_to_table_name(pull_client, fake_producer,
+                                                           datasets_root):
+    """前缀别名（#138）：部署模型类别名带 classify 训练入口 `{NN}_` 行序前缀（00_ng），
+    bundle 的 label/classes.txt 随之带前缀。已知表口径下按去前缀表名投影——add 模式
+    不产生表外类别 409、类别表不增行；create 显式类别同口径；去前缀仍不在表保持 409。"""
+    # 目标数据集 ng/ok（create 显式类别 + 无前缀 label 首批）
+    FakeProducerHandler.bundle = build_bundle(
+        [classify_sample("s-plug1", "ng"), classify_sample("s-plug2", "ok")],
+        ["ng", "ok"])
+    assert _pull(pull_client, fake_producer, task_type="classify",
+                 name="plug", classes=["ng", "ok"]).status_code == 200
+
+    # add 二批：模型 names 带前缀（00_ng）——别名命中表名 ng，投影落 ng 不增行
+    FakeProducerHandler.export_bodies = []
+    FakeProducerHandler.writeback_bodies = []
+    FakeProducerHandler.bundle = build_bundle(
+        [classify_sample("s-plug3", "00_ng")], ["00_ng", "01_ok"])
+    r = _pull(pull_client, fake_producer, mode="add", name="plug")
+    assert r.status_code == 200, r.text
+    src = datasets_root / "plug" / "source"
+    j = json.loads((src / "s-plug3_1_000000.json").read_text(encoding="utf-8"))
+    assert j["flags"] == {"ng": True}
+    assert "label" not in j
+    meta = pull_client.get("/api/v1/datasets/plug").json()
+    assert meta["classes"] == ["ng", "ok"]  # 前缀名不得经回填混进表
+    assert meta["validation_summary"]["total_images"] == 3
+
+    # create 显式类别同口径：请求 classes 含 ng，包 label 00_ng → 落 ng
+    FakeProducerHandler.export_bodies = []
+    FakeProducerHandler.writeback_bodies = []
+    FakeProducerHandler.bundle = build_bundle(
+        [classify_sample("s-new1", "01_ok")], ["00_ng", "01_ok"])
+    r = _pull(pull_client, fake_producer, task_type="classify",
+              name="plug-new", classes=["ng", "ok"])
+    assert r.status_code == 200, r.text
+    j = json.loads((datasets_root / "plug-new" / "source" / "s-new1_1_000000.json")
+                   .read_text(encoding="utf-8"))
+    assert j["flags"] == {"ok": True}
+
+    # 负例：去前缀仍不在表（05_weird）→ 保持表外 409，不静默改名
+    FakeProducerHandler.export_bodies = []
+    FakeProducerHandler.writeback_bodies = []
+    FakeProducerHandler.bundle = build_bundle(
+        [classify_sample("s-weird", "05_weird")], ["00_ng", "05_weird"])
+    r = _pull(pull_client, fake_producer, mode="add", name="plug")
+    assert r.status_code == 409
+    assert r.json()["error"]["detail"]["source_labels"] == ["05_weird"]
+
+
 def test_pull_invalid_base_url_400(pull_client):
     """显式 base_url 非法（非 http(s)）：400 invalid_args，不发起任何出站。"""
     r = _pull(pull_client, "ftp://bad")

@@ -65,6 +65,8 @@ samples 逐条：`sample_id, status, created_ts, site, task_id, task_type, frame
 
 训练平台侧消费：detect 直入托管导入链；classify 由训练平台投影（顶层 label→训练平台内部判类格式），消费面随其标注复核支持落地——格式义务已在 v1 冻结，推理端可先行按此出包。
 
+**前缀别名（#138，训练平台侧解析义务）**：classify 模型的类别名可能带训练入口目录的行序前缀（`{NN}_类名`，如 `00_ng`；训练平台为保 Ultralytics 文件夹字母序=类别行序而加，见其 spec 逐 Run 入口节）——此时包内 label/classes.txt 与训练平台目标数据集的类别表名不一致。义务在训练平台：投影时若 label 去前缀后命中目标类别表（create=请求显式类别，add=目标数据集类别表），按去前缀表名落 flags，不产生表外类别；推理端不感知此前缀，出包与判定配置维持模型 names 原样。
+
 ## 5. 协议层
 
 ### 5.1 控制面：无
