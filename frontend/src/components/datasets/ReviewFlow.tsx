@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   REVIEW_REASONS,
@@ -15,12 +15,14 @@ import { openZoom, setZoomFollow } from "./zoomViewer";
 
 /**
  * 标注审查工作区（M9 02 键盘流，专利 2/3/4/5 密集区）：
- * - 沉浸键盘流：三态判定（n 通过 / b 驳回+数字 1–4 直选理由 / s 跳过）+ ←/→ 前进队列，
- *   判定即写回并自动前进（在当前过滤子集内）；用物理键 code 匹配而非 key 名——
- *   中文输入法激活时浏览器把字母键的 key 上报成 "Process"，按 key 名匹配会整组失灵；
+ * - 沉浸键盘流：三态判定（n 通过 / b 驳回+数字 1–4 直选理由 / s 跳过）+ x 排除当前图
+ *   + ←/→ 前进队列，判定即写回并自动前进（在当前过滤子集内）；用物理键 code 匹配而非
+ *   key 名——中文输入法激活时浏览器把字母键的 key 上报成 "Process"，按 key 名匹配会整组失灵；
  * - 队列：source/ 下带 JSON 的图（负样本与已排除不入序列），可疑度降序（服务端排好）；
  * - 大图查看：Viewer.js 签名原图 box=0，follow 槽语义——大图开着才换图、关了不重开；
  * - 叠加色按类别序（专利 4）：同名类全数据集同色；
+ * - 画布固定窗口（--canvas-h）：图像按窗口 contain 放大（小图铺满不原尺寸居中），
+ *   控制按钮因此锚定工作区底部；classify 判类徽章贴图像右上角显眼展示（与叠加/图例同色板）；
  * - 滚动跟随（专利 5）：当前项不在胶片条可见窗内才跟随，用户滚动基线优先。
  */
 
@@ -65,6 +67,7 @@ export function ReviewFlow({
   const [error, setError] = useState<string | null>(null);
   const [signed, setSigned] = useState<Record<string, Signed>>({});
   const [annotation, setAnnotation] = useState<{ name: string; j: LabelJson | null } | null>(null);
+  const [natural, setNatural] = useState<{ w: number; h: number } | null>(null);
   const [helpOpen, setHelpOpen] = useState(false);
 
   // 面板重建即宣告旧 follow 闭包过期（其状态代已换新）——先摘除（旧 UI _VT.pop("follow") 语义）
@@ -288,6 +291,29 @@ export function ReviewFlow({
     [meta.name, onMessage, settleDecision],
   );
 
+  // ── 排除当前图：审查内直达排除记账（写排除日志，真源不动、出队剔除），
+  // 本地剔除当前项——索引原位即顶到下一张（末张由既有 idx 兜底收敛）；
+  // 提示收进「上次判定」pill（键盘流不弹 toast），恢复走「排除与恢复」面板
+  const excludeCur = useCallback(async () => {
+    const c = curRef.current;
+    if (!c) return;
+    setBusy(true);
+    try {
+      await datasetsApi.exclude(meta.name, [c.name], "审查排除");
+      setItems((prev) => prev.filter((it) => it.image !== c.image));
+      const t = new Date();
+      setLastDecide(
+        `${String(t.getHours()).padStart(2, "0")}:${String(t.getMinutes()).padStart(2, "0")} 已排除 ${c.name}`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
+      onChanged();
+    } catch (e) {
+      onMessage(e instanceof Error ? e.message : "排除失败", "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [meta.name, onMessage, onChanged, queryClient]);
+
   // ── 批量通过（#131）：当前过滤子集整体判定 approved——逐图走单判同一写路径，
   // 确认门显式报数（含已通过之外的判定翻转），取消不动任何一张
   const batchApprove = useCallback(async () => {
@@ -326,6 +352,8 @@ export function ReviewFlow({
         void decide("approved");
       } else if (e.code === "KeyS") {
         void decide("skipped");
+      } else if (e.code === "KeyX") {
+        void excludeCur();
       } else if (e.code === "KeyB" && !rejectOpenRef.current) {
         setRejectOpen(true);
       } else if (/^Digit[1-4]$/.test(e.code) && rejectOpenRef.current) {
@@ -334,7 +362,7 @@ export function ReviewFlow({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [go, decide]);
+  }, [go, decide, excludeCur]);
 
   // ── 胶片条滚动跟随（专利 5）：恢复的基线是用户滚动位置；当前项落在可见窗外才跟随
   const stripRef = useRef<HTMLDivElement | null>(null);
@@ -397,6 +425,22 @@ export function ReviewFlow({
   // cur 锚定：默认过滤为空时 cur 与 annotation 同为 null，`?.name === cur?.name` 会
   // undefined===undefined 误判成立而读 null.j 炸整树（React 无 boundary 即白屏）
   const curSvg = cur && annotation && annotation.name === cur.name ? overlaySvgInner(annotation.j, meta.classes) : "";
+  // classify 判类徽章（图像右上角显眼）：同一 cur 锚定口径；色取类别序色板（与叠加/图例同色）
+  const curFlag =
+    cur && annotation && annotation.name === cur.name && meta.task_type === "classify"
+      ? classifyFlag(annotation.j)
+      : null;
+  const curFlagColor = curFlag
+    ? labelColors({ shapes: [{ label: curFlag }] }, meta.classes)[curFlag]
+    : undefined;
+  // 图像宽高比（stage contain 放大的驱动）：标注 JSON 优先（叠加同源），JSON 缺宽高时
+  // 回退 img 自然尺寸（onLoad 采集），都没有按 1:1
+  const curAr =
+    cur && annotation && annotation.name === cur.name && annotation.j?.imageWidth && annotation.j?.imageHeight
+      ? annotation.j.imageWidth / annotation.j.imageHeight
+      : natural
+        ? natural.w / natural.h
+        : 1;
 
   return (
     <div data-testid="review-flow">
@@ -520,8 +564,14 @@ export function ReviewFlow({
               title="单击弹出大图查看器——滚轮缩放 / 拖拽平移 / 1:1 看像素 / 旋转 / 全屏（Esc 退出）"
             >
               {canvasUrl ? (
-                <div className="review-stage">
-                  <img className="review-img" src={canvasUrl} alt={cur?.name} decoding="async" />
+                <div className="review-stage" style={{ "--img-ar": curAr } as CSSProperties}>
+                  <img
+                    className="review-img"
+                    src={canvasUrl}
+                    alt={cur?.name}
+                    decoding="async"
+                    onLoad={(e) => setNatural({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+                  />
                   {curSvg && (
                     <svg
                       className="review-overlay"
@@ -530,6 +580,15 @@ export function ReviewFlow({
                       // eslint-disable-next-line react/no-danger
                       dangerouslySetInnerHTML={{ __html: curSvg }}
                     />
+                  )}
+                  {curFlag && (
+                    <div
+                      className="review-class-badge"
+                      data-testid="review-class-badge"
+                      style={{ color: curFlagColor, borderColor: curFlagColor }}
+                    >
+                      {curFlag}
+                    </div>
                   )}
                 </div>
               ) : (
@@ -586,6 +645,15 @@ export function ReviewFlow({
               </button>
               <button type="button" className="btn" disabled={busy} onClick={() => void decide("skipped")}>
                 跳过 s
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                title="排除当前图：写排除日志（真源不动、出队剔除；可在「排除与恢复」面板恢复）"
+                onClick={() => void excludeCur()}
+              >
+                排除 x
               </button>
               <button
                 type="button"
@@ -677,6 +745,7 @@ export function ReviewFlow({
                 ["n", "通过当前图（写回 checked:true，自动前进）"],
                 ["b", `驳回——数字 1–4 直选理由（${REVIEW_REASONS.map((r, i) => `${i + 1}=${r}`).join(" / ")}）`],
                 ["s", "跳过（计入完成度，不算通过）"],
+                ["x", "排除当前图（写排除日志移出队列；真源不动，可在「排除与恢复」面板恢复）"],
                 ["← / →", "上一张 / 下一张（在当前过滤子集内循环）"],
                 ["单击图片", "弹出大图查看器（Esc 退出；大图开着时 n/b/s/←/→ 同步生效，大图跟到新图）"],
                 ["点缩略图", "胶片条直达指定图"],

@@ -17,6 +17,7 @@ vi.mock("../../api/client", async (importOriginal) => {
       reviewDecide: vi.fn(),
       reviewReclassify: vi.fn(),
       reviewBatchApprove: vi.fn(),
+      exclude: vi.fn(),
       annotation: vi.fn(),
       exportReviewRejects: vi.fn(),
       xalOpen: vi.fn(),
@@ -31,6 +32,7 @@ const reviewQueue = vi.mocked(datasetsApi.reviewQueue);
 const reviewDecide = vi.mocked(datasetsApi.reviewDecide);
 const reviewReclassify = vi.mocked(datasetsApi.reviewReclassify);
 const reviewBatchApprove = vi.mocked(datasetsApi.reviewBatchApprove);
+const exclude = vi.mocked(datasetsApi.exclude);
 const annotation = vi.mocked(datasetsApi.annotation);
 const signUrls = vi.mocked(signThumbUrls);
 
@@ -128,6 +130,7 @@ beforeEach(() => {
     reason: body.reason ?? "",
     checked_synced: true,
   }));
+  exclude.mockImplementation(async (_n, files) => ({ excluded: [...files] }));
   annotation.mockResolvedValue({
     imageWidth: 100,
     imageHeight: 100,
@@ -223,6 +226,37 @@ describe("classify flag (linkage #131)", () => {
   });
 });
 
+describe("classify badge (画布右上角显眼)", () => {
+  const classifyMeta = { ...meta, task_type: "classify" as const, classes: ["occupied", "vacant"] };
+
+  it("classify_current_flag_renders_badge_with_class_palette_color", async () => {
+    // 当前图 flags 真键 → 画布右上角徽章常驻，色取类别序色板（与叠加/图例同源同色）
+    annotation.mockResolvedValue({ imageWidth: 100, imageHeight: 100, shapes: [], flags: { occupied: true } });
+    renderFlow(classifyMeta);
+    const badge = await screen.findByTestId("review-class-badge");
+    expect(badge.textContent).toBe("occupied");
+    const color = labelColors({ shapes: [{ label: "occupied" }] }, ["occupied", "vacant"]).occupied;
+    expect(badge).toHaveStyle({ color, borderColor: color });
+  });
+
+  it("detect_renders_no_badge_even_with_annotation", async () => {
+    // detect 改类走 XAL 改标注，徽章语义不适用（annotation 落位后仍不渲染）
+    renderFlow();
+    const flow = await screen.findByTestId("review-flow");
+    await waitFor(() => expect(flow.textContent).toContain("car ×1"));
+    expect(screen.queryByTestId("review-class-badge")).not.toBeInTheDocument();
+  });
+
+  it("classify_without_true_flag_renders_no_badge", async () => {
+    // 无真键 flags（负样本路径）不渲染徽章，交由图例行提示
+    annotation.mockResolvedValue({ imageWidth: 100, imageHeight: 100, shapes: [], flags: {} });
+    renderFlow(classifyMeta);
+    const flow = await screen.findByTestId("review-flow");
+    await waitFor(() => expect(flow.textContent).toContain("无判类"));
+    expect(screen.queryByTestId("review-class-badge")).not.toBeInTheDocument();
+  });
+});
+
 describe("classify reclassify (linkage #131)", () => {
   // classify 数据集：类别表 = flags 真键口径（契约 §4.5 投影后的判类词表）
   const classifyMeta = { ...meta, task_type: "classify" as const, classes: ["occupied", "vacant"] };
@@ -285,6 +319,33 @@ describe("batch approve (linkage #131)", () => {
     await user.click(screen.getByTestId("batch-confirm-no"));
     expect(reviewBatchApprove).not.toHaveBeenCalled();
     expect(screen.queryByTestId("batch-confirm")).not.toBeInTheDocument();
+  });
+});
+
+describe("exclude current image (审查内排除)", () => {
+  it("exclude_button_posts_relative_name_and_advances_in_place", async () => {
+    const user = userEvent.setup();
+    renderFlow();
+    await screen.findByTestId("review-flow");
+    // 直按即排除（单张可逆，恢复走「排除与恢复」面板，无确认门）
+    await user.click(screen.getByRole("button", { name: "排除 x" }));
+    // files 为相对 source/ 的文件名（与 annotation/判定同口径），理由固定「审查排除」
+    await waitFor(() => expect(exclude).toHaveBeenCalledWith("plate", ["a.png"], "审查排除"));
+    // 本地剔除当前项：索引原位顶到下一张（b 顶上，待审子集缩为 1）
+    await waitFor(() => expect(screen.getByText("b.png")).toBeInTheDocument());
+    expect(screen.getByText("1/1")).toBeInTheDocument();
+    // 上次判定 pill 记排除（键盘流不弹 toast）
+    await waitFor(() => expect(screen.getByTestId("review-flow").textContent).toContain("已排除 a.png"));
+  });
+
+  it("x_key_excludes_like_button", async () => {
+    renderFlow();
+    await screen.findByTestId("review-flow");
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { code: "KeyX", bubbles: true }));
+    });
+    await waitFor(() => expect(exclude).toHaveBeenCalledWith("plate", ["a.png"], "审查排除"));
+    await waitFor(() => expect(screen.getByText("b.png")).toBeInTheDocument());
   });
 });
 
