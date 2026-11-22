@@ -230,3 +230,56 @@ def test_annotation_returns_labelme_json_for_source_image(datasets_root, detect_
     assert r.status_code == 200 and r.json()["shapes"][0]["label"] == "car"
     r = client.get("/api/v1/datasets/plate/annotation", params={"image": "missing.png"})
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------- 列表卡封面（cover 字段）
+
+def _cover_names(cover: list[str]) -> list[str]:
+    from urllib.parse import unquote
+
+    return [unquote(u.split("&")[0].removeprefix("/api/v1/thumb?p=")) for u in cover]
+
+
+def test_list_cover_samples_source_and_skips_excluded(datasets_root, tmp_path, client):
+    """列表卡封面：source/ 均匀取样 4 张签名 URL；excluded 不进封面，XAL 回收区
+    （数据集根 `_delete_/`，source/ 兄弟目录）不在 source/ 列举内，天然不可见。"""
+    src = tmp_path / "src"
+    src.mkdir()
+    for i in range(8):
+        make_image(src, f"img{i}.png")
+    client.post("/api/v1/datasets", json=_create_body(source_path=str(src)))
+    ds_dir = datasets_root / "plate"
+    (ds_dir / "_delete_").mkdir(parents=True)
+    make_image(ds_dir / "_delete_", "recycled.png")  # 布局漂移哨兵：回收区落点不得进封面
+
+    rows = client.get("/api/v1/datasets").json()
+    cover = rows[0]["cover"]
+    assert len(cover) == 4 and all(u.startswith("/api/v1/thumb?") for u in cover)
+    source = ds_dir / "source"  # 出生即拷贝真源，封面指向托管 source/
+    assert _cover_names(cover) == [str(source / f"img{i}.png") for i in (0, 2, 4, 6)]  # sorted 均匀取样
+    assert all("recycled.png" not in u for u in cover)
+
+    # 排除项不进封面：excluded.json 记账后重取（7 张 → 过滤后列表索引 0/1/3/5）
+    svc.exclude_files("plate", ["img2.png"], reason="审查驳回")
+    cover = client.get("/api/v1/datasets").json()[0]["cover"]
+    names = _cover_names(cover)
+    assert len(cover) == 4 and all("img2.png" not in u for u in cover)
+    assert names == [str(source / f"img{i}.png") for i in (0, 1, 4, 6)]
+
+
+def test_list_cover_short_and_empty_and_external(datasets_root, tmp_path, client):
+    """不足 4 张按实际数；空数据集回 []；external 不带 cover 字段。"""
+    src = tmp_path / "few"
+    src.mkdir()
+    make_image(src, "a.png")
+    make_image(src, "b.png")
+    client.post("/api/v1/datasets", json=_create_body(name="few", source_path=str(src)))
+    svc.create_dataset("hollow", "detect", ["car"], "empty")  # 无图托管集
+    ext = tmp_path / "ext"
+    ext.mkdir()
+    svc.register_external("kaggle", "detect", str(ext))
+
+    rows = {r["name"]: r for r in client.get("/api/v1/datasets").json()}
+    assert len(rows["few"]["cover"]) == 2
+    assert rows["hollow"]["cover"] == []
+    assert "cover" not in rows["kaggle"]

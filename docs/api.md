@@ -26,7 +26,7 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/datasets` | 列表：task_type、managed/external、类别数、样本数、校验摘要、source_fingerprint 与「可能有变更」粗判；不再返回 active_manifest |
+| GET | `/api/v1/datasets` | 列表：task_type、managed/external、类别数、样本数、校验摘要、source_fingerprint 与「可能有变更」粗判；managed 另带 `cover:[≤4 条签名缩略图 URL]`（source/ 均匀取样，跳过 excluded 排除项，XAL 回收区在数据集根不进 source/ 列举；不足按实际数、0 张回 `[]`；URL 24h 过期，刷新即重签）；external 不带 cover；不再返回 active_manifest |
 | POST | `/api/v1/datasets` | 新建托管数据集（长操作：入图 + 校验 + 画像，不切分）。body: `{name, task_type, classes:[...], source_mode:empty\|images\|labeled, source_path?, transfer:copy\|move}`；labeled 态的 classes 为探测预填（`POST /datasets/probe-classes`）后确认值，表外类别 409 并列清单（detail.source_labels）；响应可带 drops `needs_confirm` |
 | POST | `/api/v1/datasets/probe-classes` | 已标目录类别探测（阶段 1c，向导「探测」按钮）：body `{src_dir, task_type}`，只读来源目录零写入；返回 `{labels:[去重排序], counts:{类别:次数}, images:图片数}`（shape label 口径，坏 JSON 跳过不炸）；目录不存在 400。结果不承重——确认后才写类别表，真正的表外类别由 `POST /datasets` 阻断 |
 | POST | `/api/v1/datasets/expand-paths` | 加图同名冲突的「跳过重试」载体（阶段 3b 补只读缺口）：body `{paths:[目录或文件], skip:[basename]}`，目录展开成图片+同词干 JSON 文件清单并按 basename 剔除（图片清单口径与校验同源 validate.list_images，负样本照投）；返回 `{files}`。零写入；前身是 NiceGUI 页面层 _expand_add_paths（React 前端无盘访问） |

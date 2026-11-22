@@ -722,6 +722,31 @@ body {
   font-size: var(--font-label);
 }
 
+/* 列表卡封面：cover 真图 2×2 宫格（不足 4 张缺位占位）。
+   minmax(0,…) + img min-height:0——压掉网格项自动最小尺寸，否则图片加载出
+   固有高度后 1fr 行被撑破 138px 封面区，图溢出盖住卡片文字 */
+.ds-card-cover {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch; /* 压掉 .ds-card-thumb 的 flex center——空占位 span 否则块向居中塌缩 0 高 */
+  gap: 2px;
+  padding: 2px;
+}
+
+.ds-card-cover img {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  object-fit: cover;
+  display: block;
+  border-radius: calc(var(--radius-ctl) / 2);
+}
+
+.ds-cover-ph {
+  background: var(--chrome-bg-hover);
+}
+
 .ds-card-body {
   display: flex;
   flex-direction: column;
@@ -1797,6 +1822,18 @@ body {
   color: var(--chrome-text-faint);
   font-size: 11px;
   cursor: pointer;
+  overflow: hidden;
+}
+
+.ov-gallery-ph.has-img {
+  padding: 0;
+}
+
+.ov-gallery-ph img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
 }
 
 .ov-gallery-group-note {

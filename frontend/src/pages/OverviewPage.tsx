@@ -13,7 +13,8 @@ import { fmtMetric, formatDuration, formatRunTs, runStatusMeta } from "../compon
  * （Agent 审批/标注审查/拉取暂存/校验红灯）→ 最近 Run → 最近数据集画廊 → 联动环。
  *
  * 诚实降级：待办中「标注审查/拉取暂存」无全站聚合端点，显示「—」并指引入口
- * （平台诚实原则——不显示猜出来的数字）；画廊缩略为占位块（列表端点不带图）。
+ * （平台诚实原则——不显示猜出来的数字）；画廊缩略走列表端点 cover 字段
+ * （source/ 取样签名 URL），缺图槽位保持占位块。
  */
 export function OverviewPage() {
   const navigate = useNavigate();
@@ -200,15 +201,20 @@ export function OverviewPage() {
             gallery.map((d) => (
               <div key={d.name} className="ov-gallery-group" data-testid={`ov-gallery-group-${d.name}`}>
                 <div className="ov-gallery-strip">
-                  {[0, 1, 2].map((i) => (
-                    <div
-                      key={i}
-                      className="ov-gallery-ph"
-                      role="button"
-                      aria-label={`打开数据集 ${d.name}`}
-                      onClick={() => navigate(`/datasets/${d.name}`)}
-                    />
-                  ))}
+                  {[0, 1, 2, 3].map((i) => {
+                    const url = d.cover?.[i];
+                    return (
+                      <div
+                        key={i}
+                        className={`ov-gallery-ph ${url ? "has-img" : ""}`}
+                        role="button"
+                        aria-label={`打开数据集 ${d.name}`}
+                        onClick={() => navigate(`/datasets/${d.name}`)}
+                      >
+                        {url && <img src={url} alt="" loading="lazy" />}
+                      </div>
+                    );
+                  })}
                 </div>
                 <span className="ov-gallery-group-note tnum">
                   {d.name} · {d.images ?? "—"} 图

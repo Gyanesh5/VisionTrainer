@@ -175,7 +175,7 @@ describe("OverviewPage", () => {
       task("e2e_b", [runBrief("cccc2222dddd3333", { started_at: "2026-11-19T09:00:00", primary_metric: 1 })]),
     ]);
     datasetsList.mockResolvedValue([
-      dataset("busbar-circle", { images: 1069 }),
+      dataset("busbar-circle", { images: 1069, cover: ["/t/a.jpg", "/t/b.jpg"] }),
       dataset("circle-mix", { images: 1500, created_at: "2026-11-02T00:00:00" }),
     ]);
     renderOverview();
@@ -184,8 +184,14 @@ describe("OverviewPage", () => {
     expect(screen.getByTestId("ov-runs").textContent).toContain("✓ 完成");
     expect(screen.getByTestId("ov-gallery").textContent).toContain("busbar-circle · 1069 图");
     expect(screen.getByTestId("ov-gallery").textContent).toContain("circle-mix · 1500 图");
-    // 每组 3 个占位块
-    expect(screen.getAllByRole("button", { name: "打开数据集 busbar-circle" })).toHaveLength(3);
+    // 每组 4 个槽位：cover 不足的缺位保持占位块
+    expect(screen.getAllByRole("button", { name: "打开数据集 busbar-circle" })).toHaveLength(4);
+    const busbarGroup = screen.getByTestId("ov-gallery-group-busbar-circle");
+    expect(busbarGroup.querySelectorAll("img")).toHaveLength(2);
+    expect(busbarGroup.querySelectorAll(".ov-gallery-ph:not(.has-img)")).toHaveLength(2);
+    const circleGroup = screen.getByTestId("ov-gallery-group-circle-mix");
+    expect(circleGroup.querySelectorAll("img")).toHaveLength(0);
+    expect(circleGroup.querySelectorAll(".ov-gallery-ph")).toHaveLength(4);
   });
 
   it("shows_linkage_bar_with_producer_url_and_latest_release", async () => {

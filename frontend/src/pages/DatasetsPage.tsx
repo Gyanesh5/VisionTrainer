@@ -12,12 +12,13 @@ import { CreateDatasetDialog } from "../components/datasets/CreateDatasetDialog"
 import { ProducerPullDialog } from "../components/datasets/ProducerPullDialog";
 
 /**
- * 数据集列表（v2 03 屏，Penpot「VisionTrainer v2」定稿）：画廊卡片网格（缩略占位区
+ * 数据集列表（v2 03 屏，Penpot「VisionTrainer v2」定稿）：画廊卡片网格（封面区
  * + 名称/校验态 + 任务类型/形态 chips + 统计行）+ 名称/类型过滤行 + 主操作唯一化。
  *
  * 校验态与「可能有变更」都是服务端摘要字段（list_datasets 一次算好），徽章只做显示；
  * 卡片点击进详情路由。长操作（创建/探测）进度走 operation.updated 门铃 + 登记表读。
- * 缩略图区为占位底（列表端点不带图，平台诚实原则——不放猜出来的内容）。
+ * 封面为服务端 cover 字段的 2×2 真图宫格（source/ 取样签名 URL）；cover 空
+ * （空数据集/external）回退任务类型占位底。
  */
 
 type ValKind = "ok" | "problems" | "unchecked";
@@ -34,14 +35,27 @@ const VAL_META: Record<ValKind, { label: string; mark: string; cls: string }> = 
   unchecked: { label: "未校验", mark: "−", cls: "is-unverified" },
 };
 
-/** 列表卡片（v2 画廊形态）：缩略占位 + 校验态徽章 + 类型/形态 chips + 统计行 */
+/** 列表卡片（v2 画廊形态）：封面 2×2 宫格 + 校验态徽章 + 类型/形态 chips + 统计行 */
 export function DatasetCard({ d, onOpen }: { d: DatasetBrief; onOpen: () => void }) {
   const meta = VAL_META[valKind(d)];
+  const cover = d.cover ?? [];
   return (
     <button type="button" className="ds-card" data-testid="dataset-card" onClick={onOpen}>
-      <span className="ds-card-thumb" aria-hidden="true">
-        {TASK_TYPE_ZH[d.task_type]}
-      </span>
+      {cover.length > 0 ? (
+        <span className="ds-card-thumb ds-card-cover" aria-hidden="true">
+          {[0, 1, 2, 3].map((i) =>
+            cover[i] ? (
+              <img key={i} src={cover[i]} alt="" loading="lazy" />
+            ) : (
+              <span key={i} className="ds-cover-ph" />
+            ),
+          )}
+        </span>
+      ) : (
+        <span className="ds-card-thumb" aria-hidden="true">
+          {TASK_TYPE_ZH[d.task_type]}
+        </span>
+      )}
       <span className="ds-card-body">
         <span className="ds-card-head">
           <span className="ds-card-name">{d.name}</span>
