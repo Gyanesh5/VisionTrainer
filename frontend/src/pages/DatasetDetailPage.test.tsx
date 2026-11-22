@@ -39,6 +39,8 @@ vi.mock("../api/client", async (importOriginal) => {
       exportAnnotations: vi.fn(),
       tilePreview: vi.fn(),
       tile: vi.fn(),
+      reviewQueue: vi.fn(),
+      annotation: vi.fn(),
     },
     operationsApi: { snapshot: vi.fn() },
   };
@@ -557,5 +559,66 @@ describe("TilingPanel dry-run gate (batch 5)", () => {
     expect(screen.getByTestId("tile-confirm")).toBeDisabled();
     // 未手改名字时默认名跟行×列走
     expect((screen.getByLabelText("新数据集名") as HTMLInputElement).value).toBe("plate-tile3x2");
+  });
+});
+
+describe("ReviewFlow workspace", () => {
+  it("all_approved_open_renders_empty_pending_placeholder_without_crash", async () => {
+    // 回归（#137 同型实点白屏）：全量已审后打开标注审查——默认过滤 pending 为空，
+    // cur 与 annotation 同为 null，曾因 `annotation?.name === cur?.name` 误判读 null.j
+    // 渲染期炸树（无 error boundary 即整页白屏）。
+    get.mockResolvedValue({
+      ...baseMeta,
+      task_type: "classify",
+      classes: ["ng", "ok"],
+      review: {
+        counts: { pending: 0, approved: 2, rejected: 0, skipped: 0 },
+        done: 2,
+        total: 2,
+        unlabeled: 0,
+      },
+    });
+    vi.mocked(datasetsApi.reviewQueue).mockResolvedValue({
+      counts: { pending: 0, approved: 2, rejected: 0, skipped: 0, modified: 0 },
+      done: 2,
+      total: 2,
+      unlabeled: 0,
+      items: [
+        {
+          image: "/tmp/ds/plate/source/a.jpg",
+          label: "/tmp/ds/plate/source/a.json",
+          name: "a.jpg",
+          state: "approved",
+          effective: "approved",
+          reason: "",
+          note: "",
+          decided_at: "2026-11-22T10:00:00",
+          modified: false,
+          source: "",
+          susp: 0,
+          sources: [],
+        },
+        {
+          image: "/tmp/ds/plate/source/b.jpg",
+          label: "/tmp/ds/plate/source/b.json",
+          name: "b.jpg",
+          state: "approved",
+          effective: "approved",
+          reason: "",
+          note: "",
+          decided_at: "2026-11-22T10:00:00",
+          modified: false,
+          source: "",
+          susp: 0,
+          sources: [],
+        },
+      ],
+    });
+    const user = userEvent.setup();
+    renderDetail();
+    await user.click(await screen.findByRole("button", { name: "标注审查 2/2" }));
+    // 待审过滤为空 → 空态占位而非炸树；页面其余部分仍在
+    expect(await screen.findByText(/该过滤下没有图片/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "标注审查 2/2" })).toHaveClass("active");
   });
 });
