@@ -729,6 +729,7 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: stretch; /* 压掉 .ds-card-thumb 的 flex center——空占位 span 否则块向居中塌缩 0 高 */
   gap: 2px;
   padding: 2px;
 }
