@@ -32,7 +32,6 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import re
 import shutil
 import tempfile
 import time
@@ -194,10 +193,7 @@ def _normalize_review_keys(unpack: Path) -> int:
     return changed
 
 
-_PADDED_ALIAS_RE = re.compile(r"\d+_(.+)")
-
-
-def _project_classify_labels(unpack: Path, known: set[str] | None = None) -> int:
+def _project_classify_labels(unpack: Path) -> int:
     """classify 消费投影（#131，契约 §4.5）：包内顶层 ``label`` 键 → ``flags`` 布尔真键。
 
     推理端 classify 包形态 = ``{"shapes": [], "label": "X"}``（预测类名∈classes.txt），
@@ -206,15 +202,9 @@ def _project_classify_labels(unpack: Path, known: set[str] | None = None) -> int
     ``flags["X"] = true``、删除顶层 ``label``，既有 flags 键原样保留（真键判类取首个
     真键，目标类追加为真即被选中）。坏 JSON 不动（归导入链校验红灯管）。
 
-    前缀别名解析（#138）：部署模型的类别名带 classify 训练入口的 ``{NN}_`` 行序前缀
-    （``pool.write_run_entry`` 目录命名，保文件夹字母序=类别表行序），bundle 的 label
-    与 classes.txt 随之带前缀。label **自身不在 known 且去前缀后在 known** 时按去前缀名
-    投影——类别表是 master（ADR 0009），``{NN}_`` 只是训练目录的物理命名，不得经拉取
-    回填混进表里；表里真有 ``00_ng`` 这类名字时不改（精确命中优先）。
-
-    Args:
-        known: 目标类别表（create=请求显式 classes；add=目标数据集类别表）。
-            None/空 = 无表可依（包内自洽派生），不解析别名。
+    不做前缀别名翻译（用户裁决 2026-11-22，ADR 0017 无向后兼容）：旧版模型的
+    ``{NN}_`` 前缀类名按表外类别正常阻断（一键回填可显式追加）；前缀已随 ADR 0017
+    从训练目录撤销，新训模型 names 为真名。
 
     Returns: 改写文件数。
     """
@@ -229,10 +219,6 @@ def _project_classify_labels(unpack: Path, known: set[str] | None = None) -> int
         label = data.get("label")
         if not isinstance(label, str) or not label:
             continue
-        if known and label not in known:
-            m = _PADDED_ALIAS_RE.fullmatch(label)
-            if m and m.group(1) in known:
-                label = m.group(1)
         flags = data.get("flags")
         flags = dict(flags) if isinstance(flags, dict) else {}
         flags[label] = True
@@ -468,14 +454,11 @@ def _ingest_unpack(unpack: Path, manifest: dict, *, mode: str, name: str,
     # （body 的 task_type 缺省 detect，不作为 add 模式判据）
     if mode == "create":
         is_classify = task_type == "classify"
-        # 前缀别名（#138）只认请求显式类别表——包内自洽派生的表可能本身带前缀，不能自证
-        known = {str(c).strip() for c in classes or [] if str(c).strip()} or None
     else:
         ds_dir = svc._ds_dir(name, root)
         target_meta = svc._read_meta(ds_dir / "dataset.json")
         is_classify = (target_meta.get("task_type") or task_type) == "classify"
-        known = set(svc.read_classes(ds_dir)) if is_classify else None
-    projected = _project_classify_labels(unpack, known=known) if is_classify else 0
+    projected = _project_classify_labels(unpack) if is_classify else 0
 
     if progress_cb is not None:
         progress_cb("解包归一", len(sample_ids), len(sample_ids))
