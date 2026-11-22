@@ -7,15 +7,16 @@ import { fmtMetric, formatRunTs, modelShort, runStatusMeta, SOURCE_ZH } from "..
 import { TrainingWizard } from "../components/training/TrainingWizard";
 
 /**
- * 训练页（票 110 批 1，表面族 D 监控 + F 表格）：队列总貌卡 + 训练记录单表。
+ * 训练页（v2 05 屏 Run Hub）：队列状态卡 + 按任务分组的训练记录单表。
  *
  * 数据纪律（map §5）：queue.updated / run.status / task.updated / run.metrics 事件当
- * 门铃、REST 补齐，不轮询。记录单表（专利 6）：数据集分组组头灰带 colspan + Run 行
- * 同表；组头折叠状态记忆（localStorage）；取消轮含零 epoch 空轮一律留档「共 0 epoch」；
- * 任务新在前、轮次升序（服务端 list_tasks 口径，此处保序渲染）。
+ * 门铃、REST 补齐，不轮询。记录单表（专利 6）：任务分组组头灰带 colspan + Run 行
+ * 同表（v2 定稿：任务名上组头，Run 行七列）；组头折叠状态记忆（localStorage）；
+ * 取消轮含零 epoch 空轮一律留档「共 0 epoch」；任务新在前、轮次升序
+ * （服务端 list_tasks 口径，此处保序渲染）。
  */
 
-const RECORD_COLUMNS = 8;
+const RECORD_COLUMNS = 7;
 
 /** 组头折叠记忆（旧 UI state["open_groups"] 的 localStorage 版；缺省展开） */
 const GROUPS_KEY = "vt.training.openGroups";
@@ -51,7 +52,8 @@ function buildRows(tasks: TaskBrief[], openGroups: Record<string, boolean>): Dis
   const groups = new Map<string, RunRow[]>();
   for (const t of tasks) {
     for (const r of t.runs) {
-      const key = t.dataset || "（未知数据集）";
+      // v2 05 屏：按任务分组（任务名即组，Run 行不再重复任务列）
+      const key = t.name;
       const list = groups.get(key) ?? [];
       // 服务端任务新在前（id desc）、组内轮次升序（round_no asc）——此处保序
       list.push({ task: t, run: r, sortTime: r.started_at || t.created_at || "" });
@@ -137,10 +139,16 @@ export function TrainingPage() {
     .map((uid, i) => ({ pos: i + 1, hit: runIndex.get(uid) }))
     .filter((x) => x.hit !== undefined);
 
+  const runsTotal = tasks.reduce((n, t) => n + t.runs.length, 0);
+  const queueState = running ? "训练中" : queued.length ? `排队 ${queued.length}` : "队列空闲";
+
   return (
     <div className="page-body">
       <div className="page-head">
         <h1>训练</h1>
+        <p className="placeholder-note tnum">
+          {tasks.length} 个任务 · {runsTotal} 条训练记录 · {queueState}
+        </p>
         <div className="page-actions">
           <Link className="btn" data-testid="open-compare" to="/training/compare">
             跨任务对比
@@ -163,16 +171,20 @@ export function TrainingPage() {
         </div>
       )}
 
-      {/* ── 队列总貌（D 族 L1：只监不控，几秒扫完） */}
+      {/* ── 队列状态卡（v2 05 屏：状态点 + 标题 + 说明一行；D 族 L1 只监不控） */}
       <div className="card" data-testid="queue-card">
-        <h2 className="card-title">队列</h2>
         {queueQ.isError ? (
           <p className="error-note">队列状态读取失败：{queueQ.error.message}</p>
         ) : queue === null ? (
           <p className="placeholder-note">读取队列…</p>
         ) : !running && queued.length === 0 ? (
-          <p className="placeholder-note" data-testid="queue-idle">
-            队列空闲——单飞一次一个 Run，提交训练任务后在此排队。
+          <p className="queue-line" data-testid="queue-idle">
+            <span className="queue-dot idle" aria-hidden="true" />
+            <span className="queue-title">队列空闲</span>
+            <span className="form-hint">
+              单飞一次一个 Run · 提交训练任务后在此排队
+              {queue?.block_reason ? ` · ${queue.block_reason}` : ""}
+            </span>
           </p>
         ) : (
           <div className="queue-panel">
@@ -182,7 +194,7 @@ export function TrainingPage() {
                   <span aria-hidden="true">{runStatusMeta(running.run.status).mark}</span>{" "}
                   {runStatusMeta(running.run.status).label}
                 </span>
-                <span>{running.task.name} · 轮 {running.run.round_no}</span>
+                <span className="queue-title">{running.task.name} · 轮 {running.run.round_no}</span>
                 {running.run.progress && <span className="tnum queue-progress">{running.run.progress}</span>}
                 {running.run.prog_frac !== null && running.run.prog_frac !== undefined && (
                   <span className="queue-bar" aria-hidden="true">
@@ -215,7 +227,7 @@ export function TrainingPage() {
         )}
       </div>
 
-      {/* ── 训练记录单表（专利 6）：组头灰带 + Run 行同表 */}
+      {/* ── 训练记录单表（专利 6 + v2 05 屏）：任务组头灰带 + Run 行七列同表 */}
       <div className="card">
         <h2 className="card-title">训练记录</h2>
         {tasksQ.isPending ? (
@@ -228,8 +240,7 @@ export function TrainingPage() {
           <table className="data-table run-table">
             <thead>
               <tr>
-                <th>任务</th>
-                <th>轮</th>
+                <th>Run</th>
                 <th>预训练权重</th>
                 <th>状态</th>
                 <th>进度</th>
@@ -276,10 +287,10 @@ function RunRowEl({ row }: { row: RunRow }) {
   const running = run.status === "running";
   return (
     <tr className="run-row" data-testid={`run-${run.uid}`}>
+      {/* v2 05 屏：任务名上组头，Run 行首列 = 轮号链接 */}
       <td>
-        <Link className="run-link" to={`/training/runs/${run.uid}`}>{task.name}</Link>
+        <Link className="run-link tnum" to={`/training/runs/${run.uid}`}>轮 {run.round_no}</Link>
       </td>
-      <td className="tnum num">{run.round_no}</td>
       <td>{modelShort(task.base_model)}</td>
       <td>
         <span className={`badge ${meta.cls}`} data-testid={`run-status-${run.uid}`} title={run.error ?? meta.label}>
@@ -296,7 +307,9 @@ function RunRowEl({ row }: { row: RunRow }) {
         )}
       </td>
       <td className="num tnum">{fmtMetric(run.primary_metric)}</td>
-      <td>{SOURCE_ZH[task.source ?? "manual"] ?? task.source}</td>
+      <td className={task.source === "agent" ? "src-agent" : undefined}>
+        {SOURCE_ZH[task.source ?? "manual"] ?? task.source}
+      </td>
       <td className="tnum">{formatRunTs(run.started_at ?? task.created_at ?? null)}</td>
     </tr>
   );

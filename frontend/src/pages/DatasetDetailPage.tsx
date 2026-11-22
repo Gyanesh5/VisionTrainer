@@ -185,17 +185,17 @@ export function DatasetDetailPage() {
         </div>
       )}
 
-      {/* 页头：徽章行 + 工具条（spec §2.1） */}
+      {/* 页头状态行（v2 04 屏）：chips + 动作区（primary 唯一 = 用此数据集训练；删除 crit 描边） */}
       <div className="card">
         <div className="detail-head">
           <div className="ds-card-tags">
-            <span className="badge is-unregistered">{TASK_TYPE_ZH[meta.task_type]}</span>
-            <span className="badge is-unregistered">{managed ? "托管" : "外部"}</span>
+            <span className="chip">{TASK_TYPE_ZH[meta.task_type]}</span>
+            <span className="chip">{managed ? "托管" : "外部"}</span>
             <span className={`badge ${okBadge.cls}`} data-testid="detail-val-badge">
               <span aria-hidden="true">{okBadge.mark}</span> {okBadge.label}
             </span>
             {meta.fingerprint_stale === true && (
-              <span className="badge is-warning" title="source/ 当前指纹与上次校验记录的指纹不一致——打开详情页即自动对账（重校验 + 重算画像），无常驻监视">
+              <span className="chip warn" title="source/ 当前指纹与上次校验记录的指纹不一致——打开详情页即自动对账（重校验 + 重算画像），无常驻监视">
                 账本落后真源
               </span>
             )}
@@ -313,14 +313,14 @@ export function DatasetDetailPage() {
         </div>
       )}
 
-      {/* 工作区入口行：状态卡之外的工作区（审查/体检）从这里进；全部区也可直达 */}
+      {/* 工作区入口行（v2 04 屏 tab 形态）：状态卡之外的工作区（审查/体检）从这里进 */}
       {managed && (
-        <div className="ws-nav" role="group" aria-label="工作区导航">
+        <div className="tab-row" role="group" aria-label="工作区导航">
           {(["source", "classes", "validation", "audit", "review", "exclude", "tiling", "health"] as WsKey[]).map((key) => (
             <button
               key={key}
               type="button"
-              className={`level-btn ${openWs === key ? "active" : ""}`}
+              className={`tab-btn ${openWs === key ? "active" : ""}`}
               onClick={() => openSection(key)}
             >
               {WS_TITLES[key]}
@@ -428,13 +428,14 @@ function StatusCard({
   line: string;
   onClick: () => void;
 }) {
+  // v2 04 屏概览卡形态：标题 + 右上状态徽章 + 摘要行
   return (
-    <button type="button" className="status-card" data-testid={`status-${id}`} onClick={onClick}>
-      <span className="status-card-head">
-        <span className="status-title">{title}</span>
+    <button type="button" className="stat-card" data-testid={`status-${id}`} onClick={onClick}>
+      <span className="stat-card-head">
+        <span className="stat-title">{title}</span>
         <span className={`badge ${status.cls}`}>{status.text}</span>
       </span>
-      <span className="status-card-line">{line}</span>
+      <span className="stat-card-line">{line}</span>
     </button>
   );
 }

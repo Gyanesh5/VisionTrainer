@@ -232,7 +232,9 @@ export function RunDetailPage() {
                   onClick={() => setReleaseOpen(true)}>
                   发布给推理端
                 </button>
-                <button type="button" className="btn btn-primary" data-testid="run-deploy"
+                {/* v2 07 屏：唯一 primary = 发布给推理端；部署/续训/错误分析均次级 */}
+                <button type="button" className="btn" data-testid="run-deploy"
+                  title="导出 ONNX 组装进标注端模型库目录（只增不改，旧版本保留）"
                   onClick={() => setDeployOpen(true)}>
                   部署到标注端
                 </button>

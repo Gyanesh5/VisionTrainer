@@ -175,16 +175,16 @@ describe("TrainingPage 记录单表（专利 6）", () => {
     renderTrainingPage();
     const tbody = await screen.findByTestId("records-rows");
     // 组头灰带 colspan 占满单表全列
-    const weldBand = within(tbody).getByTestId("group-weld");
-    expect(weldBand.firstElementChild).toHaveAttribute("colspan", "8");
-    expect(within(tbody).getByTestId("group-plate")).toBeInTheDocument();
+    const weldBand = within(tbody).getByTestId("group-焊缝检测");
+    expect(weldBand.firstElementChild).toHaveAttribute("colspan", "7");
+    expect(within(tbody).getByTestId("group-钢板缺陷")).toBeInTheDocument();
     // Run 行与组头同表：uid 可定位
     expect(within(tbody).getByTestId("run-ffff6666")).toBeInTheDocument();
     expect(within(tbody).getByTestId("run-aaaa1111")).toBeInTheDocument();
     // 任务新在前（weld 组行先于 plate 组行）
     const groupIdx = (name: string) =>
       [...tbody.querySelectorAll("tr")].findIndex((tr) => tr.dataset.testid === `group-${name}`);
-    expect(groupIdx("weld")).toBeLessThan(groupIdx("plate"));
+    expect(groupIdx("焊缝检测")).toBeLessThan(groupIdx("钢板缺陷"));
     // 组内轮次升序（轮 1 行先于轮 2 行）
     const rowIdx = (uid: string) =>
       [...tbody.querySelectorAll("tr")].findIndex((tr) => tr.dataset.testid === `run-${uid}`);
@@ -215,7 +215,7 @@ describe("TrainingPage 记录单表（专利 6）", () => {
     mockDefault();
     renderTrainingPage();
     const row = await screen.findByTestId("run-ffff6666");
-    const link = within(row).getByText("焊缝检测");
+    const link = within(row).getByText("轮 2");
     expect(link.closest("a")).toHaveAttribute("href", "/training/runs/ffff6666");
   });
 
@@ -224,15 +224,15 @@ describe("TrainingPage 记录单表（专利 6）", () => {
     const user = userEvent.setup();
     renderTrainingPage();
     await screen.findByTestId("run-ffff6666");
-    await user.click(screen.getByTestId("group-weld"));
+    await user.click(screen.getByTestId("group-焊缝检测"));
     // 折叠后组内 Run 行出表
     await waitFor(() => expect(screen.queryByTestId("run-ffff6666")).not.toBeInTheDocument());
     // 折叠状态记忆：localStorage 落盘，重挂载后保持
-    expect(JSON.parse(localStorage.getItem("vt.training.openGroups") ?? "{}")).toEqual({ weld: false });
+    expect(JSON.parse(localStorage.getItem("vt.training.openGroups") ?? "{}")).toEqual({ '焊缝检测': false });
     renderTrainingPage();
-    await waitFor(() => expect(screen.getByTestId("group-weld")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByTestId("group-焊缝检测")).toBeInTheDocument());
     expect(screen.queryByTestId("run-ffff6666")).not.toBeInTheDocument();
-    await user.click(screen.getByTestId("group-weld"));
+    await user.click(screen.getByTestId("group-焊缝检测"));
     await waitFor(() => expect(screen.getByTestId("run-ffff6666")).toBeInTheDocument());
   });
 });

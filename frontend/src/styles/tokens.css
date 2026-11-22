@@ -1,6 +1,8 @@
 /*
- * 设计令牌层——唯一合法取值，来源 DESIGN.md §2/§3/§4（真相源，变更走提案制）。
+ * 设计令牌层——唯一合法取值，来源 Penpot「VisionTrainer v2 重设计」B 案（品类亮色，2026-11-22 定稿）。
  * 组件样式只允许引用这里的变量，禁止硬编码色值。
+ * B 案要点：白卡浮于冷灰页底；单 accent（#4C6EF5）+ 浅 accent 底（#EEF2FF）；
+ * 语义色沿用 v1（crit/warn/ok/stale/manual）；vp 深色区沿用 r.* 深色。
  */
 
 :root {
@@ -12,23 +14,32 @@
   --vp-text: #e8edf2; /* 主文字 */
   --vp-text-dim: #8899aa;
 
-  /* §2.2 参数/报警 chrome 区——浅灰底：表单、表格、报警列表、导航 */
-  --chrome-bg: #f4f5f3;
+  /* §2.2 chrome 区——B 案品类亮色：冷灰页底 + 白卡面 */
+  --page-bg: #f5f6f8; /* 页面底 */
+  --chrome-bg: #f5f6f8; /* 兼容旧引用 = 页面底 */
+  --chrome-bg-hover: #edf0f4; /* 行 hover / 表组头灰带 / 控件禁用底 */
+  --chrome-bg-soft: #f7f8fa; /* 卡内嵌套分组底（工具组、折叠条） */
   --chrome-surface: #ffffff;
-  --chrome-border: #d9d7d1;
-  --chrome-text: #2b2e33;
-  --chrome-text-dim: #75787d;
-  --chrome-accent: #2f66d0; /* 唯一 accent：主操作/选中/当前项 */
+  --chrome-border: #e4e7ec;
+  --chrome-text: #1f2429;
+  --chrome-text-dim: #6b7280;
+  --chrome-text-faint: #9aa3ae; /* 占位符/空态 */
+  --chrome-accent: #4c6ef5; /* 唯一 accent：主操作/选中/当前项 */
+  --accent-soft: #eef2ff; /* accent 浅底（选中态、soft chip） */
 
   /* §3 语义色（≤8，只做其语义，不进分类色板） */
   --alarm-critical: #b3261e; /* 校验红灯、Run failed；唯一允许闪烁的语义 */
   --alarm-warning: #c08a00; /* 校验琥珀条、漂移提醒、退出码异常 */
   --state-ok: #2e6b46; /* Run done、校验通过、部署验证落定 */
   --state-stale: #6b5518; /* WS 断流/画像体检过期 */
-  --state-running: #2f66d0; /* Run running/queued（仅限状态灯） */
+  --state-running: #4c6ef5; /* Run running/queued（仅限状态灯） */
   --state-manual: #8c5a00; /* 手动语义 */
-  --action-primary: #2f66d0; /* 主按钮 */
+  --action-primary: #4c6ef5; /* 主按钮 */
   --ng-mark: #b3261e; /* 错误分析 FP/误检标记 */
+
+  /* chip 浅底（语义色 10% 档，来自 v2 定稿屏） */
+  --chip-warn-bg: #fdf6e7;
+  --chip-crit-bg: #fbedec;
 
   /* §4 刻度与排版 */
   --space-1: 8px;
@@ -36,14 +47,18 @@
   --space-3: 24px;
   --space-4: 32px;
   --space-5: 48px;
-  --font-ui: Inter, "Noto Sans SC", system-ui, sans-serif;
-  --font-mono: ui-monospace, "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
-  --font-body: 15px; /* 正文 ≥15px */
-  --font-label: 13px; /* 标签 12–13px */
-  --shell-topbar: 62px; /* 六导航壳顶栏高度（票 107） */
+  --radius-card: 8px; /* 卡片/面板 */
+  --radius-ctl: 6px; /* 按钮/输入/chip */
+  --font-ui: "Noto Sans SC", Inter, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+  --font-body: 14px; /* 正文（v2 定稿密度） */
+  --font-label: 12px; /* 标签 */
+  --font-table: 13px; /* 数据表行（v2 密集表） */
+  --shell-topbar: 52px; /* 顶栏高度（v2：logo + 队列 chip + 在线灯） */
+  --shell-sidebar: 176px;
 }
 
-/* 分类色（§2.1 数据序列专用，≤10；ECharts 接入时按序取用） */
+/* 分类色（§2.1 数据序列专用，≤10；ECharts 按序取用） */
 :root {
   --cat-1: #5e9cf3;
   --cat-2: #4dd9c1;

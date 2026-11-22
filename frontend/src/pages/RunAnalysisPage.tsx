@@ -211,18 +211,25 @@ export function RunAnalysisPage() {
           </p>
         ) : (
           <>
+            {/* v2 08 屏统计分组行：质量（P/R/F1）｜ 误差（TP/FP/FN/混淆）｜ 小目标 */}
             <div className="summary-row" data-testid="analysis-summary">
-              <div className="summary-cell"><small>P</small><strong>{fmtMetric(summary.precision)}</strong></div>
-              <div className="summary-cell"><small>R</small><strong>{fmtMetric(summary.recall)}</strong></div>
-              <div className="summary-cell"><small>F1</small><strong>{fmtMetric(summary.f1)}</strong></div>
-              <div className="summary-cell"><small>TP</small><strong className="tnum">{counts.tp}</strong></div>
-              <div className="summary-cell"><small>FP</small><strong className="tnum">{counts.fp}</strong></div>
-              <div className="summary-cell"><small>FN</small><strong className="tnum">{counts.fn}</strong></div>
-              <div className="summary-cell"><small>混淆</small><strong className="tnum">{counts.confusion}</strong></div>
+              <div className="summary-group">
+                <div className="summary-cell"><small>P</small><strong>{fmtMetric(summary.precision)}</strong></div>
+                <div className="summary-cell"><small>R</small><strong>{fmtMetric(summary.recall)}</strong></div>
+                <div className="summary-cell"><small>F1</small><strong>{fmtMetric(summary.f1)}</strong></div>
+              </div>
+              <div className="summary-group">
+                <div className="summary-cell"><small>TP</small><strong className="tnum">{counts.tp}</strong></div>
+                <div className="summary-cell"><small>FP</small><strong className="tnum">{counts.fp}</strong></div>
+                <div className="summary-cell"><small>FN</small><strong className="tnum">{counts.fn}</strong></div>
+                <div className="summary-cell"><small>混淆</small><strong className="tnum">{counts.confusion}</strong></div>
+              </div>
               {summary.small_objects && summary.small_objects.total > 0 && (
-                <div className="summary-cell">
-                  <small>小目标 GT 占比</small>
-                  <strong className="tnum">{Math.round(summary.small_objects.share * 100)}%</strong>
+                <div className="summary-group">
+                  <div className="summary-cell">
+                    <small>小目标 GT 占比</small>
+                    <strong className="tnum">{Math.round(summary.small_objects.share * 100)}%</strong>
+                  </div>
                 </div>
               )}
             </div>

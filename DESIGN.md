@@ -1,6 +1,7 @@
 # DESIGN.md
 
 > 设计系统真相源。2026-11-17 从零定标（rewrite 分支，不以旧 UI 现状为基线），取值采用 industrial-impeccable 底稿默认（ISA-101 提炼）。变更走提案制（agent 无权直接修改）；豁免须书面留痕于 §10。规则条文见 industrial-impeccable 技能 references/design-rules.md。
+> **2026-11-22 v2 定稿落版**：chrome 区整体切换品类亮色（B 案，Penpot「VisionTrainer v2 重设计」评审定稿），机读取值源 = `design-tokens/tokens.json`（u.*），登记见 §10。
 
 ## 1. 界面模式
 
@@ -29,18 +30,21 @@
 - 类别 >10 时循环色板并强制形状双编码（线型/标记区分）
 - 语义色（§3）不进分类色板
 
-### 2.2 参数/报警 chrome 区——浅灰底
+### 2.2 参数/报警 chrome 区——品类亮色（v2 定稿）
 
-表单、表格、报警列表、导航的领地。
+表单、表格、报警列表、导航的领地。白卡浮于冷灰页底；单 accent + 浅 accent 底。
 
 ```
---chrome-bg:      #F4F5F3
+--page-bg:        #F5F6F8   /* 页面底 */
 --chrome-surface: #FFFFFF
---chrome-border:  #D9D7D1
---chrome-text:    #2B2E33
---chrome-text-dim:#75787D
---chrome-accent:  #2F66D0   /* 唯一 accent：主操作/选中/当前项 */
+--chrome-border:  #E4E7EC
+--chrome-text:    #1F2429
+--chrome-text-dim:#6B7280
+--chrome-accent:  #4C6EF5   /* 唯一 accent：主操作/选中/当前项 */
+--accent-soft:    #EEF2FF   /* accent 浅底：选中态/soft chip */
 ```
+
+形态纪律：卡片圆角 8px、控件 6px；状态徽章浅底色字（is-running/is-failed/is-warning 带语义浅底，is-ok/is-neutral 无底色字）；危险动作 = crit 描边白底（报警色不做实心大面）；一屏唯一 primary 实心钮。
 
 ## 3. 语义色表（≤8，全站一致、只做其语义、不得挪用、不进分类色板）
 
@@ -50,9 +54,9 @@
 | alarm-warning | `#C08A00` 琥珀 | 校验琥珀条、漂移提醒、退出码异常、fp/fn 失衡 |
 | state-ok | `#2E6B46` 绿 | Run done、校验通过、部署验证落定 |
 | state-stale | `#6B5518` 灰褐 | WS 断流/画像体检过期。**断流必须显示 STALE 态（含停更时刻），禁止显示冻结的正常值** |
-| state-running | `#2F66D0` | Run running/queued（与 accent 同值，仅限状态灯） |
+| state-running | `#4C6EF5` | Run running/queued（与 accent 同值，仅限状态灯） |
 | state-manual | `#8C5A00` | 手动语义（外部数据集只读、manual source Run） |
-| action-primary | `#2F66D0` | 主按钮 |
+| action-primary | `#4C6EF5` | 主按钮 |
 | ng-mark | `#B3261E` | 错误分析 FP/误检标记（与 alarm-critical 同值——NG 即报警级） |
 
 Run 状态映射：done→state-ok、failed/cancelled（用户主动取消不闪）→alarm-critical/中性、running/queued→state-running、stopping→state-manual、收养中→state-stale。cancelled 用中性灰而非红：不是失败。
@@ -107,4 +111,5 @@ Run 状态映射：done→state-ok、failed/cancelled（用户主动取消不闪
   - 详情档：数据集详情、审查键盘流、错误分析、Run 详情、对比页、Agent 循环页、日志页
 - 变更登记：2026-11-18 票 121（ADR 0015 Decision 2 派定）：导航「部署」改名「模型」，页面以 Run 产物权重为模型真源（全部 Run 在列、权重缺失如实标注、指纹/类别表/主指标/部署历史挂行）；模型库目录降为「派生」分区（部署组装物，清理重建不动真源账目）。路由路径 /deploy 不变（本条为 ADR 派定变更的书面留痕）
 - 变更登记：2026-11-18 票 123（ADR 0015 Decision 1）：模型页新增发布记录卡（发布与部署两个动作同页不同按钮）；权重行加「发布」入口（与部署同资格：done 且权重在盘）；发布记录 URL 状态徽章沿用状态语义三重编码（有效 is-ok「✓」/过期 is-unverified「−」）；Run 详情页 done 态加「发布给监控端」按钮，确认门=意图清单（发布对象/发布包内容/限时签名 URL）
+- 变更登记：2026-11-22 **v2 全量重设计落版**（用户评审定稿，Penpot「VisionTrainer v2 重设计」12 屏 + 原型交互）：chrome 区切品类亮色（§2.2 取值源 `design-tokens/tokens.json` u.*，两案并存 r.* 深色留档仅 vp 区沿用）；语义色表仅 state-running/action-primary 随 accent 改值，其余四色不动。信息架构：侧导航改六项（+总览 −日志，日志入口移系统页，/logs 路由保留）；顶栏 62→52px 加全局队列 chip；训练记录改任务分组七列（Run 行=轮链接，任务名上组头）；Run 详情发布唯一 primary；错误分析统计分组行；数据集列表画廊卡+过滤行；新增总览页（Now 条/待办四卡/最近 Run/画廊/联动环）。前端全量落码：tokens.css/app.css/AppShell/OverviewPage + 十页面，vitest 241/241 + 8600 实机六页走查通过
 - 豁免记录：无（初始为空）

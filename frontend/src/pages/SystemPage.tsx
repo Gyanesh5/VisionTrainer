@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { api, type ProducerProbeResult } from "../api/client";
 
 /** 系统页（票 107）：启动自检卡 + 推理端连接卡（票 122）+ 配置视图。 */
@@ -125,6 +126,10 @@ export function SystemPage() {
     <div className="page-body">
       <div className="page-head">
         <h1>系统</h1>
+        {/* v2 信息架构：日志退出侧导航后，系统日志入口落系统页 */}
+        <p className="placeholder-note">
+          自检与配置 · <Link to="/logs">系统日志 →</Link>
+        </p>
       </div>
 
       <div className="card">

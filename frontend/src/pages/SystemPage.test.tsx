@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { MemoryRouter } from "react-router-dom";
 import { SystemPage } from "./SystemPage";
 import { api, type ProducerConfig, type SelfcheckResult } from "../api/client";
 
@@ -42,7 +43,9 @@ function renderSystemPage() {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <SystemPage />
+      <MemoryRouter>
+        <SystemPage />
+      </MemoryRouter>
     </QueryClientProvider>,
   );
 }

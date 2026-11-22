@@ -1,18 +1,38 @@
 import type { ReactNode } from "react";
 import { NavLink } from "react-router-dom";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { api, type QueueSnapshot } from "../api/client";
 import { useEvents, formatClock } from "../ws/useEvents";
 
 /**
- * 六导航壳（票 107）：62px 顶栏（品牌 + 后台状态灯）+ 左侧分组导航
- * （工作区组：数据集/训练/模型/Agent/日志；设置组：系统）+ 主区 Outlet。
- * 票 121：导航「部署」改名「模型」——页面以 Run 权重为模型真源，路由路径保持
- * /deploy 不动（深链与测试基线不变，只换门牌）。
+ * 六导航壳（v2 定稿，Penpot「VisionTrainer v2」B 案）：52px 顶栏（品牌块 + 队列
+ * chip + WS 状态灯）+ 左侧分组导航（工作区：总览/数据集/训练/模型/Agent；设置：
+ * 系统）+ 主区 Outlet。
+ *
+ * v2 信息架构变化：日志退出侧导航（路由 /logs 保留，入口在系统页）；「总览」
+ * 承载工厂现状（正在训练/待办/最近 Run/画廊/联动环）。
+ * 顶栏队列 chip（v2 全局队列可见性）：空闲灰点 / 训练中 accent 点 / 排队计数。
  *
  * 状态灯是 D 族硬指标：WS 事件通道连接态顶栏常显——在线绿点（state-ok）、
  * 失联灰褐点（state-stale，悬停给停更时刻），文字双编码（DESIGN.md §3）。
  */
 export function AppShell({ children }: { children: ReactNode }) {
-  const { status, lastEventAt } = useEvents();
+  const queryClient = useQueryClient();
+  const { status, lastEventAt } = useEvents({
+    onResync: () => void queryClient.invalidateQueries({ queryKey: ["queue-chip"] }),
+    onEvent: (ev) => {
+      const type = typeof ev.type === "string" ? ev.type : "";
+      if (type === "queue.updated" || type === "run.status" || type === "task.updated") {
+        void queryClient.invalidateQueries({ queryKey: ["queue-chip"] });
+      }
+    },
+  });
+  const { data: queue } = useQuery({
+    queryKey: ["queue-chip"],
+    queryFn: api.getQueue,
+    refetchInterval: 8000,
+    retry: false,
+  });
   const lightLabel =
     status === "live" ? "在线" : status === "stale" ? "失联" : "连接中";
   const lightTitle =
@@ -21,15 +41,25 @@ export function AppShell({ children }: { children: ReactNode }) {
       : lastEventAt !== null
         ? `数据停于 ${formatClock(lastEventAt)}`
         : "事件通道未建立";
+  const chip = queueChipState(queue);
 
   return (
     <div className="shell">
       <header className="shell-topbar">
         <span className="shell-brand">
-          <span className="shell-brand-mark tnum">V</span>
+          <span className="shell-brand-mark" aria-hidden="true">
+            V
+          </span>
           <span>VisionTrainer</span>
         </span>
         <span className="shell-topbar-spacer" />
+        <span
+          className={`queue-chip ${chip.cls}`}
+          title="单飞队列：一次只跑一个 Run · 提交训练任务后在此排队"
+        >
+          <span className="chip-dot" aria-hidden="true" />
+          <span className="tnum">{chip.label}</span>
+        </span>
         <span className="conn-light" data-status={status}>
           <span className={`conn-dot ${status}`} aria-hidden="true" />
           <span>{lightLabel}</span>
@@ -44,13 +74,13 @@ export function AppShell({ children }: { children: ReactNode }) {
         <aside className="shell-sidebar">
           <nav aria-label="主导航" style={{ display: "contents" }}>
             <span className="nav-group-label">工作区</span>
-            <NavItem to="/datasets" label="数据集" icon={<DatasetIcon />} />
-            <NavItem to="/training" label="训练" icon={<TrainingIcon />} />
-            <NavItem to="/deploy" label="模型" icon={<DeployIcon />} />
-            <NavItem to="/agent" label="Agent" icon={<AgentIcon />} />
-            <NavItem to="/logs" label="日志" icon={<LogsIcon />} />
+            <NavItem to="/overview" label="总览" />
+            <NavItem to="/datasets" label="数据集" />
+            <NavItem to="/training" label="训练" />
+            <NavItem to="/deploy" label="模型" />
+            <NavItem to="/agent" label="Agent" />
             <span className="nav-group-label">设置</span>
-            <NavItem to="/system" label="系统" icon={<SystemIcon />} />
+            <NavItem to="/system" label="系统" />
           </nav>
         </aside>
         <main className="shell-main">{children}</main>
@@ -59,67 +89,22 @@ export function AppShell({ children }: { children: ReactNode }) {
   );
 }
 
-function NavItem({ to, label, icon }: { to: string; label: string; icon: ReactNode }) {
+/** 顶栏队列 chip 态推导（QueueSnapshot → 文案与色点；快照缺失按空闲显示） */
+function queueChipState(q?: QueueSnapshot | null): {
+  cls: string;
+  label: string;
+} {
+  if (!q) return { cls: "", label: "队列空闲" };
+  if (q.running_uid) return { cls: "is-running", label: "训练中" };
+  if (q.queued_uids.length > 0)
+    return { cls: "", label: `排队 ${q.queued_uids.length}` };
+  return { cls: "", label: "队列空闲" };
+}
+
+function NavItem({ to, label }: { to: string; label: string }) {
   return (
     <NavLink to={to} className={({ isActive }) => (isActive ? "nav-item active" : "nav-item")}>
-      {icon}
       <span>{label}</span>
     </NavLink>
-  );
-}
-
-function DatasetIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v11a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5v-11Z" />
-      <path d="m7.5 15 2.5-3 2 2.2 1.7-1.8 2.8 3.1" />
-      <circle cx="9" cy="9" r="1.2" />
-    </svg>
-  );
-}
-
-function TrainingIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M5 18V9m5 9V5m5 13v-7m4 7V8" />
-      <path d="M3.5 20.5h17" />
-    </svg>
-  );
-}
-
-function DeployIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="m12 3 7 4v10l-7 4-7-4V7l7-4Z" />
-      <path d="m5 7 7 4 7-4M12 11v10" />
-    </svg>
-  );
-}
-
-function AgentIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M12 4.5a3 3 0 1 1 0 6 3 3 0 0 1 0-6Z" />
-      <path d="M5.5 19c.8-3.2 3.3-5 6.5-5s5.7 1.8 6.5 5" />
-      <path d="M18 8.5h2.5M3.5 8.5H6M12 2v1.5" />
-    </svg>
-  );
-}
-
-function LogsIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <path d="M6 4.5h12v15H6z" />
-      <path d="M9 8h6M9 12h6M9 16h4" />
-    </svg>
-  );
-}
-
-function SystemIcon() {
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="12" cy="12" r="3.5" />
-      <path d="M19 13.5l1.2 1-.2 1.7-1.5 1-1.7-.6-1 1.1.1 1.8-1.5.8-1.4-1.1h-1.5L10 20.3l-1.6-.8.1-1.8-1-1.1-1.7.6-1.5-1 .2-1.7 1.2-1v-1.5l-1.2-1 .2-1.7 1.5-1 1.7.6 1-1.1-.1-1.8L10 5l1.4 1.1h1.5L14.3 5l1.6.8-.1 1.8 1 1.1 1.7-.6 1.5 1-.2 1.7-1.2 1Z" />
-    </svg>
   );
 }

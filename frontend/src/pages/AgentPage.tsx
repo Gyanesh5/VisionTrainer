@@ -644,11 +644,12 @@ function McpCard() {
         <span className="form-hint">外部 Agent 接入（MCP 客户端）与进程内循环共用工具面、审批门与决策归档</span>
       </h2>
       <p className="meta-line mono" data-testid="agent-mcp-url">挂载点 {mcpUrl}（fastmcp 未安装时不挂载）</p>
-      <div className="agent-role tool">
+      {/* v2 10 屏三级分组：只读 ok 绿缘 / 提交类 warn 琥珀缘（关键级不可逆动作不在工具面） */}
+      <div className="agent-role user">
         <p className="agent-role-title">只读（直通 + 审计）</p>
         <p className="mono">{MCP_TOOLS.只读.join(" · ")}</p>
       </div>
-      <div className="agent-role tool">
+      <div className="agent-role warn">
         <p className="agent-role-title">提交类（走同一审批门）</p>
         <p className="mono">{MCP_TOOLS.提交.join(" · ")}</p>
       </div>

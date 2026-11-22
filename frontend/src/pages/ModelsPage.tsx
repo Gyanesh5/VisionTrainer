@@ -309,6 +309,9 @@ export function ModelsPage() {
     <div className="page-body">
       <div className="page-head">
         <h1>模型</h1>
+        <p className="placeholder-note tnum">
+          {weights.length} 个训练轮的权重 · {releases.length} 条发布记录 · 发布与部署两个动作分离
+        </p>
       </div>
 
       {runningOps.length > 0 && (

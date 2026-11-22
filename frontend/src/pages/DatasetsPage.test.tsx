@@ -111,14 +111,14 @@ describe("DatasetsPage list", () => {
 
     const plate = screen.getByTestId("ds-val-plate");
     expect(plate).toHaveClass("is-ok");
-    expect(plate.textContent).toContain("校验通过");
+    expect(plate.textContent).toContain("已校验");
     const weld = screen.getByTestId("ds-val-weld");
     expect(weld).toHaveClass("is-failed");
 
     // 卡片统计：类别数与图数等宽；外部集带 data.yaml 态
     const cards = grid.querySelectorAll("[data-testid=dataset-card]");
-    expect(cards[0].textContent).toContain("类别 2");
-    expect(cards[0].textContent).toContain("图 128");
+    expect(cards[0].textContent).toContain("2 类");
+    expect(cards[0].textContent).toContain("128 图");
     expect(screen.getByTestId("ds-grid-external").textContent).toContain("data.yaml 存在");
 
     // 「可能有变更」徽章只在粗判为真时出现
