@@ -44,9 +44,12 @@ def test_yolo_export_selfcontained(dup_ds, datasets_root):
     r = svc.export_annotations(dup_ds, "yolo", scope="all", images="copy")
     out = Path(r["path"])
     assert (out / "classes.txt").read_text().splitlines() == ["car", "person"]
-    labels = list((out / "labels").glob("*.txt"))
+    labels = sorted((out / "labels").glob("*.txt"))
     assert labels, "YOLO 导出逐图标签"
-    line = labels[0].read_text().splitlines()[0]
+    # 负样本显式空标签（下方 test_drops_do_not_block 契约）：glob 序跨文件系统不稳定
+    # （CI ext4 曾把恒空的 negative.txt 排到首位致 IndexError），逐文件回读取首个非空
+    first = next(p for p in labels if p.read_text().splitlines())
+    line = first.read_text().splitlines()[0]
     idx, xc, yc, w, h = line.split()
     assert 0 <= int(idx) <= 1 and all(0 <= float(v) <= 1 for v in (xc, yc, w, h))
     # images 为复制态：无符号链接
