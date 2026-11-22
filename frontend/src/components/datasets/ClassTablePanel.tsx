@@ -55,6 +55,10 @@ export function ClassTablePanel({
   }, [meta.name]);
 
   function countOf(cls: string): number | null {
+    // 徽章与删除门同口径：优先真源实例数（rename-suspects 的 instances 与服务端删除门
+    // 同一算法，含未进切分的新图与孤儿 JSON）；真源读不出才退回画像账本（实效集口径，
+    // 加图后未重切分时会把新图计成 0——与服务端判据脱节）。
+    if (suspects?.instances) return suspects.instances[cls] ?? 0;
     return counts === null ? null : counts[cls] ?? 0;
   }
 
@@ -67,6 +71,10 @@ export function ClassTablePanel({
       await queryClient.invalidateQueries({ queryKey: ["dataset", meta.name] });
       onChanged();
       return true;
+    } catch (e) {
+      // 服务侧 gate（409/400）是权威判据，画像计数只是提前提示——原话上屏，不静默吞错
+      onMessage(e instanceof Error ? e.message : "操作失败", "error");
+      return false;
     } finally {
       setBusy(false);
     }
@@ -293,11 +301,13 @@ export function ClassTablePanel({
                 改名
               </button>
               {n === null ? (
-                <span className="badge is-unregistered" title="无画像账本——以服务端删除校验为准">
+                <span className="badge is-unregistered" title="真源实例数读不出——以服务端删除校验为准">
                   实例数未知
                 </span>
               ) : (
-                <span className="badge is-unregistered tnum">{n} 实例</span>
+                <span className="badge is-unregistered tnum" title="真源实例数（与服务端删除门同口径，含未进切分的新图与孤儿 JSON）">
+                  {n} 实例
+                </span>
               )}
               <button
                 type="button"

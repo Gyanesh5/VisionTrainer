@@ -350,6 +350,8 @@ export const datasetsApi = {
       empty_classes?: { class: string; row: number }[];
       pairs?: { old: string; new: string; instances: number; basis?: string }[];
       ambiguous?: boolean;
+      /** 真源逐类实例数（与服务端删除门同一算法，含未进切分的新图与孤儿 JSON） */
+      instances?: Record<string, number>;
     }>(`/api/v1/datasets/${encodeURIComponent(name)}/rename-suspects`),
   rollbackClasses: (name: string) =>
     request<{ action?: string; restored: string[]; backup_dir: string }>(

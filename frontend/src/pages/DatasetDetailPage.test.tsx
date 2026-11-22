@@ -321,6 +321,22 @@ describe("ClassTablePanel four actions", () => {
     );
   });
 
+  it("instance_badge_prefers_truth_source_counts_over_stale_profile", async () => {
+    // 回归（2026-11-22 plug579-cls）：画像按实效集计数，加图后未重切分时把新图计成 0，
+    // 徽章显示 0 实例而服务端删除门数真源拦下 409——徽章必须与服务端删除门同口径。
+    statsInstanceCounts.mockResolvedValue({ car: 96, person: 24, ghost: 0 });
+    renameSuspects.mockResolvedValue({ instances: { car: 96, person: 24, ghost: 1 } });
+    get.mockResolvedValue({ ...baseMeta, classes: ["car", "person", "ghost"] });
+    const user = userEvent.setup();
+    renderDetail();
+    await screen.findByTestId("status-cards");
+    await user.click(screen.getByTestId("status-classes"));
+    const rows = await screen.findByTestId("cls-rows");
+    expect(rows.textContent).toContain("1 实例");
+    // 真源非零 → 删除按钮按服务端同一判据提前置灰
+    expect(screen.getByRole("button", { name: "删除 ghost" })).toBeDisabled();
+  });
+
   it("rename_suspects_pairs_offer_table_only_fix", async () => {
     renameSuspects.mockResolvedValue({
       unregistered: [{ label: "scratch", instances: 12 }],
