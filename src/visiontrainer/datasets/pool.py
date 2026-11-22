@@ -195,8 +195,10 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
 
     - txt-list 形态（detect/segment/obb/pose）：`data.yaml + train.txt + val.txt`——txt 逐行
       指向池内平铺图片；Ultralytics 由 images/ 路径段推导 labels/，池布局天然满足；
-    - classify 例外：`data/{train,val}/<NN_类名>/` 链接树 + 根 data.yaml，两位数字前缀让
-      字母序等于类别行序，class_map 为唯一回查依据。
+    - classify 例外：`data/{train,val}/<类别名>/` 链接树 + 根 data.yaml——目录真名
+      （ADR 0017，Ultralytics 官方语义：`check_cls_dataset` 按文件夹字母序 enumerate 编号，
+      模型 id = 字母序）；data.yaml 仅作存档，names 按字母序记模型真实 id 语义，
+      表行序回查唯一依据 = class_map（随快照落盘）。
 
     Returns: {"data_yaml", "train_txt", "val_txt", "labels_dir", "format": {…快照段…}}；
     `data_yaml` 语义 = 训练 `data` 参数（txt-list 为 yaml 路径，classify 为入口目录）。
@@ -206,14 +208,17 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
     entry = run_dir / "data"
     entry.mkdir(parents=True, exist_ok=True)
 
-    names = [label for label, _ in sorted(class_map.items(), key=lambda kv: kv[1])]
+    # data.yaml names 的 id 序：detect 系 = 表行序（Ultralytics 认 yaml names）；
+    # classify = 字母序（= 训练目录名序 = 模型真实 id 序，ADR 0017）
+    names = sorted(class_map) if TASK_MODE[task_type] == "classify" \
+        else [label for label, _ in sorted(class_map.items(), key=lambda kv: kv[1])]
     meta = adapter.dataset_meta(task_type, class_map, names)
     meta.pop("nc", None)   # _yaml_text 统一写 nc，避免重复键
 
     if TASK_MODE[task_type] == "classify":
         for side in ("train", "val"):
-            for label, idx in sorted(class_map.items(), key=lambda kv: kv[1]):
-                (entry / side / f"{idx:02d}_{label}").mkdir(parents=True, exist_ok=True)
+            for label in class_map:
+                (entry / side / label).mkdir(parents=True, exist_ok=True)
         for side in ("train", "val"):
             for name in effective.get(side) or []:
                 src = pool / "images" / Path(name).name
@@ -222,7 +227,7 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
                 # classify 的类别 = 标注 flags 真键（class_map 键）；链接挂进对应类目录
                 flag = _classify_flag_of(ds_dir / "source" / Path(name).name)
                 if flag and flag in class_map:
-                    _link(src.resolve(), entry / side / f"{class_map[flag]:02d}_{flag}" / Path(name).name)
+                    _link(src.resolve(), entry / side / flag / Path(name).name)
         _atomic_text(entry / "data.yaml", _yaml_text(meta, path=entry, train="train", val="val"))
         # Ultralytics 分类训练的 data 参数必须是目录（check_cls_dataset 拒收 yaml 文件），
         # data.yaml 仅作类别映射存档；返回值语义 = 训练 `data` 参数，classify 即入口目录

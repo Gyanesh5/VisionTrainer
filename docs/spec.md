@@ -202,7 +202,7 @@ ProjectedImage {
 
 **格式池** `<ds>/derived/<format_id>/`：`images/` 平铺符号链接、`labels/` 平铺标签、`derived.json{format_id,converter_version,projection_version,classes_sha,task_type,class_map,counts,updated_at}`。一集每格式一池，与切分无关；可删重建，池清理在出队时。平铺布局要求 stem 唯一。
 
-**逐 Run 入口** `runs/<任务目录>/<Run 目录>/data/`：两级目录按 ADR 0013 可读命名（任务名 / 开训时刻_r 轮次）。`data.yaml + train.txt + val.txt` 指向池内图片与本次实效集，和运行快照、`labels_frozen/` 同地归档。classify 例外为 `data/{train,val}/<NN_类名>/` 链接树 + 根 `.ndjson.yaml`，以两位数字前缀让字母序等于类别行序，并以 class_map 为唯一回查依据。Run 目录仍是 Ultralytics save_dir，training.log/report.md/export/ 同目录。
+**逐 Run 入口** `runs/<任务目录>/<Run 目录>/data/`：两级目录按 ADR 0013 可读命名（任务名 / 开训时刻_r 轮次）。`data.yaml + train.txt + val.txt` 指向池内图片与本次实效集，和运行快照、`labels_frozen/` 同地归档。classify 例外为 `data/{train,val}/<类别名>/` 链接树 + 根 data.yaml：目录真名（ADR 0017，Ultralytics 按文件夹字母序编号，模型 id = 字母序），data.yaml 仅作存档且 names 按字母序记模型真实 id 语义，表行序回查以 class_map 为唯一依据；发布面 classes（deploy config / 发布包 classes.txt）由 `_model_class_order` 对 classify 按模型序出。Run 目录仍是 Ultralytics save_dir，training.log/report.md/export/ 同目录。
 
 **外部导出适配器**：YOLO/COCO/VOC 进 M11；COCO/VOC 由平台以 stdlib 实现，XAL 仅作参考。导出与格式池完全解耦，DOTA/mask/mot 等长尾格式不做。
 
