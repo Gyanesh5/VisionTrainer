@@ -6,6 +6,7 @@ import {
   type DatasetBrief,
   type ProducerPullFilters,
   type ProducerPullResult,
+  type StagedPull,
   type TaskType,
 } from "../../api/client";
 
@@ -18,7 +19,12 @@ import {
  * 配置（票 122），表单不暴露地址覆盖。回写失败是告警不是错误：导入照常完成。
  * 状态过滤=采集态 collected（对端状态机收缩后唯一枚举值，推理端 PR #148）。
  * add 模式带追加类别输入（#131 偏离补完）：拉取包携带类别表之外类别被 409 阻断时，
- * 错误 detail 可读即出一键回填重发。
+ * 错误 detail 可读即出一键回填——有暂存定位（detail.staged_pull_id，#132）重试走
+ * 重导暂存包（对端导出即迁已导出态、选集恒排除已导出，重拉必空），无暂存定位才
+ * 按同一过滤条件重新拉取。
+ * 暂存区发现面（#132）：打开时查 /producer-pulls/staged，滞留包出提示条可一键
+ * 重导（读本地暂存 ZIP 幂等入库，不再向推理端拉取）；producer_empty 且目标有
+ * 滞留包时错误文案改指引重导。
  */
 export function ProducerPullDialog({
   open,
@@ -43,10 +49,13 @@ export function ProducerPullDialog({
   const [appendClassesText, setAppendClassesText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [block, setBlock] = useState<{ labels: string[] } | null>(null);
+  const [block, setBlock] = useState<{ labels: string[]; stagedPullId: string | null } | null>(null);
   const [result, setResult] = useState<ProducerPullResult | null>(null);
+  const [staged, setStaged] = useState<StagedPull[]>([]);
+  const [confirmDiscard, setConfirmDiscard] = useState<string | null>(null);
 
-  // 每次打开复位（一次拉取一单，不留上次残值）
+  // 每次打开复位（一次拉取一单，不留上次残值）+ 查暂存区滞留包（#132 发现面，
+  // 提示条数据源；查询失败静默空——提示条尽力而为，不阻断拉取主流程）
   useEffect(() => {
     if (open) {
       setMode("create");
@@ -63,6 +72,12 @@ export function ProducerPullDialog({
       setError(null);
       setBlock(null);
       setResult(null);
+      setStaged([]);
+      setConfirmDiscard(null);
+      datasetsApi
+        .producerPullsStaged()
+        .then(setStaged)
+        .catch(() => setStaged([]));
     }
   }, [open]);
 
@@ -101,6 +116,24 @@ export function ProducerPullDialog({
           .filter(Boolean),
       ),
     );
+  }
+
+  /** 拉取/重导共用收尾：回写失败降级为告警（导入已完成，不标红）；consumedPullId
+   * 有值说明暂存包已焚（成功即焚），提示条同步移除该条 */
+  function handlePullResult(got: ProducerPullResult, consumedPullId?: string) {
+    if (consumedPullId) {
+      setStaged((rows) => rows.filter((r) => r.pull_id !== consumedPullId));
+    }
+    if (!got.writeback.ok) {
+      // 回写失败降级为告警：导入已完成，提示复检（不阻断、不标红）
+      setResult(got);
+    } else {
+      onCreated(got.name);
+    }
+  }
+
+  function errorTextOf(e: unknown, fallback: string): string {
+    return e instanceof ApiRequestError || e instanceof Error ? e.message : fallback;
   }
 
   async function submit(appendOverride?: string[]) {
@@ -144,28 +177,121 @@ export function ProducerPullDialog({
     if (append.length > 0) body.append_classes = append; // 有值才带键（同 sample_ids 载荷模式）
     try {
       const got = await datasetsApi.producerPull(body);
-      if (!got.writeback.ok) {
-        // 回写失败降级为告警：导入已完成，提示复检（不阻断、不标红）
-        setResult(got);
-      } else {
-        onCreated(got.name);
-      }
+      handlePullResult(got);
     } catch (e) {
       if (e instanceof ApiRequestError && Array.isArray(e.detail.source_labels)) {
-        // 表外类别 409 阻断（#131 偏离补完）：detail.source_labels 可读 → 一键回填重发
-        setBlock({ labels: (e.detail.source_labels as unknown[]).map(String) });
+        // 表外类别 409 阻断（#131 偏离补完）：detail.source_labels 可读 → 一键回填；
+        // 暂存定位随 detail 外露时（#132）重试走重导——对端导出即迁已导出态、
+        // 选集恒排除已导出（契约 §5.2 服务端强制），按同一过滤条件重拉必空
+        setBlock({
+          labels: (e.detail.source_labels as unknown[]).map(String),
+          stagedPullId: typeof e.detail.staged_pull_id === "string" ? e.detail.staged_pull_id : null,
+        });
+      } else if (e instanceof ApiRequestError && e.code === "producer_empty") {
+        // 空范围 + 目标有滞留暂存包：真实原因多半是「已导出待重导」，整句替换
+        // （后端文案的「放宽时间窗再试」在该场景是误导——对端恒排除已导出态）
+        const targetName = mode === "add" ? target : name.trim();
+        const hasStaged = staged.some((s) => s.name === targetName);
+        setError(
+          hasStaged
+            ? "推理端无该范围内可导出的样本——该目标有暂存包待重导（见上方列表），重导不再向推理端拉取"
+            : errorTextOf(e, "拉取失败"),
+        );
       } else {
-        setError(e instanceof ApiRequestError ? e.message : e instanceof Error ? e.message : "拉取失败");
+        setError(errorTextOf(e, "拉取失败"));
       }
     } finally {
       setBusy(false);
     }
   }
 
-  /** 409 表外类别一键处置：回填追加类别输入（所见即所发）后按同一过滤条件重发 */
-  function retryWithAppend(labels: string[]) {
+  /** 从暂存重导（#132，契约 §5.5）：读本地暂存 ZIP 走同一导入链，不再向推理端拉取。
+   * 目标名优先当前表单（所见即所发），空则回落暂存记录的目标；暂存已焚/已清扫
+   * （404 not_found）降级回全新拉取——对端可导出样本存在时才走得通。 */
+  async function reimportStaged(pullId: string, appendOverride?: string[]) {
+    const formName = mode === "add" ? target : name.trim();
+    const entryName = staged.find((s) => s.pull_id === pullId)?.name ?? null;
+    const targetName = formName || entryName || "";
+    if (!targetName) {
+      setError("请先选择目标数据集（或填写数据集名）再重导");
+      return;
+    }
+    const append = appendOverride ?? parseClassNames(appendClassesText);
+    setBusy(true);
+    setError(null);
+    setBlock(null);
+    setResult(null);
+    const body: { name: string; pull_id: string; append_classes?: string[] } = {
+      name: targetName,
+      pull_id: pullId,
+    };
+    if (append.length > 0) body.append_classes = append;
+    try {
+      const got = await datasetsApi.producerReimport(body);
+      handlePullResult(got, pullId);
+    } catch (e) {
+      if (e instanceof ApiRequestError && e.code === "not_found") {
+        await submit(append); // 暂存已焚/已清扫：降级回全新拉取（submit 自管 busy）
+        return;
+      }
+      if (e instanceof ApiRequestError && Array.isArray(e.detail.source_labels)) {
+        // 重导仍撞表外类别：暂存保留（服务端语义），pull_id 继续随块卡外露可再试
+        setBlock({
+          labels: (e.detail.source_labels as unknown[]).map(String),
+          stagedPullId:
+            typeof e.detail.staged_pull_id === "string" ? e.detail.staged_pull_id : pullId,
+        });
+      } else {
+        setError(errorTextOf(e, "重导失败"));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** 409 表外类别一键处置：回填追加类别输入（所见即所发）后重发——有暂存定位走
+   * 重导暂存包（#132，不再向推理端拉取），无则按同一过滤条件重新拉取 */
+  async function retryWithAppend(labels: string[]) {
     setAppendClassesText(labels.join(", "));
-    void submit(labels);
+    if (block?.stagedPullId) {
+      await reimportStaged(block.stagedPullId, labels);
+      return;
+    }
+    await submit(labels);
+  }
+
+  /** 暂存包字节量人读（清单防御闸内不会大到 GB） */
+  function sizeText(bytes: number): string {
+    return bytes >= 1024 * 1024
+      ? `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+      : `${Math.round(bytes / 1024)} KB`;
+  }
+
+  /** 丢弃暂存包（#132 保留策略人工出口）：行内二次确认后删本地 ZIP+sidecar，
+   * 不回写推理端——对应样本停留 exported 态，重进导出选集走对端样本池重置。
+   * 404（已焚/已清扫）同样焚条：清单对齐即可，不标错。 */
+  async function discardStaged(pullId: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await datasetsApi.producerStagedDiscard(pullId);
+      setStaged((rows) => rows.filter((r) => r.pull_id !== pullId));
+      setConfirmDiscard(null);
+    } catch (e) {
+      if (e instanceof ApiRequestError && e.code === "not_found") {
+        setStaged((rows) => rows.filter((r) => r.pull_id !== pullId));
+        setConfirmDiscard(null);
+      } else {
+        setError(errorTextOf(e, "丢弃失败"));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  /** ISO 时间戳 → 紧凑展示（2026-11-22T17:38:44 → 11-22 17:38） */
+  function shortTime(iso: string | null): string {
+    return iso ? iso.slice(5, 16).replace("T", " ") : "?";
   }
 
   if (!open) return null;
@@ -181,31 +307,88 @@ export function ProducerPullDialog({
       >
         <div className="dialog-head">
           <h2>从推理端拉取导入</h2>
-          <span className="dialog-head-note">
-            过滤 → 导出包 → 托管导入链；manifest 与样本清单随数据集留账，导入成功回写 ingested
-          </span>
         </div>
+
+        {staged.length > 0 && (
+          <div className="block-card" data-testid="pull-staged-list">
+            <p className="block-title">暂存待重导 · {staged.length} 包</p>
+            {staged.map((s) =>
+              confirmDiscard === s.pull_id ? (
+                <div className="btn-row" key={s.pull_id} data-testid={`pull-discard-confirm-${s.pull_id}`}>
+                  <span className="form-hint">删除后对端样本停留已导出态</span>
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    data-testid={`pull-discard-yes-${s.pull_id}`}
+                    disabled={busy}
+                    title="只删本地暂存 ZIP 与台账；重进导出选集需在对端样本池重置"
+                    onClick={() => void discardStaged(s.pull_id)}
+                  >
+                    确认删除
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    data-testid="pull-discard-no"
+                    disabled={busy}
+                    onClick={() => setConfirmDiscard(null)}
+                  >
+                    取消
+                  </button>
+                </div>
+              ) : (
+                <div className="btn-row" key={s.pull_id} data-testid={`pull-staged-${s.pull_id}`}>
+                  <span className="chip soft">{s.mode === "add" ? "加图" : "新建"}</span>
+                  <span>{s.name ?? "（目标已删）"}</span>
+                  <span className="form-hint">
+                    {shortTime(s.staged_at)} · {sizeText(s.size_bytes)}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn"
+                    data-testid={`pull-reimport-${s.pull_id}`}
+                    disabled={busy}
+                    title="读本地暂存 ZIP 幂等入库，不再向推理端拉取；成功后包焚毁、样本回写 ingested"
+                    onClick={() => void reimportStaged(s.pull_id)}
+                  >
+                    重导
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    data-testid={`pull-discard-${s.pull_id}`}
+                    disabled={busy}
+                    title="删除本地暂存 ZIP 与台账（不回写推理端；对端样本停留已导出态）"
+                    onClick={() => setConfirmDiscard(s.pull_id)}
+                  >
+                    删除
+                  </button>
+                </div>
+              ),
+            )}
+          </div>
+        )}
 
         <div className="form-row" role="radiogroup" aria-label="拉取模式">
           <span className="form-label">拉取模式</span>
           <div className="form-stack">
-            <label className="radio-line">
+            <label className="radio-line" title="导出包整批入库，类别表由包派生">
               <input
                 type="radio"
                 name="pull-mode"
                 checked={mode === "create"}
                 onChange={() => setMode("create")}
               />
-              新建数据集（导出包整批入库，类别表按包派生）
+              新建数据集
             </label>
-            <label className="radio-line">
+            <label className="radio-line" title="同批重复拉取按词干自动去重">
               <input
                 type="radio"
                 name="pull-mode"
                 checked={mode === "add"}
                 onChange={() => setMode("add")}
               />
-              加图到既有数据集（同批重复拉取自动去重）
+              加图到既有数据集
             </label>
           </div>
         </div>
@@ -251,11 +434,11 @@ export function ProducerPullDialog({
         )}
 
         <div className="form-row">
-          <label htmlFor="pull-task">任务过滤（推理端任务 id，留空不过滤）</label>
+          <label htmlFor="pull-task">任务 id 过滤</label>
           <input
             id="pull-task"
             value={task}
-            placeholder="task-…"
+            placeholder="task-…（留空不过滤）"
             onChange={(e) => setTask(e.target.value)}
           />
         </div>
@@ -266,24 +449,24 @@ export function ProducerPullDialog({
             value={status}
             onChange={(e) => setStatus(e.target.value as "" | "collected")}
           >
-            <option value="">全部（按其余过滤条件）</option>
-            <option value="collected">采集态（collected）</option>
+            <option value="">全部</option>
+            <option value="collected">采集态</option>
           </select>
         </div>
         {mode === "add" && (
           <div className="form-row">
-            <label htmlFor="pull-append-classes">追加类别（可选，逗号分隔）</label>
+            <label htmlFor="pull-append-classes">追加类别</label>
             <input
               id="pull-append-classes"
               data-testid="pull-append-classes"
               value={appendClassesText}
-              placeholder="导出包携带类别表外类别会 409 拦下，登记于此随重试入库"
+              placeholder="逗号分隔"
               onChange={(e) => setAppendClassesText(e.target.value)}
             />
           </div>
         )}
         <div className="form-row">
-          <label htmlFor="pull-from">时间窗起（留空无下界）</label>
+          <label htmlFor="pull-from" title="留空为不限早于">时间窗起</label>
           <input
             id="pull-from"
             type="datetime-local"
@@ -292,7 +475,7 @@ export function ProducerPullDialog({
           />
         </div>
         <div className="form-row">
-          <label htmlFor="pull-to">时间窗止（留空无上界）</label>
+          <label htmlFor="pull-to" title="留空为不限晚于">时间窗止</label>
           <input
             id="pull-to"
             type="datetime-local"
@@ -301,11 +484,11 @@ export function ProducerPullDialog({
           />
         </div>
         <div className="form-row">
-          <label htmlFor="pull-sample-ids">样本直选（可选，逗号/换行分隔，≤500）</label>
+          <label htmlFor="pull-sample-ids">样本直选</label>
           <textarea
             id="pull-sample-ids"
             value={sampleIdsText}
-            placeholder="推理端样本 id 直选清单（契约 §5.2），留空按其余过滤拉取"
+            placeholder="逗号/换行分隔，≤500"
             rows={2}
             onChange={(e) => setSampleIdsText(e.target.value)}
           />
@@ -313,24 +496,34 @@ export function ProducerPullDialog({
 
         {block && (
           <div className="block-card" data-testid="pull-append-block">
-            <p className="block-title">拉取被拦下：导出包携带数据集类别表之外的类别</p>
-            <p className="form-hint">{block.labels.join("、")}——重发前回填追加类别输入，按同一过滤条件。</p>
+            <p className="block-title">导出包含类别表外类别</p>
+            <div className="btn-row">
+              {block.labels.map((l) => (
+                <span key={l} className="chip warn">
+                  {l}
+                </span>
+              ))}
+              <span className="form-hint">
+                {block.stagedPullId ? "已落暂存 · 登记后重导" : "登记后按原过滤重发"}
+              </span>
+            </div>
             <button
               type="button"
               className="btn btn-primary"
               data-testid="pull-retry-append"
               disabled={busy}
-              onClick={() => retryWithAppend(block.labels)}
+              title={block.stagedPullId ? "从本地暂存包重导，不再向推理端拉取" : "按同一过滤条件重新拉取"}
+              onClick={() => void retryWithAppend(block.labels)}
             >
-              登记类别并重发
+              {block.stagedPullId ? "登记类别并重导" : "登记类别并重发"}
             </button>
           </div>
         )}
         {error && <p className="error-note" data-testid="pull-error">{error}</p>}
         {result && (
           <div className="block-card" data-testid="pull-writeback-warn">
-            <p className="block-title">导入已完成，但 ingested 回写推理端失败（已降级为告警）</p>
-            <p className="form-hint">{result.writeback.detail}——可稍后重拉同一批（去重）补回写。</p>
+            <p className="block-title">导入完成 · ingested 回写失败（降级告警）</p>
+            <p className="form-hint">{result.writeback.detail}</p>
             <button
               type="button"
               className="btn btn-primary"

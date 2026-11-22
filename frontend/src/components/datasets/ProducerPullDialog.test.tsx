@@ -2,7 +2,12 @@ import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ProducerPullDialog } from "./ProducerPullDialog";
-import { ApiRequestError, datasetsApi, type DatasetBrief } from "../../api/client";
+import {
+  ApiRequestError,
+  datasetsApi,
+  type DatasetBrief,
+  type StagedPull,
+} from "../../api/client";
 
 vi.mock("../../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../api/client")>();
@@ -11,30 +16,50 @@ vi.mock("../../api/client", async (importOriginal) => {
     datasetsApi: {
       ...actual.datasetsApi,
       producerPull: vi.fn(),
+      producerPullsStaged: vi.fn(),
+      producerReimport: vi.fn(),
+      producerStagedDiscard: vi.fn(),
     },
   };
 });
 
 const pull = vi.mocked(datasetsApi.producerPull);
+const pullStaged = vi.mocked(datasetsApi.producerPullsStaged);
+const reimport = vi.mocked(datasetsApi.producerReimport);
+const discard = vi.mocked(datasetsApi.producerStagedDiscard);
 
 const sampleDatasets: DatasetBrief[] = [
   { name: "plate", form: "managed", task_type: "detect", created_at: "2026-01-01T00:00:00" } as DatasetBrief,
   { name: "ext-yolo", form: "external", task_type: "detect", created_at: "2026-01-01T00:00:00" } as DatasetBrief,
 ];
 
+const stagedEntry: StagedPull = {
+  pull_id: "20261122T173844-ac7f680b",
+  staged_at: "2026-11-22T17:38:44",
+  name: "plate",
+  mode: "add",
+  task_type: "detect",
+  size_bytes: 207326,
+};
+
 function setup() {
-  return render(
+  const onCreated = vi.fn();
+  const view = render(
     <ProducerPullDialog
       open
       datasets={sampleDatasets}
       onClose={() => {}}
-      onCreated={vi.fn()}
+      onCreated={onCreated}
     />,
   );
+  return { ...view, onCreated };
 }
 
 beforeEach(() => {
   pull.mockReset();
+  pullStaged.mockReset().mockResolvedValue([]);
+  reimport.mockReset();
+  discard.mockReset();
 });
 
 afterEach(() => {
@@ -54,7 +79,7 @@ describe("ProducerPullDialog", () => {
     const user = userEvent.setup();
     setup();
     await user.type(screen.getByLabelText("数据集名"), "mfd");
-    await user.type(screen.getByLabelText(/任务过滤/), "task-abc");
+    await user.type(screen.getByLabelText("任务 id 过滤"), "task-abc");
     await user.selectOptions(screen.getByLabelText("状态过滤"), "collected");
     await user.click(screen.getByTestId("pull-submit"));
 
@@ -100,7 +125,7 @@ describe("ProducerPullDialog", () => {
     });
     const user = userEvent.setup();
     setup();
-    await user.click(screen.getByLabelText("加图到既有数据集（同批重复拉取自动去重）"));
+    await user.click(screen.getByLabelText("加图到既有数据集"));
     await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
     await user.type(screen.getByTestId("pull-append-classes"), " car, bus，car ");
     await user.click(screen.getByTestId("pull-submit"));
@@ -120,7 +145,7 @@ describe("ProducerPullDialog", () => {
     });
     const user = userEvent.setup();
     setup();
-    await user.click(screen.getByLabelText("加图到既有数据集（同批重复拉取自动去重）"));
+    await user.click(screen.getByLabelText("加图到既有数据集"));
     const target = screen.getByLabelText("目标数据集") as HTMLSelectElement;
     // 外部目录零写入不进候选
     expect(Array.from(target.options).map((o) => o.value)).toEqual(["", "plate"]);
@@ -237,7 +262,7 @@ describe("ProducerPullDialog", () => {
     });
     const user = userEvent.setup();
     setup();
-    await user.click(screen.getByLabelText("加图到既有数据集（同批重复拉取自动去重）"));
+    await user.click(screen.getByLabelText("加图到既有数据集"));
     await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
     await user.click(screen.getByTestId("pull-submit"));
 
@@ -270,7 +295,7 @@ describe("失败保留表单（UI 实点联调打磨项）", () => {
       screen.getByLabelText("状态过滤"),
       "collected",
     );
-    await user.type(screen.getByLabelText(/任务过滤/), "task-xyz");
+    await user.type(screen.getByLabelText("任务 id 过滤"), "task-xyz");
     await user.click(screen.getByTestId("pull-submit"));
 
     await waitFor(() =>
@@ -283,9 +308,201 @@ describe("失败保留表单（UI 实点联调打磨项）", () => {
     expect((screen.getByLabelText("状态过滤") as HTMLSelectElement).value).toBe(
       "collected",
     );
-    expect((screen.getByLabelText(/任务过滤/) as HTMLInputElement).value).toBe(
+    expect((screen.getByLabelText("任务 id 过滤") as HTMLInputElement).value).toBe(
       "task-xyz",
     );
     expect(pull).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("暂存区发现面与重导（#132 拉取恢复）", () => {
+  it("打开对话框查 /staged：滞留包出提示条，重导走 reimport 且成功后焚条", async () => {
+    pullStaged.mockResolvedValue([stagedEntry]);
+    reimport.mockResolvedValue({
+      name: "plate",
+      mode: "add",
+      pulled: 24,
+      added: 24,
+      skipped_existing: 0,
+      writeback: { ok: true, detail: "HTTP 200", sample_ids: [] },
+      reimported_from: stagedEntry.pull_id,
+    });
+    const user = userEvent.setup();
+    const { onCreated } = setup();
+    await screen.findByTestId("pull-staged-list");
+    expect(screen.getByText(/暂存待重导 · 1 包/)).toBeInTheDocument();
+    // 行内元素承载语义：模式徽章 + 元信息（时间 · 大小），长解释收悬停
+    const row = screen.getByTestId(`pull-staged-${stagedEntry.pull_id}`);
+    expect(row.textContent).toContain("加图");
+    expect(row.textContent).toContain("11-22 17:38");
+    expect(row.textContent).toContain("202 KB");
+    await user.click(screen.getByTestId(`pull-reimport-${stagedEntry.pull_id}`));
+    await waitFor(() =>
+      expect(reimport).toHaveBeenCalledWith({ name: "plate", pull_id: stagedEntry.pull_id }),
+    );
+    expect(pull).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledWith("plate");
+    // 成功即焚：提示条同步移除该包（仅此一条，整条消失）
+    await waitFor(() =>
+      expect(screen.queryByTestId("pull-staged-list")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("409 带暂存定位（detail.staged_pull_id）：一键回填重试走 reimport，不再向推理端拉取", async () => {
+    const err = new ApiRequestError("导入链阻断：表外类别", 409, "class_not_registered", {
+      source_labels: ["00_ng", "01_ok"],
+      staged_pull_id: stagedEntry.pull_id,
+    });
+    pull.mockRejectedValueOnce(err);
+    reimport.mockResolvedValue({
+      name: "plate",
+      mode: "add",
+      pulled: 24,
+      added: 24,
+      skipped_existing: 0,
+      writeback: { ok: true, detail: "HTTP 200", sample_ids: [] },
+      reimported_from: stagedEntry.pull_id,
+    });
+    const user = userEvent.setup();
+    setup();
+    await screen.findByTestId("producer-pull-dialog");
+    await user.click(screen.getByLabelText("加图到既有数据集"));
+    await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
+    await user.click(screen.getByTestId("pull-submit"));
+    await waitFor(() => expect(screen.getByTestId("pull-append-block")).toBeInTheDocument());
+    expect(screen.getByText(/已落暂存/)).toBeInTheDocument();
+    await user.click(screen.getByTestId("pull-retry-append"));
+    await waitFor(() =>
+      expect(reimport).toHaveBeenCalledWith({
+        name: "plate",
+        pull_id: stagedEntry.pull_id,
+        append_classes: ["00_ng", "01_ok"],
+      }),
+    );
+    // 关键断言：重试不再触发第二次全新拉取（对端已 exported，重拉必空）
+    expect(pull).toHaveBeenCalledTimes(1);
+    // 追加类别输入所见即所发
+    const input = screen.getByTestId("pull-append-classes") as HTMLInputElement;
+    expect(input.value).toBe("00_ng, 01_ok");
+  });
+
+  it("重导撞暂存已焚/已清扫（404 not_found）：降级回全新拉取（append_classes 随载荷）", async () => {
+    const err = new ApiRequestError("导入链阻断：表外类别", 409, "class_not_registered", {
+      source_labels: ["00_ng"],
+      staged_pull_id: stagedEntry.pull_id,
+    });
+    pull.mockRejectedValueOnce(err).mockResolvedValueOnce({
+      name: "plate",
+      mode: "add",
+      pulled: 2,
+      added: 2,
+      skipped_existing: 0,
+      writeback: { ok: true, detail: "HTTP 200", sample_ids: [] },
+    });
+    pullStaged.mockResolvedValue([stagedEntry]);
+    reimport.mockRejectedValue(
+      new ApiRequestError("暂存包不存在或已清理：20261122T173844-ac7f680b", 404, "not_found", {}),
+    );
+    const user = userEvent.setup();
+    setup();
+    await screen.findByTestId("producer-pull-dialog");
+    await user.click(screen.getByLabelText("加图到既有数据集"));
+    await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
+    await user.click(screen.getByTestId("pull-submit"));
+    await waitFor(() => expect(screen.getByTestId("pull-append-block")).toBeInTheDocument());
+    await user.click(screen.getByTestId("pull-retry-append"));
+    await waitFor(() => expect(pull).toHaveBeenCalledTimes(2));
+    expect(reimport).toHaveBeenCalledTimes(1);
+    const retryBody = pull.mock.calls[1][0];
+    expect(retryBody.append_classes).toEqual(["00_ng"]);
+  });
+
+  it("重导仍撞表外类别：块卡保留暂存定位可再试（暂存保留是服务端语义）", async () => {
+    const err = new ApiRequestError("导入链阻断：表外类别", 409, "class_not_registered", {
+      source_labels: ["00_ng"],
+      staged_pull_id: stagedEntry.pull_id,
+    });
+    pull.mockRejectedValueOnce(err);
+    reimport.mockRejectedValueOnce(err);
+    const user = userEvent.setup();
+    setup();
+    await screen.findByTestId("producer-pull-dialog");
+    await user.click(screen.getByLabelText("加图到既有数据集"));
+    await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
+    await user.click(screen.getByTestId("pull-submit"));
+    await waitFor(() => expect(screen.getByTestId("pull-append-block")).toBeInTheDocument());
+    await user.click(screen.getByTestId("pull-retry-append"));
+    await waitFor(() => expect(screen.getByText(/已落暂存/)).toBeInTheDocument());
+    expect(screen.getByTestId("pull-retry-append").textContent).toContain("重导");
+    expect(reimport).toHaveBeenCalledTimes(1);
+  });
+
+  it("producer_empty 且目标有滞留暂存包：错误文案改指引重导（重拉必空不再误导放宽过滤）", async () => {
+    pullStaged.mockResolvedValue([stagedEntry]);
+    pull.mockRejectedValue(
+      new ApiRequestError(
+        "推理端该过滤范围内没有可导出的样本（http://127.0.0.1:8100 返回 204）——放宽时间窗或状态再试",
+        404,
+        "producer_empty",
+        {},
+      ),
+    );
+    const user = userEvent.setup();
+    setup();
+    await screen.findByTestId("producer-pull-dialog");
+    await user.click(screen.getByLabelText("加图到既有数据集"));
+    await user.selectOptions(screen.getByLabelText("目标数据集"), "plate");
+    await user.click(screen.getByTestId("pull-submit"));
+    await waitFor(() => expect(screen.getByTestId("pull-error")).toBeInTheDocument());
+    expect(screen.getByTestId("pull-error").textContent).toContain("暂存包待重导");
+  });
+
+  it("删除暂存包：行内二次确认 → 取消回原行且不发请求", async () => {
+    pullStaged.mockResolvedValue([stagedEntry]);
+    const user = userEvent.setup();
+    setup();
+    await screen.findByTestId("pull-staged-list");
+    await user.click(screen.getByTestId(`pull-discard-${stagedEntry.pull_id}`));
+    // 确认态：后果提示 + 确认/取消，重导/删除钮暂撤
+    const confirmRow = screen.getByTestId(`pull-discard-confirm-${stagedEntry.pull_id}`);
+    expect(confirmRow.textContent).toContain("停留已导出态");
+    expect(screen.getByTestId(`pull-discard-yes-${stagedEntry.pull_id}`)).toBeInTheDocument();
+    await user.click(screen.getByTestId("pull-discard-no"));
+    // 取消：回原行，请求未发出
+    await waitFor(() =>
+      expect(screen.getByTestId(`pull-staged-${stagedEntry.pull_id}`)).toBeInTheDocument(),
+    );
+    expect(discard).not.toHaveBeenCalled();
+  });
+
+  it("确认删除 → 调 DELETE 接口 → 焚条（仅此一条时整条提示消失）", async () => {
+    pullStaged.mockResolvedValue([stagedEntry]);
+    discard.mockResolvedValue({ discarded: stagedEntry.pull_id });
+    const user = userEvent.setup();
+    setup();
+    await screen.findByTestId("pull-staged-list");
+    await user.click(screen.getByTestId(`pull-discard-${stagedEntry.pull_id}`));
+    await user.click(screen.getByTestId(`pull-discard-yes-${stagedEntry.pull_id}`));
+    await waitFor(() => expect(discard).toHaveBeenCalledWith(stagedEntry.pull_id));
+    await waitFor(() =>
+      expect(screen.queryByTestId("pull-staged-list")).not.toBeInTheDocument(),
+    );
+  });
+
+  it("删除撞已焚/已清扫（404 not_found）：静默焚条不标错", async () => {
+    pullStaged.mockResolvedValue([stagedEntry]);
+    discard.mockRejectedValue(
+      new ApiRequestError("暂存包不存在或已清理：x", 404, "not_found", {}),
+    );
+    const user = userEvent.setup();
+    setup();
+    await screen.findByTestId("pull-staged-list");
+    await user.click(screen.getByTestId(`pull-discard-${stagedEntry.pull_id}`));
+    await user.click(screen.getByTestId(`pull-discard-yes-${stagedEntry.pull_id}`));
+    await waitFor(() => expect(discard).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(screen.queryByTestId("pull-staged-list")).not.toBeInTheDocument(),
+    );
+    expect(screen.queryByTestId("pull-error")).not.toBeInTheDocument();
   });
 });

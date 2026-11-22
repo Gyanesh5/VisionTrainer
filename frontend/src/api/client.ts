@@ -198,6 +198,21 @@ export interface ProducerPullResult {
   validation_summary?: ValidationSummary;
 }
 
+/** GET /datasets/producer-pulls/staged：暂存区清单（#132 拉取恢复发现面，时间戳序旧在前） */
+export interface StagedPull {
+  pull_id: string;
+  staged_at: string | null;
+  name: string | null;
+  mode: string | null;
+  task_type: string | null;
+  size_bytes: number;
+}
+
+/** POST /datasets/producer-pulls/reimport：从暂存 ZIP 重导（#132，契约 §5.5）——返回同拉取导入，另带 reimported_from 与实际生效 mode（目标存在=add/不存在=create） */
+export interface ProducerReimportResult extends ProducerPullResult {
+  reimported_from: string;
+}
+
 export interface CreateDatasetResult {
   name: string;
   task_type: TaskType;
@@ -677,6 +692,32 @@ export const datasetsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  /** 暂存区清单（#132 拉取恢复发现面）：待重导拉取包一览；超期（14 天）暂存顺带清扫 */
+  producerPullsStaged: () =>
+    request<StagedPull[]>("/api/v1/datasets/producer-pulls/staged"),
+  /** 从暂存 ZIP 重导（#132，契约 §5.5）：拉取导入同一套导入链，成功即焚暂存；
+   * 404 not_found = pull_id 不存在/已焚/已清扫 */
+  producerReimport: (body: {
+    name: string;
+    pull_id: string;
+    task_type?: string | null;
+    classes?: string[];
+    /** add 重试撞表外类别 409 的追加重试载荷（#131 同口径） */
+    append_classes?: string[];
+    base_url?: string | null;
+  }) =>
+    request<ProducerReimportResult>("/api/v1/datasets/producer-pulls/reimport", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  /** 丢弃暂存包（#132 保留策略人工出口）：删本地 ZIP+sidecar；不动推理端样本
+   * （对应样本停留 exported 态，重进导出选集走对端样本池重置）；404 = 已焚/已清扫 */
+  producerStagedDiscard: (pullId: string) =>
+    request<{ discarded: string }>(
+      `/api/v1/datasets/producer-pulls/staged/${encodeURIComponent(pullId)}`,
+      { method: "DELETE" },
+    ),
 };
 
 // ---------------------------------------------------------------- 训练域元数据与提交
