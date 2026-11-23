@@ -24,6 +24,13 @@ _VALID_SCHEMES = ("http://", "https://")
 # 旧键名仍可能存在于存量数据（runtime_settings 行、config.toml 节、dataset meta 键），
 # 读路径兼容回退、写路径恒用新键。旧字面量被 #129 grep 验收（\bmonitor 零命中）禁于
 # src/，故拆段拼出——这是唯一的兼容残留点，其余代码一律引用这里的常量。
+#
+# 退役条件（#150 注记）：存量部署的三处旧键清零——runtime_settings 无旧键行
+# （按 LEGACY_RUNTIME_KEY 查表零命中）、config.toml 无旧节、dataset meta 无旧键
+# producer_imports 记录——之后整段兼容层可一并删除：本常量段、`_runtime_value`
+# 旧键回退（本文件）、`config._migrate_legacy_producer_section`（节迁移）、
+# `service._read_meta` 旧键并入（datasets/service.py）。删除前新增读侧回退点
+# 须先回到本段注记登记。
 
 _LEGACY_TOKEN = "mon" + "itor"
 LEGACY_RUNTIME_KEY = _LEGACY_TOKEN + ".base_url"      # runtime_settings 旧键

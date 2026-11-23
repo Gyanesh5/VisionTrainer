@@ -248,6 +248,12 @@ def _sha256_of(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# 幂等预检的词干收集口径（#150 单侧定义两侧共用）：图后缀 + 同词干标注 JSON。
+# 真源侧同口径收集——真源目录里的同名异后缀文件（如 .txt）不构成「已存在」，
+# 不再把新词干误判成 content_mismatch 整词干拒收。
+_IDEM_SUFFIXES = (*svc.IMAGE_EXTS, ".json")
+
+
 def _stem_plan(unpack: Path, source: Path) -> tuple[list[Path], list[str], int, list[dict]]:
     """逐文件幂等预检（#132，契约 §5.5/§6.4 重复防线第 2 层）：按词干分组比对既有真源。
 
@@ -255,6 +261,7 @@ def _stem_plan(unpack: Path, source: Path) -> tuple[list[Path], list[str], int, 
     - 真源无此词干 → 照常入库（picked）；
     - 同词干同内容（逐文件 sha256 一致）→ 跳过（skipped）；
     - 同词干异内容（任一文件缺同名对应或字节不一）→ 拒收登记（rejected），真源一字节不动。
+    词干收集两侧同按 `_IDEM_SUFFIXES` 口径（#150）：真源同名异后缀文件不算既有词干。
     与手工加图路径的「同名冲突整批 409」（`svc.add_images` 票 04 契约）互不影响——
     幂等只作用于拉取导入器。
 
@@ -263,11 +270,12 @@ def _stem_plan(unpack: Path, source: Path) -> tuple[list[Path], list[str], int, 
     """
     pkg_by_stem: dict[str, list[Path]] = {}
     for p in sorted((unpack / "images").rglob("*")):
-        if p.is_file() and p.suffix.lower() in (*svc.IMAGE_EXTS, ".json"):
+        if p.is_file() and p.suffix.lower() in _IDEM_SUFFIXES:
             pkg_by_stem.setdefault(p.stem, []).append(p)
     source_stems: set[str] = set()
     if source.is_dir():
-        source_stems = {p.stem for p in source.iterdir() if p.is_file()}
+        source_stems = {p.stem for p in source.iterdir()
+                        if p.is_file() and p.suffix.lower() in _IDEM_SUFFIXES}
     picked: list[Path] = []
     skipped_stems: list[str] = []
     skipped_files = 0
@@ -288,23 +296,40 @@ def _stem_plan(unpack: Path, source: Path) -> tuple[list[Path], list[str], int, 
     return picked, skipped_stems, skipped_files, rejected
 
 
-def _manifest_stem_map(manifest: dict) -> dict[str, str]:
+def _manifest_stem_map(manifest: dict) -> tuple[dict[str, str], list[str]]:
     """manifest 样本清单的 词干→sample_id 映射（词干是回写归因的 join 键，GLOSSARY 联动域口径）。
 
     images 条目键按契约 §4.4 冻结格式读 ``file``（``images[{file, source}]``）——拒收
-    归因（`_finish_import`）靠它把被拒词干映射回 sample_id 剔出回写；读错键映射恒空，
-    被拒样本会混进 ingested 回写。
+    归因（`_finish_import`）靠它把被拒词干映射回 sample_id 剔出回写。逐样本断言
+    （#150 fail loud）：images 缺失/空、或任一 ``file`` 键读不出词干的样本无法归因，
+    进第二返回值（归因失效样本 id 清单）——调用方显式登记拒绝段（manifest_key_mismatch）
+    并剔出回写，不再静默空映射（被拒样本混进 ingested 回写，推理端把「拒收」记成
+    「已入库」）。
+
+    Returns:
+        (词干→sample_id 映射, 归因失效样本 id 清单)。
     """
     out: dict[str, str] = {}
+    bad: list[str] = []
     for s in manifest.get("samples") or []:
         sid = s.get("sample_id")
         if not sid:
             continue
-        for img in s.get("images") or []:
-            stem = Path(str(img.get("file", ""))).stem
+        imgs = s.get("images") or []
+        ok = bool(imgs)
+        stems: list[str] = []
+        for img in imgs:
+            stem = Path(str(img.get("file", ""))).stem if isinstance(img, dict) else ""
             if stem:
+                stems.append(stem)
+            else:
+                ok = False
+        if ok:
+            for stem in stems:
                 out[stem] = str(sid)
-    return out
+        else:
+            bad.append(str(sid))
+    return out, bad
 
 
 def _count_images(ds_dir: Path) -> int:
@@ -344,20 +369,6 @@ def _append_manifest_meta(ds_dir: Path, manifest: dict, *, mode: str, base: str,
         "filters": filters,
     })
     svc._write_meta(ds_dir, meta)
-
-
-# ---------------------------------------------------------------- 出站：状态回写
-
-
-def writeback_ingested(base: str, sample_ids: list[str]) -> dict:
-    """回写推理端样本状态 ingested（``POST {base}/api/samples/status``）。
-
-    出站契约与失败降级口径见 `datasets.producer_writeback`（票 125 提取为共享单一
-    实现，ingested/trained 两态共用）：body ``{"status": "ingested", "sample_ids":
-    [...]}``。失败只告警不阻断导入主流程（通知域同口径降级）：返回
-    ``{ok, detail, sample_ids}``，ok=False 时 detail 人读、已告警留日志。
-    """
-    return producer_writeback.writeback_ingested(base, sample_ids)
 
 
 # ---------------------------------------------------------------- 主流程
@@ -483,6 +494,11 @@ def _ingest_unpack(unpack: Path, manifest: dict, *, mode: str, name: str,
             svc.add_images(name, [str(p) for p in picked], "copy", root=root,
                            append_classes=append_classes, progress_cb=progress_cb)
         added = sum(1 for p in picked if p.suffix.lower() in svc.IMAGE_EXTS)
+    # manifest 逐样本断言（#150 fail loud）：读不出 images[].file 词干的样本无法归因，
+    # 显式登记拒绝段（与词干拒收并列进导入报告与 meta 落账）——不再静默空映射
+    _, unattributed = _manifest_stem_map(manifest)
+    rejected = [*rejected, *({"sample_id": sid, "reason": "manifest_key_mismatch"}
+                             for sid in unattributed)]
     _append_manifest_meta(ds_dir, manifest, mode=mode, base=base, filters=filters,
                           import_skipped=skipped_stems, import_rejected=rejected)
     return {"mode": mode, "manifest": manifest, "sample_ids": sample_ids,
@@ -492,12 +508,15 @@ def _ingest_unpack(unpack: Path, manifest: dict, *, mode: str, name: str,
 
 
 def _writeback_best_effort(base: str, sample_ids: list[str]) -> dict:
-    """ingested 回写尽力而为（通知域同口径降级）；基址缺失时记一条 ok=False 不外呼。"""
+    """ingested 回写尽力而为（通知域同口径降级）；基址缺失时记一条 ok=False 不外呼。
+
+    出站契约与失败降级口径见 `datasets.producer_writeback`（票 125 提取为共享单一
+    实现，ingested/trained 两态共用），此处直呼不再转发。"""
     if not base:
         return {"ok": False,
                 "detail": "推理端连接地址未配置——回写未执行（配置后可经重导/重拉幂等补写）",
                 "sample_ids": sample_ids}
-    return writeback_ingested(base, sample_ids)
+    return producer_writeback.writeback_ingested(base, sample_ids)
 
 
 def _finish_import(*, name: str, base: str, ingested: dict, root: Path | None,
@@ -505,15 +524,17 @@ def _finish_import(*, name: str, base: str, ingested: dict, root: Path | None,
     """导入完成后的公共收尾（拉取与暂存重导共用，#132 提取）：ingested 回写 + 响应组装。
 
     拒收 ≠ ingested：被拒词干不回写（样本留在推理端 exported 态待人工处置，§5.5 拒收
-    登记）；跳过词干（先前已入库）随批次幂等重申，回写侧同态重复受理（§5.3）。词干缺
-    manifest 映射时无法归因，按现状随批次回写（尽力而为，失败不阻断）。"""
+    登记）；跳过词干（先前已入库）随批次幂等重申，回写侧同态重复受理（§5.3）。
+    manifest ``images[].file`` 读不出词干的样本无法归因（#150 fail loud）：一律剔出
+    回写（已在 `_ingest_unpack` 计入拒绝段），不让「拒收」混成「已入库」污染对端账本。"""
     manifest = ingested["manifest"]
     sample_ids = ingested["sample_ids"]
     rejected = ingested["rejected"]
     if progress_cb is not None:
         progress_cb("回写状态", len(sample_ids), len(sample_ids))
-    stem_map = _manifest_stem_map(manifest)
-    rejected_ids = {stem_map[r["stem"]] for r in rejected if stem_map.get(r["stem"])}
+    stem_map, unattributed = _manifest_stem_map(manifest)
+    rejected_ids = {stem_map[r["stem"]] for r in rejected if stem_map.get(r.get("stem"))}
+    rejected_ids.update(unattributed)
     writeback_ids = [sid for sid in sample_ids if sid not in rejected_ids]
     writeback = _writeback_best_effort(base, writeback_ids)
     meta = svc.get_dataset(name, root)
