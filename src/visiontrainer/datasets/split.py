@@ -281,7 +281,7 @@ def eligible_names(ds_dir: Path, *, approved_only: bool) -> list[str]:
 # ---------------------------------------------------------------- 划分算法
 
 def _units_of(records: list[dict], groups: dict[str, list[str]] | None) -> list[dict]:
-    """随机单位：分组非空时单位是源图（同源瓦片恒同侧，防跨切分泄漏），
+    """随机单位：分组非空时单位是源图（同源图块恒同侧，防跨切分泄漏），
     无组键的文件各自成单元素组；不分组时一文件一单位。"""
     if not groups:
         return [{"key": r["name"], "members": [r["name"]], "primary": r["primary_label"]}
@@ -329,7 +329,7 @@ def _assign(units: list[dict], ratio: float, seed: int, stratify: bool) -> tuple
 
 
 def _side_of_existing_group(unit: dict, known_side: dict[str, str]) -> str | None:
-    """继承模式下**部分新**的源图单位：新瓦片跟随同组既有成员的归属（守住同源同侧）。
+    """继承模式下**部分新**的源图单位：新图块跟随同组既有成员的归属（守住同源同侧）。
 
     既有成员若历史遗留跨侧，按多数走，平票归 train。
     """
@@ -362,8 +362,8 @@ def plan_split(
     - inherit（继承归属）：参照 = parent_uid，锁定其 seed/ratio/stratify（调用方另给的值
       以参照为准），既有成员归属一字不动、也不因排除或缺图被剔出（那是实效集的事），
       只把新进合格文件按同一随机过程放进来；approved_only 与 memo 按调用方给的值。
-      分组时新瓦片若与既有成员同属一张源图，则跟随该源图既有归属，守住同源同侧。
-    - groups 来自 dataset.json 的 tiling.groups（{源图键: [瓦片名,...]}），由调用方传入；
+      分组时新图块若与既有成员同属一张源图，则跟随该源图既有归属，守住同源同侧。
+    - groups 来自 dataset.json 的 tiling.groups（{源图键: [图块名,...]}），由调用方传入；
       非空即标 grouped=source_image。
     """
     if mode not in SPLIT_MODES:

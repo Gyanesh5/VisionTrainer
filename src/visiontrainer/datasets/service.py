@@ -1099,9 +1099,9 @@ def _entity_call(fn, *args, **kwargs):
 
 
 def _tiling_groups(meta: dict) -> dict[str, list[str]] | None:
-    """切片集的分组依据（`dataset.json.tiling.groups`：{源图名: [瓦片名,…]}）。
+    """切片集的分组依据（`dataset.json.tiling.groups`：{源图名: [图块名,…]}）。
 
-    非空即「恒按源图分组」——新建切分时同源瓦片必须同侧；普通数据集没有这个键，返回 None
+    非空即「恒按源图分组」——新建切分时同源图块必须同侧；普通数据集没有这个键，返回 None
     让切分按文件为单位。
     """
     return ((meta.get("tiling") or {}).get("groups")) or None
@@ -1314,7 +1314,7 @@ def tile_dataset(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
     失败清理半成品目录。
 
     票 05 裁决：**产物出生不切分**（旧「按源图分组随机重切」随清单层一起删除），只校验 +
-    画像（全集口径）；`tiling.groups` 持久化「源图 → 瓦片名」组键，后续所有切分恒按它分组
+    画像（全集口径）；`tiling.groups` 持久化「源图 → 图块名」组键，后续所有切分恒按它分组
     （无组键文件各自成单元素组，见 `split.plan_split`）。
     """
     from . import review as rv
@@ -1415,7 +1415,7 @@ def tile_dataset(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
                        "at": now, "transfer": "copy"},
             "validation_summary": drops_lib.new_summary(
                 report, source_fingerprint(src_dir), None),
-            # spec §3.1：tiling{source,rows,cols,overlap,keep_empty,groups}——groups 持久化瓦片→源图组键
+            # spec §3.1：tiling{source,rows,cols,overlap,keep_empty,groups}——groups 持久化图块→源图组键
             "tiling": {"source": name, "rows": rows, "cols": cols, "overlap": overlap,
                        "keep_empty": keep_empty,
                        "groups": {Path(g["source"]).name: [Path(en["image"]).name for en in g["entries"]]

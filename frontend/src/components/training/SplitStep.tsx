@@ -400,7 +400,7 @@ function NewSplitPanel({
               <p className="form-hint tnum">本划分内泄漏组 {preview.leak_groups}</p>
             )}
             {preview.grouped === "source_image" && (
-              <p className="form-hint">切片集：恒按源图分组（同源瓦片同侧），无组键文件各自成组</p>
+              <p className="form-hint">切片集：恒按源图分组（同源图块同侧），无组键文件各自成组</p>
             )}
             {preview.effective?.counts && (
               <p className="form-hint tnum">

@@ -91,7 +91,7 @@
 | POST | `/api/v1/datasets/{id}/tile/preview` | 切片预览（dry-run 零写入，数字与执行同口径）。body: `{rows?, cols?, overlap?, keep_empty?}`（默认 2/2/0.2/false，rows·cols ∈ 1–4、overlap ∈ 0–0.5）；返回 `{images, tiles_total, tiles_written, empty_dropped, frag_empty_dropped, assignments, kept_assignments, dropped_assignments, dropped_pct, shapes_nowhere, re_review, skipped[], params, default_name}`；外部/pose/classify 数据集 → 400 |
 | POST | `/api/v1/datasets/{id}/tile` | 执行切片 → 新托管数据集（源集零改动）。body: `{rows?, cols?, overlap?, name?, keep_empty?}`；完整落入、空片策略与审查继承不变；出生只校验+画像，不切分；返回 `{meta（含 tiling 血缘及 groups 映射）, validation_summary}`；重名或无可产片 409 |
 
-同步语义：切片集是普通托管数据集，source/ 为真源；tiling.groups 持久化瓦片→源图关系，后续 splits preview/create 恒按源图分组，无组键文件各自成组。
+同步语义：切片集是普通托管数据集，source/ 为真源；tiling.groups 持久化图块→源图关系，后续 splits preview/create 恒按源图分组，无组键文件各自成组。
 
 ### 数据集域自动修复（2026-10-30，ADR 0005）
 
