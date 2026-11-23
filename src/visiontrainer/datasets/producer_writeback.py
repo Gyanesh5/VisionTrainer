@@ -97,22 +97,27 @@ def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict
     归因不断链。
 
     Returns:
-        ``{"sample_ids": [...], "sample_models": [...]}``——
+        ``{"sample_ids": [...], "sample_models": [...], "skip_reason": str | None}``——
         - ``sample_ids``：命中样本 id，顺序沿导入批次落账序、去重保序；
         - ``sample_models``：命中批次（≥1 样本命中的导入记录）manifest.models 并集，
           形态与导出包 manifest.models 一致（``[{model_id, model_sha8}]``，按二元组
           去重保序，ADR 0018 Decision 4）——发布面 ``sample_models`` 字段零翻译取数
           （票 #147 消费）。
-        数据集无联动导入记录、Run 无实效快照或零命中 → 两键均空清单。
+        - ``skip_reason``（票 #149）：零归因时的原因细分——数据集已删 ``dataset_deleted``、
+          无联动导入 ``no_imports``（原 ``no_attribution`` 一码二义的排障拆分）；命中
+          （含在册但零交集）→ None。
+        零命中 → ``sample_ids``/``sample_models`` 均空清单。
     """
     try:
         meta = svc.get_dataset(dataset, root)
     except svc.DatasetError:
-        return {"sample_ids": [], "sample_models": []}
+        return {"sample_ids": [], "sample_models": [], "skip_reason": "dataset_deleted"}
     imports = meta.get("producer_imports") or []
+    if not imports:
+        return {"sample_ids": [], "sample_models": [], "skip_reason": "no_imports"}
     names = effective_names(run_dir)
-    if not imports or names is None:
-        return {"sample_ids": [], "sample_models": []}
+    if names is None:
+        return {"sample_ids": [], "sample_models": [], "skip_reason": None}
     names = _source_scope(names, (meta.get("tiling") or {}).get("groups"))
     ids: list[str] = []
     models: list[dict] = []
@@ -149,22 +154,27 @@ def writeback_trained_for_run(dataset: str, run_dir, cfg: dict | None = None) ->
     """Run 终态成功后的 trained 回写（`training.manager` 终态钩子调用，票 125）。
 
     归因交集 → 出站回写；失败只告警不阻断训练主流程：日志 warning + 桌面通知
-    （后台回写无 REST 响应面，告警可见性走通知域）。永不抛异常。
+    （后台回写无 REST 响应面，告警可见性走通知域）。永不抛异常。断链兜底走
+    `POST /api/v1/runs/{uid}/writeback-trained` 手动重放（票 #149，契约 §5.3
+    对端同态受理）——重训补不回原 Run 归因，提示语与机制一致。
 
     Returns:
-        回写结果 {ok, detail, sample_ids}；无从归因或推理端地址未配置（联动未启用）
-        时 {ok: None, skipped: 原因, sample_ids}——属正常态，不算失败。
+        回写结果 {ok, detail, sample_ids}；无从归因（skipped 细分见
+        `trained_attribution`，票 #149）或推理端地址未配置（联动未启用）时
+        {ok: None, skipped: 原因, sample_ids}——属正常态，不算失败。
     """
-    ids = trained_sample_ids(dataset, run_dir)
+    attribution = trained_attribution(dataset, run_dir)
+    ids = attribution["sample_ids"]
     if not ids:
-        return {"ok": None, "skipped": "no_attribution", "sample_ids": []}
+        return {"ok": None, "skipped": attribution["skip_reason"] or "no_attribution",
+                "sample_ids": []}
     base = producer.get_producer_base_url(cfg)
     if not base:
         return {"ok": None, "skipped": "producer_not_configured", "sample_ids": ids}
     result = writeback_trained(base, ids)
     if not result["ok"]:
         detail = (f"数据集「{dataset}」的 trained 状态回写失败：{result['detail']}"
-                  "——训练不受影响，可重训或从数据集页重新拉取后补写")
+                  "——训练不受影响，可修复推理端连接后在运行详情页重放回写补写")
         _logger.warning("trained 回写失败（不阻断训练）：%s", detail)
         from ..core.notify import desktop_notify
 

@@ -36,6 +36,9 @@ export function RunDetailPage() {
   const [deleteForce, setDeleteForce] = useState(false);
   const [deployOpen, setDeployOpen] = useState(false);
   const [releaseOpen, setReleaseOpen] = useState(false);
+  // trained 回写重放（票 149）：结果摘要行内展示（成功样本数 / skipped 原因 / 失败 detail）
+  const [wbNote, setWbNote] = useState<string | null>(null);
+  const [wbBusy, setWbBusy] = useState(false);
   const [tiOpen, setTiOpen] = useState(false);
   const [bigImage, setBigImage] = useState<ThumbUrl | null>(null);
   // run.metrics 逐 epoch 一发：门铃节流 1s
@@ -117,6 +120,27 @@ export function RunDetailPage() {
       void queryClient.invalidateQueries({ queryKey: ["queue"] });
     } catch (e) {
       setActionError(`${errMsg}：${e instanceof Error ? e.message : "未知错误"}`);
+    }
+  }
+
+  // trained 回写重放（票 149，契约 §5.3）：归因上下文冻结态，重发同态载荷、幂等靠
+  // 对端同态受理；三种结果形态（成功/失败/跳过）都行内如实展示，不静默
+  async function replayWriteback() {
+    setWbNote(null);
+    setWbBusy(true);
+    try {
+      const r = await runsApi.writebackTrained(uid);
+      if (r.ok === true) {
+        setWbNote(`trained 回写成功：${r.sample_ids.length} 个样本`);
+      } else if (r.ok === false) {
+        setWbNote(`trained 回写失败：${r.detail ?? "未知原因"}`);
+      } else {
+        setWbNote(`trained 回写跳过（${r.skipped ?? "no_attribution"}）——无可回写样本`);
+      }
+    } catch (e) {
+      setActionError(`重放回写失败：${e instanceof Error ? e.message : "未知错误"}`);
+    } finally {
+      setWbBusy(false);
     }
   }
 
@@ -238,6 +262,11 @@ export function RunDetailPage() {
                   onClick={() => setDeployOpen(true)}>
                   部署到标注端
                 </button>
+                <button type="button" className="btn" data-testid="run-writeback" disabled={wbBusy}
+                  title="重放 trained 回写（票 149）：推理端离线等回写断链时的兜底——归因上下文冻结，重发同态载荷，幂等由对端受理"
+                  onClick={() => void replayWriteback()}>
+                  重放回写
+                </button>
               </>
             )}
             {terminal && (
@@ -267,6 +296,7 @@ export function RunDetailPage() {
           </p>
         )}
         {run.error && <p className="error-note" data-testid="run-error">{run.error}</p>}
+        {wbNote && <p className="meta-line" data-testid="run-writeback-note">{wbNote}</p>}
         {!terminal && prog && (
           <div className="run-progress" data-testid="run-progress">
             <span className="tnum">

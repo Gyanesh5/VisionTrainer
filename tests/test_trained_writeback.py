@@ -492,6 +492,138 @@ def test_attribution_sample_models_unions_hit_batches(datasets_root, tmp_path):
 # ---------------------------------------------------------------- 改名兼容：旧 meta 键归因不断（#129 验收③）
 
 
+# ---------------------------------------------------------------- 手动重放（#149，契约 §5.3 对端同态受理）
+
+
+def _done_run(client: TestClient, fake_producer: str, name: str, task_name: str,
+              epochs: int = 1) -> str:
+    """联动导入 → 切分 → 短训 done 的公共前置，返回 run_uid（重放测试复用）。"""
+    FakeProducerHandler.bundle = build_bundle(_two_samples(), ["car", "person"])
+    r = _pull(client, fake_producer, name=name)
+    assert r.status_code == 200, r.text
+    assert client.put("/api/v1/system/producer",
+                      json={"base_url": fake_producer}).status_code == 200
+    assert client.post(f"/api/v1/datasets/{name}/splits",
+                       json={"mode": "fresh", "seed": 42, "ratio": 0.8}).status_code == 200
+    r = client.post("/api/v1/tasks", json={
+        "name": task_name, "base_model": "stub-model", "dataset": name, "epochs": epochs})
+    assert r.status_code == 200, r.text
+    task = _wait_task(client, r.json()["uid"], {"done"})
+    run_uid = task["runs"][0]["uid"]
+    _wait_status(client, run_uid, {"done"})
+    return run_uid
+
+
+def test_replay_writeback_trained_repeats_same_payload(wb_client, fake_producer,
+                                                       datasets_root):
+    """done Run 手动重放：归因上下文（快照实效集 + meta 联动账目）都是冻结态，重放
+    发出与首次后台回写相同的载荷（契约 §5.3 幂等=对端同态重复受理）；连发两次载荷
+    同态重复，响应携带归因样本清单。"""
+    run_uid = _done_run(wb_client, fake_producer, "mfd", "wb-replay")
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-bbbb"]}])  # 首次后台回写到场
+
+    FakeProducerHandler.writeback_bodies = []
+    r1 = wb_client.post(f"/api/v1/runs/{run_uid}/writeback-trained")
+    assert r1.status_code == 200, r1.text
+    body = r1.json()
+    assert body["ok"] is True
+    assert body["sample_ids"] == ["s-aaaa", "s-bbbb"]
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-bbbb"]}])  # 同载荷重放
+
+    FakeProducerHandler.writeback_bodies = []
+    assert wb_client.post(f"/api/v1/runs/{run_uid}/writeback-trained").status_code == 200
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-bbbb"]}])  # 同态重复受理
+
+
+def test_replay_skipped_dataset_deleted(wb_client, fake_producer, datasets_root):
+    """数据集已删（回写断链可接受语义，契约 §5.3）：重放响应 skipped=dataset_deleted，
+    无出站载荷——排障可分辨（区别于从未有联动导入）。"""
+    run_uid = _done_run(wb_client, fake_producer, "mfd-gone", "wb-gone")
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-bbbb"]}])
+    import shutil
+
+    shutil.rmtree(datasets_root / "mfd-gone")
+
+    FakeProducerHandler.writeback_bodies = []
+    r = wb_client.post(f"/api/v1/runs/{run_uid}/writeback-trained")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is None
+    assert r.json()["skipped"] == "dataset_deleted"
+    _assert_no_trained()
+
+
+def test_replay_skipped_no_imports(wb_client, datasets_root, tmp_path):
+    """非联动数据集（无 producer_imports 账目）的 done Run：重放响应 skipped=no_imports，
+    与 dataset_deleted 可分辨（票 #149 skipped 细分验收）。"""
+    build_dataset("wb-plain", "detect", str(_unit_src(tmp_path)))
+    r = wb_client.post("/api/v1/tasks", json={
+        "name": "wb-plain", "base_model": "stub-model", "dataset": "wb-plain",
+        "epochs": 1})
+    assert r.status_code == 200, r.text
+    task = _wait_task(wb_client, r.json()["uid"], {"done"})
+    run_uid = task["runs"][0]["uid"]
+    _wait_status(wb_client, run_uid, {"done"})
+
+    r = wb_client.post(f"/api/v1/runs/{run_uid}/writeback-trained")
+    assert r.status_code == 200, r.text
+    assert r.json()["ok"] is None
+    assert r.json()["skipped"] == "no_imports"
+    _assert_no_trained()
+
+
+def test_replay_requires_done_run(wb_client, fake_producer, datasets_root, tmp_path):
+    """重放资格门：仅 done Run——cancelled 409 state_conflict、Run 不存在 404。"""
+    build_dataset("wb-gate", "detect", str(_unit_src(tmp_path)))
+    r = wb_client.post("/api/v1/tasks", json={
+        "name": "wb-gate", "base_model": "stub-model", "dataset": "wb-gate",
+        "epochs": 8})
+    assert r.status_code == 200, r.text
+    task = _wait_task(wb_client, r.json()["uid"], {"running"})
+    run_uid = task["runs"][0]["uid"]
+    assert wb_client.post(f"/api/v1/runs/{run_uid}/stop").status_code == 200
+    assert _wait_status(wb_client, run_uid, {"cancelled"})["status"] == "cancelled"
+
+    r = wb_client.post(f"/api/v1/runs/{run_uid}/writeback-trained")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["error"]["code"] == "state_conflict"  # api/tasks.py _err 信封
+    r = wb_client.post("/api/v1/runs/no-such-run/writeback-trained")
+    assert r.status_code == 404, r.text
+    assert r.json()["detail"]["error"]["code"] == "not_found"
+
+
+def test_replay_failure_returns_result_not_5xx(wb_client, fake_producer, datasets_root,
+                                               monkeypatch):
+    """重放时推理端不可达：端点同步返回 200 且 ok=false 带 detail（回写尽力而为，
+    契约 §5.3——出站失败不构成 REST 5xx），训练主流程与首次回写同款不阻断。"""
+    monkeypatch.setattr("visiontrainer.core.notify.desktop_notify",
+                        lambda title, body, cfg=None: True)  # 告警留响应面断言，弹窗静默
+    run_uid = _done_run(wb_client, fake_producer, "mfd", "wb-replay-fail")
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-bbbb"]}])
+
+    assert wb_client.put("/api/v1/system/producer",
+                         json={"base_url": "http://127.0.0.1:1"}).status_code == 200
+    r = wb_client.post(f"/api/v1/runs/{run_uid}/writeback-trained")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is False
+    assert "不可达" in body["detail"]
+    assert body["sample_ids"] == ["s-aaaa", "s-bbbb"]
+
+
+def test_attribution_skip_reason_splits_deleted_and_no_imports(datasets_root, tmp_path):
+    """no_attribution 二义细分（票 #149，归因查询侧）：数据集不存在 → dataset_deleted、
+    在册无联动导入 → no_imports——既有 sample_ids/sample_models 投影形状不回归。"""
+    run_dir = _write_snapshot(tmp_path / "run-skip", train=["a.png"], val=[])
+    result = producer_writeback.trained_attribution("u-no-such-ds", run_dir)
+    assert result["sample_ids"] == [] and result["sample_models"] == []
+    assert result["skip_reason"] == "dataset_deleted"
+
+    build_dataset("u-skip", "detect", str(_unit_src(tmp_path)))
+    result = producer_writeback.trained_attribution("u-skip", run_dir)
+    assert result["sample_ids"] == []
+    assert result["skip_reason"] == "no_imports"
+
+
 def test_trained_attribution_reads_legacy_meta_key(wb_client, fake_producer, datasets_root):
     """旧版落账（meta 旧键）的 dataset.json：trained 回写归因不断、读侧迁移到新键。"""
     from visiontrainer.core.producer import LEGACY_IMPORTS_META_KEY

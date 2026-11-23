@@ -134,7 +134,7 @@
 
 ### 训练域票 125 增补（trained 回写，2026-11-18）
 
-联动域状态回写第二态（ADR 0015 Decision 5，无新增 REST 端点——回写为平台后台出站动作）：消费某数据集的 Run 生命周期终态成功（done，含平台重启后孤儿按产物判定 done）后，按归因交集回写推理端样本状态 trained。归因口径（共享查询 `trained_attribution`，#146）：该数据集 meta `producer_imports` 样本清单 ∩ 该 Run 实际消费名单（运行快照 `run_manifest.json` 的 `effective` 冻结段，相对 `source/` 文件名）——只有本次训练真正进 train/val 的样本才回写（盘上缺图/排除在册的剔除样本不回写），且只碰该 Run 消费数据集的清单，其他导入批次与其他数据集不受误伤；切片派生数据集的实效名单是图块名（`{源图stem}_r{行}c{列}`），归因先经 `tiling.groups` 归约回源图口径再匹配 manifest（#146，契约 §6.2；联动账目随切片快照性拷贝进切片集 meta，切片链回写不断链），直训链无 tiling 段行为不变；数据集无联动导入记录或 Run 无实效快照（外部数据集/历史 Run）则不回写。非 done 终态（failed/cancelled/stopping）不回写。回写由后台线程执行，不阻塞训练收尾链路；失败只告警不阻断训练主流程（桌面通知 + 日志 warning，与通知域一致降级口径），可在修复推理端连接后重训补写。
+联动域状态回写第二态（ADR 0015 Decision 5）：消费某数据集的 Run 生命周期终态成功（done，含平台重启后孤儿按产物判定 done）后，按归因交集回写推理端样本状态 trained。归因口径（共享查询 `trained_attribution`，#146）：该数据集 meta `producer_imports` 样本清单 ∩ 该 Run 实际消费名单（运行快照 `run_manifest.json` 的 `effective` 冻结段，相对 `source/` 文件名）——只有本次训练真正进 train/val 的样本才回写（盘上缺图/排除在册的剔除样本不回写），且只碰该 Run 消费数据集的清单，其他导入批次与其他数据集不受误伤；切片派生数据集的实效名单是图块名（`{源图stem}_r{行}c{列}`），归因先经 `tiling.groups` 归约回源图口径再匹配 manifest（#146，契约 §6.2；联动账目随切片快照性拷贝进切片集 meta，切片链回写不断链），直训链无 tiling 段行为不变；数据集无联动导入记录或 Run 无实效快照（外部数据集/历史 Run）则不回写。非 done 终态（failed/cancelled/stopping）不回写。回写由后台线程执行，不阻塞训练收尾链路；失败只告警不阻断训练主流程（桌面通知 + 日志 warning，与通知域一致降级口径）——修复推理端连接后经 `POST /api/v1/runs/{uid}/writeback-trained` 手动重放补写（票 #149；重训补不回原 Run 归因，勿以重训当补写手段）。
 
 **出站回写契约（trained 态）**：Run 终态成功后平台发起 `POST {推理端基址}/api/samples/status`，body `{"status": "trained", "sample_ids": [归因交集的逐条 sample_id]}`（与 ingested 态同一端点同一形状，`status` 换 `trained`；共享出站实现 `datasets/producer_writeback.py`）。响应不进入任何 REST 响应面——结果只落日志与告警；样本状态机 `exported → ingested → trained` 中 ingested 见票 124 段。
 
@@ -182,6 +182,7 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 | POST | `/api/v1/runs/{uid}/stop` | 优雅停止：SIGTERM → trainer.stop → killpg（04） |
 | POST | `/api/v1/runs/{uid}/force-stop` | 强制终止：跳过优雅停止直接 killpg SIGKILL，watchdog 不在场时就地落 cancelled（stopping 卡死的兜底出口，2026-09-21） |
 | POST | `/api/v1/runs/{uid}/resume` | 从此 Run 续训 → 新 Run（**从不自动续训**，人肉触发）；恒钉该 Run 快照的原 `split_uid`，不走「最近」，实效集按当时盘上真相重算 |
+| POST | `/api/v1/runs/{uid}/writeback-trained` | 手动重放 trained 回写（票 #149，契约 §5.3）：仅 done Run（其余 409 `state_conflict`；不存在 404），同步重新触发 `writeback_trained_for_run`——归因上下文（快照实效集 + meta 联动账目）都是冻结态，重放发与首次后台回写同态载荷，幂等性靠对端同态重复受理，不重算归因。响应 `{ok: true/false, detail, sample_ids}` 或 `{ok: null, skipped, sample_ids}`：`skipped` 细分 `dataset_deleted`（数据集已删）/ `no_imports`（无联动导入）/ `producer_not_configured` / `no_attribution`（零交集/无快照）；出站失败 `ok=false` 带 detail（尽力而为语义，不构成 5xx），同时照常发桌面告警。UI 落点：Run 详情页「重放回写」按钮 |
 | POST | `/api/v1/runs/{uid}/report` | 生成 markdown 复盘报告（后台，完成经 `task.updated`）（07） |
 
 v1.4 同批契约变化（任务域）：`tasks` 以 `dataset + split_uid + format_id` 三列取代 `dataset_manifest_path`（schema 6 硬切换，不留兼容读）；建任务时实效集 train 或 val 为空 → `state_conflict`（409）拒训，存在未确认投影 drops → 409；`GET /tasks/{id}/comparison` 与跨 Task 对比按 `split_uid` 分组并逐项标注该 Run 的实效 val 张数，不同切分不暗示直接可比；错误分析 GT 恒读该 Run 的 `labels_frozen/` 冻结副本；MCP 与 Agent 只读画像工具以 `source_fingerprint` 取代 `manifest_uid`（`split_uid` 可选回显），Agent 复训同钉原 `split_uid`。

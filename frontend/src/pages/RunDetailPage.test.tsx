@@ -23,6 +23,7 @@ vi.mock("../api/client", async (importOriginal) => {
       delete: vi.fn(),
       clearLastPt: vi.fn(),
       testInfer: vi.fn(),
+      writebackTrained: vi.fn(),
     },
     signThumbUrls: vi.fn(),
   };
@@ -35,6 +36,7 @@ const logs = vi.mocked(runsApi.logs);
 const retry = vi.mocked(runsApi.retry);
 const deleteRun = vi.mocked(runsApi.delete);
 const forceStop = vi.mocked(runsApi.forceStop);
+const writebackTrained = vi.mocked(runsApi.writebackTrained);
 const signThumbs = vi.mocked(signThumbUrls);
 
 /** jsdom 无 canvas：图表按空块兜底（echarts init 在 OperChart 内 try/catch），
@@ -336,5 +338,47 @@ describe("RunDetailPage 动作", () => {
     expect(acceptBtn.textContent).toContain("仍要删除");
     await user.click(acceptBtn);
     await waitFor(() => expect(deleteRun).toHaveBeenLastCalledWith("aaaa1111", false, true));
+  });
+});
+
+describe("RunDetailPage trained 回写重放（票 149）", () => {
+  it("done_run_shows_replay_entry_and_reports_success_count", async () => {
+    mockRun();
+    writebackTrained.mockResolvedValue({ ok: true, detail: "HTTP 200", sample_ids: ["s-a", "s-b"] });
+    const user = userEvent.setup();
+    renderRun();
+    const btn = await screen.findByTestId("run-writeback");
+    expect(btn).toBeEnabled();
+    await user.click(btn);
+    await waitFor(() => expect(writebackTrained).toHaveBeenCalledWith("aaaa1111"));
+    const note = await screen.findByTestId("run-writeback-note");
+    expect(note.textContent).toContain("2 个样本");
+    expect(screen.queryByTestId("run-writeback-note")!.textContent).not.toContain("跳过");
+  });
+
+  it("replay_skipped_reason_shown_inline", async () => {
+    // skipped 细分（票 149）：数据集已删/无导入等跳过态行内如实展示，不静默
+    mockRun();
+    writebackTrained.mockResolvedValue({ ok: null, skipped: "dataset_deleted", sample_ids: [] });
+    const user = userEvent.setup();
+    renderRun();
+    await user.click(await screen.findByTestId("run-writeback"));
+    expect((await screen.findByTestId("run-writeback-note")).textContent).toContain("dataset_deleted");
+  });
+
+  it("replay_failure_detail_shown_inline_without_5xx_path", async () => {
+    mockRun();
+    writebackTrained.mockResolvedValue({ ok: false, detail: "推理端不可达：http://p:9000", sample_ids: ["s-a"] });
+    const user = userEvent.setup();
+    renderRun();
+    await user.click(await screen.findByTestId("run-writeback"));
+    expect((await screen.findByTestId("run-writeback-note")).textContent).toContain("不可达");
+  });
+
+  it("non_done_run_hides_replay_entry", async () => {
+    mockRun({ status: "running" });
+    renderRun();
+    await screen.findByTestId("run-stop");
+    expect(screen.queryByTestId("run-writeback")).not.toBeInTheDocument();
   });
 });

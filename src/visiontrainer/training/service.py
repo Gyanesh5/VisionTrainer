@@ -389,6 +389,36 @@ def get_run(manager, uid: str) -> dict:
                               "results_csv": str(run_dir / "results.csv") if run_dir else None}}
 
 
+def replay_writeback_trained(manager, uid: str, cfg: dict | None = None) -> dict:
+    """手动重放 trained 回写（票 #149，契约 §5.3）：仅 done Run，其余 409。
+
+    归因上下文（运行快照 effective 冻结段 + dataset meta ``producer_imports`` 联动
+    账目）都是冻结态——重放即重新触发 `producer_writeback.writeback_trained_for_run`，
+    不重算归因，载荷与首次后台回写同态；幂等性靠契约 §5.3 对端同态重复受理。
+    同步执行出站（区别于终态钩子的后台线程）：响应面直接携带回写结果，失败
+    ``ok=false`` 带 detail（尽力而为语义，不构成 REST 5xx），skipped 原因细分见
+    `producer_writeback.trained_attribution`。
+    """
+    from visiontrainer.db.models import Run, Task
+
+    with manager.Session() as s:
+        r = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if r is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if r.status != "done":
+            raise _http_err("state_conflict",
+                            f"仅终态成功的 Run 可重放 trained 回写，当前状态 {r.status}", 409)
+        if not r.run_dir:
+            raise _http_err("state_conflict", "Run 无运行目录（无实效快照可归因）", 409)
+        task = s.get(Task, r.task_id)
+        dataset, run_dir = (task.dataset if task else None), r.run_dir
+    if not dataset:
+        raise _http_err("state_conflict", "Run 无关联数据集，无从归因", 409)
+    from ..datasets import producer_writeback
+
+    return producer_writeback.writeback_trained_for_run(dataset, run_dir, cfg=cfg)
+
+
 def clear_last_pt(manager, uid: str) -> dict:
     """Run 级磁盘管理（11 号票）：删 last.pt 留 best.pt。"""
     from visiontrainer.db.models import Run
