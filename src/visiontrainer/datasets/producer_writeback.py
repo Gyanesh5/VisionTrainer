@@ -117,8 +117,10 @@ def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict
     Returns:
         ``{"sample_ids": [...], "sample_models": [...]}``——
         - ``sample_ids``：命中样本 id，顺序沿导入批次落账序、去重保序；
-        - ``sample_models``：命中批次（≥1 样本命中的导入记录）manifest.models 并集
-          （形态见下）。
+        - ``sample_models``：命中批次（≥1 样本命中的导入记录）manifest.models 并集，
+          形态与导出包 manifest.models 一致（``[{model_id, model_sha8}]``，按二元组
+          去重保序，ADR 0018 Decision 4）——发布面 ``sample_models`` 字段零翻译取数
+          （票 #147 消费）。
         数据集无联动导入记录、Run 无实效快照或零命中 → 两键均空清单。
     """
     try:
@@ -131,7 +133,10 @@ def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict
         return {"sample_ids": [], "sample_models": []}
     names = _source_scope(names, (meta.get("tiling") or {}).get("groups"))
     ids: list[str] = []
+    models: list[dict] = []
+    seen_models: set[tuple] = set()
     for rec in imports:
+        hit = False
         for sample in rec.get("samples") or []:
             sid = str(sample.get("sample_id") or "")
             if not sid or sid in ids:
@@ -139,8 +144,15 @@ def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict
             for img in sample.get("images") or []:
                 if Path(str(img.get("file") or "")).name in names:
                     ids.append(sid)
+                    hit = True
                     break
-    return {"sample_ids": ids, "sample_models": []}
+        for m in rec.get("models") or []:
+            key = (m.get("model_id"), m.get("model_sha8"))
+            if hit and key not in seen_models:
+                seen_models.add(key)
+                models.append({"model_id": m.get("model_id"),
+                               "model_sha8": m.get("model_sha8")})
+    return {"sample_ids": ids, "sample_models": models}
 
 
 def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[str]:

@@ -389,6 +389,29 @@ def test_attribution_empty_when_no_imports_or_no_snapshot(datasets_root, tmp_pat
         "sample_ids"] == []
 
 
+def test_attribution_sample_models_unions_hit_batches(datasets_root, tmp_path):
+    """命中批次 manifest.models 并集（ADR 0018 Decision 4/5）：只取有样本命中的批次，
+    形态 ``[{model_id, model_sha8}]`` 按二元组去重保序——发布面 sample_models 零翻译
+    取数（#147 消费）。"""
+    build_dataset("u-ds4", "detect", str(_unit_src(tmp_path)))
+    _inject_meta(datasets_root, "u-ds4", producer_imports=[
+        _import_batch([{"model_id": "m1", "model_sha8": "aa11"}], {"s-a": "a.png"}),
+        _import_batch([{"model_id": "m2", "model_sha8": "bb22"},
+                       {"model_id": "m1", "model_sha8": "aa11"}], {"s-b": "b.png"}),
+    ])
+    run_dir = _write_snapshot(tmp_path / "run4", train=["a.png"], val=["b.png"])
+    result = producer_writeback.trained_attribution("u-ds4", run_dir)
+    assert result["sample_ids"] == ["s-a", "s-b"]
+    assert result["sample_models"] == [{"model_id": "m1", "model_sha8": "aa11"},
+                                       {"model_id": "m2", "model_sha8": "bb22"}]
+
+    # 两批次仅一批命中：未命中批次的 models 不得混入并集
+    run_dir2 = _write_snapshot(tmp_path / "run5", train=["a.png"], val=[])
+    result2 = producer_writeback.trained_attribution("u-ds4", run_dir2)
+    assert result2["sample_ids"] == ["s-a"]
+    assert result2["sample_models"] == [{"model_id": "m1", "model_sha8": "aa11"}]
+
+
 # ---------------------------------------------------------------- 改名兼容：旧 meta 键归因不断（#129 验收③）
 
 
