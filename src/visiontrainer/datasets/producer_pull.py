@@ -496,7 +496,7 @@ def _ingest_unpack(unpack: Path, manifest: dict, *, mode: str, name: str,
         added = sum(1 for p in picked if p.suffix.lower() in svc.IMAGE_EXTS)
     # manifest 逐样本断言（#150 fail loud）：读不出 images[].file 词干的样本无法归因，
     # 显式登记拒绝段（与词干拒收并列进导入报告与 meta 落账）——不再静默空映射
-    _, unattributed = _manifest_stem_map(manifest)
+    stem_map, unattributed = _manifest_stem_map(manifest)
     rejected = [*rejected, *({"sample_id": sid, "reason": "manifest_key_mismatch"}
                              for sid in unattributed)]
     _append_manifest_meta(ds_dir, manifest, mode=mode, base=base, filters=filters,
@@ -504,7 +504,7 @@ def _ingest_unpack(unpack: Path, manifest: dict, *, mode: str, name: str,
     return {"mode": mode, "manifest": manifest, "sample_ids": sample_ids,
             "normalized": normalized, "projected": projected, "added": added,
             "skipped_stems": skipped_stems, "skipped_files": skipped_files,
-            "rejected": rejected}
+            "rejected": rejected, "stem_map": stem_map, "unattributed": unattributed}
 
 
 def _writeback_best_effort(base: str, sample_ids: list[str]) -> dict:
@@ -532,7 +532,9 @@ def _finish_import(*, name: str, base: str, ingested: dict, root: Path | None,
     rejected = ingested["rejected"]
     if progress_cb is not None:
         progress_cb("回写状态", len(sample_ids), len(sample_ids))
-    stem_map, unattributed = _manifest_stem_map(manifest)
+    # 词干映射与归因失效清单沿用 `_ingest_unpack` 的计算结果（同一 manifest 只算一次）
+    stem_map = ingested["stem_map"]
+    unattributed = ingested["unattributed"]
     rejected_ids = {stem_map[r["stem"]] for r in rejected if stem_map.get(r.get("stem"))}
     rejected_ids.update(unattributed)
     writeback_ids = [sid for sid in sample_ids if sid not in rejected_ids]

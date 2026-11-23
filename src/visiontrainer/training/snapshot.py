@@ -154,3 +154,20 @@ def effective_names(run_dir: str | Path) -> set[str] | None:
         return None
     names = list(effective.get("train") or []) + list(effective.get("val") or [])
     return {n for n in names if n}
+
+
+def weight_fingerprint(snapshot: dict | None) -> str | None:
+    """快照 weight 段的基线权重指纹（发布面 baseline_sha8 取数，契约 §5.4 冻结口径）。
+
+    weight 段 kind==file 才取 sha256 前 8 位（内容指纹）；官方预训练名
+    （kind=resolved_by_trainer）或 weight 段缺失 → None——null 是合法值=无血缘声明
+    （ADR 0018 Decision 2/3：宁缺勿错，不从 Task.base_model 现算）。
+
+    形状知识收口本模块（与 `effective_names` 同款 locality）：写侧 `build_snapshot`
+    冻结、读侧（`training.service.release_run` 发布组装）经此解冻，不再内联解读。
+    """
+    weight = (snapshot or {}).get("weight")
+    if not isinstance(weight, dict) or weight.get("kind") != "file":
+        return None
+    sha = weight.get("sha256")
+    return sha[:8] if sha else None

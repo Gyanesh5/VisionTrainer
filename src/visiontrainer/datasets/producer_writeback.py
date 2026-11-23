@@ -134,17 +134,15 @@ def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict
                     hit = True
                     break
         for m in rec.get("models") or []:
-            key = (m.get("model_id"), m.get("model_sha8"))
+            # 契约 §4.4 形态冻结下的极端输入兜底：缺 model_id/model_sha8 的畸形条目
+            # 不进并集（null/空键会让对端对账失真），静默跳过
+            if not isinstance(m, dict) or not m.get("model_id") or not m.get("model_sha8"):
+                continue
+            key = (m["model_id"], m["model_sha8"])
             if hit and key not in seen_models:
                 seen_models.add(key)
-                models.append({"model_id": m.get("model_id"),
-                               "model_sha8": m.get("model_sha8")})
+                models.append({"model_id": m["model_id"], "model_sha8": m["model_sha8"]})
     return {"sample_ids": ids, "sample_models": models}
-
-
-def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[str]:
-    """归因样本 id 清单（`trained_attribution` 的 sample_ids 投影，回写路径沿用）。"""
-    return trained_attribution(dataset, run_dir, root)["sample_ids"]
 
 
 # ---------------------------------------------------------------- 终态钩子入口

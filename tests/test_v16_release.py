@@ -229,9 +229,10 @@ def test_release_signed_url_download_and_expiry(release_client):
 
 def test_release_list_rows_carry_signed_download_url(release_client):
     """清单面带签名下载 URL（契约 §5.4，VM #146 拉取台）：签发随清单响应现算（票 148）——
-    download_url / url_expires_at / url_expired 三者按响应时刻一致计算（now+TTL），
-    凭清单 URL 可直接拉取（对端不用自拼 HMAC）；TTL 过后重取清单即得新鲜 URL
-    （现行为死绑账目行首发时刻，会 403 死链），账目行首发时刻留档不动。"""
+    download_url / url_expires_at 两者按响应时刻一致计算（now+TTL；响应视图恒新鲜，
+    review 修复后不带 url_expired 标注），凭清单 URL 可直接拉取（对端不用自拼 HMAC）；
+    TTL 过后重取清单即得新鲜 URL（现行为死绑账目行首发时刻，会 403 死链），
+    账目行首发时刻留档不动。"""
     from datetime import datetime, timedelta
 
     from visiontrainer.db.models import ModelRelease
@@ -244,10 +245,9 @@ def test_release_list_rows_carry_signed_download_url(release_client):
                if r["release_id"] == out["release_id"])
     assert row["download_url"].startswith("/api/v1/releases/download?")
     assert f"rid={out['release_id']}" in row["download_url"]
-    # 三字段同刻一致：token exp = 清单 url_expires_at = 本次签发过期时刻（epoch 秒）
+    # 两字段同刻一致：token exp = 清单 url_expires_at = 本次签发过期时刻（epoch 秒）
     token = row["download_url"].rsplit("t=", 1)[1]
     assert int(token[:11]) == int(datetime.fromisoformat(row["url_expires_at"]).timestamp())
-    assert row["url_expired"] is False
 
     # 未过期：清单 URL 直接可拉（zip 发布包）
     r = c.get(row["download_url"])
@@ -265,7 +265,6 @@ def test_release_list_rows_carry_signed_download_url(release_client):
     token = row["download_url"].rsplit("t=", 1)[1]
     assert int(token[:11]) > time.time()  # 现签：exp 在未来，不再死绑账目行
     assert int(datetime.fromisoformat(row["url_expires_at"]).timestamp()) == int(token[:11])
-    assert row["url_expired"] is False  # 响应视图新鲜（账目行过期不约束视图）
     assert c.get(row["download_url"]).status_code == 200  # 现行为此处 403（死链）
     # 账目行 url_expires_at 保留首发时刻（只增不改），清单读不回写
     with app.state.manager.Session() as s:
@@ -291,8 +290,6 @@ def test_release_records_append_only_and_row_history(release_client):
         assert row["run_uid"] == uid
         assert row["fingerprint"] == STUB_FP
         assert row["task_name"] == "release-demo"
-        assert isinstance(row["url_expired"], bool)
-        assert row["url_expired"] is False  # 刚发布，URL 未过期
 
     # 权重行发布历史：与记录一致，只增不改
     wrows = {w["run_uid"]: w for w in c.get("/api/v1/run-weights").json()["weights"]}
