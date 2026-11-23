@@ -258,3 +258,5 @@ def test_classify_run_entry_table_names_and_alphabetical_archive(tmp_path: Path)
     assert meta["names"] == ["apple", "zebra"]
     assert res["data_yaml"] == str(entry)
     assert res["format"]["class_map"] == {"zebra": 0, "apple": 1}
+    # 冻结取数清单（#157）：只含实效 val，与链接落位同一判据（train 的 a 不进账）
+    assert res["val_classes"] == {"b.png": "apple"} and res["val_labels"] == []
