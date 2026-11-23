@@ -157,7 +157,6 @@ const sampleReleases: ReleasesResult = {
       dir_cleared: true, // review 修复：发布目录派生物已清，记录留档标注可查
       created_at: "2026-11-17T10:30:00",
       url_expires_at: "2026-11-15T10:30:00",
-      url_expired: true,
       recommended_conf: 0.55,
       classes: ["seam", "burn"],
     },
@@ -175,7 +174,6 @@ const sampleReleases: ReleasesResult = {
       dir_cleared: false, // 发布目录派生物在账未清（review 修复：平台清理入口标注）
       created_at: "2026-11-17T09:00:00",
       url_expires_at: "2026-11-19T09:00:00",
-      url_expired: false,
       recommended_conf: 0.25,
       classes: ["car", "person"],
     },
@@ -483,13 +481,11 @@ describe("ModelsPage 发布动作（票 123，与部署分立）", () => {
     expect(within(rows).getByText("bbbb2222")).toBeInTheDocument();
     expect(within(rows).getByText("aaaa1111")).toBeInTheDocument();
 
-    // 三重编码：URL 有效/过期 = 语义色 class + 形状标记 + 文字；只增不改账目可见
+    // URL 有效徽章（票 148 现签语义：清单响应现签，URL 恒新鲜）= 语义色 class + 形状标记 + 文字
     const fresh = screen.getByTestId("release-url-1");
     expect(fresh).toHaveClass("is-ok");
     expect(fresh.textContent).toContain("URL 有效");
-    const stale = screen.getByTestId("release-url-2");
-    expect(stale).toHaveClass("is-unverified");
-    expect(stale.textContent).toContain("URL 过期");
+    expect(screen.getByTestId("release-url-2").textContent).toContain("URL 有效");
     // 记录带指纹与 version 对账键
     expect(within(rows).getByText("e68b5135")).toBeInTheDocument();
     expect(within(rows).getByText("a1b2c3d4")).toBeInTheDocument();

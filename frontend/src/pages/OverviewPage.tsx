@@ -236,7 +236,7 @@ export function OverviewPage() {
           {release ? (
             <span className="ov-link-dim tnum" data-testid="ov-linkage-release" style={{ marginLeft: "auto" }}>
               最近发布 {release.run_uid?.slice(0, 8) ?? "—"} · {formatRunTs(release.created_at)} ·{" "}
-              {release.invalidated ? "已失效" : release.url_expired ? "URL 过期" : "✓ URL 有效"}
+              {release.invalidated ? "已失效" : "✓ URL 有效"}
             </span>
           ) : (
             <span className="ov-link-dim" style={{ marginLeft: "auto" }}>

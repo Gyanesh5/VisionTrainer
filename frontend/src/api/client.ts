@@ -1328,8 +1328,6 @@ export interface ReleaseItem {
   dir_cleared: boolean;
   created_at: string | null;
   url_expires_at: string;
-  /** 签名 URL 是否已过有效期（读时计算，只增不改账目不受影响） */
-  url_expired: boolean;
   recommended_conf: number | null;
   classes: string[];
 }

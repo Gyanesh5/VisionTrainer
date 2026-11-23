@@ -211,7 +211,6 @@ describe("OverviewPage", () => {
           dir_cleared: false,
           created_at: "2026-11-20T12:17:00",
           url_expires_at: "2099-01-01T00:00:00",
-          url_expired: false,
           recommended_conf: 0.25,
           classes: [],
         },
