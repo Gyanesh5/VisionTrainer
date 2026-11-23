@@ -166,20 +166,20 @@ def test_tile_dataset_end_to_end(datasets_root, tmp_path):
     assert rv.read_state(tdir / "b_r1c1.json")["effective"] == "approved"
     assert rv.read_state(tdir / "a_r0c0.json")["effective"] == "pending"
 
-    # 票 05：产物出生不切分——splits/ 空、无派生树；tiling.groups 持久化「源图 → 瓦片」组键
+    # 票 05：产物出生不切分——splits/ 空、无派生树；tiling.groups 持久化「源图 → 图块」组键
     assert svc.list_splits("tiled") == []
     assert not (datasets_root / "tiled" / "derived").exists()
     groups = meta["tiling"]["groups"]
     assert sorted(groups) == ["a.png", "b.png"]
     assert sorted(groups["a.png"]) == ["a_r0c0.png", "a_r1c1.png"]
-    # 新建切分恒按源图分组：同源瓦片同侧；派生树随切分落位
+    # 新建切分恒按源图分组：同源图块同侧；派生树随切分落位
     split = svc.create_split("tiled", mode="fresh", seed=42, ratio=0.5,
                              stratify=False, approved_only=False)
     assert split["grouped"] == "source_image"
     side = lambda n: "train" if n in set(split["train"]) else "val"  # noqa: E731
     assert side("a_r0c0.png") == side("a_r1c1.png")
     assert len(split["train"]) + len(split["val"]) == 3
-    # 票 07：出队池核对落位——池平铺标签含全部瓦片（同源同侧已由切分实体保证）
+    # 票 07：出队池核对落位——池平铺标签含全部图块（同源同侧已由切分实体保证）
     pool_info = svc.check_pool("tiled", split,
                                {"train": list(split["train"]), "val": list(split["val"])})
     pool = datasets_root / "tiled" / "derived" / "yolo"

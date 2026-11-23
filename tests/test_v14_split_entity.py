@@ -257,7 +257,7 @@ def test_分层_按主类别分桶且组内按seed洗牌可复现(tmp_path):
 
 # ---------------------------------------------------------------- 分组（验收 5）
 
-def test_分组随机单位是源图_同源瓦片恒同侧_无组键各自成组(tmp_path):
+def test_分组随机单位是源图_同源图块恒同侧_无组键各自成组(tmp_path):
     ds = _ds(tmp_path)
     tiles = []
     for src in range(4):
@@ -280,7 +280,7 @@ def test_分组随机单位是源图_同源瓦片恒同侧_无组键各自成组
                             approved_only=False, groups=groups)["leak_groups"] == 0
 
 
-def test_inherit_新瓦片跟随同组既有归属(tmp_path):
+def test_inherit_新图块跟随同组既有归属(tmp_path):
     ds = _ds(tmp_path)
     _add(ds, "s0c0", "car")
     _add(ds, "s0c1", "car")
@@ -291,7 +291,7 @@ def test_inherit_新瓦片跟随同组既有归属(tmp_path):
     sp.save_split(ds, base)
 
     src0_side = "train" if "s0c0.png" in base["train"] else "val"
-    _add(ds, "s0c2", "car")                       # 已有源图的新瓦片
+    _add(ds, "s0c2", "car")                       # 已有源图的新图块
     groups["src0"].append("s0c2.png")
     inher = _plan(ds, mode="inherit", parent_uid=base["uid"], seed=42, ratio=0.5,
                   stratify=False, approved_only=False, groups=groups)
