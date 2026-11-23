@@ -135,3 +135,22 @@ def load_snapshot(run_dir: str | Path) -> dict | None:
         return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return None
+
+
+def effective_names(run_dir: str | Path) -> set[str] | None:
+    """运行快照实效段的名字集合（train+val，相对 source/ 文件名口径）。
+
+    实效段的形状知识收口本模块：写侧 `_effective_segment` 冻结、读侧（trained 归因，
+    `datasets.producer_writeback`）经此解冻，两份独立读取合拢（#146 F4-2 locality）。
+
+    Returns:
+        文件名集合；快照缺失/不可读或无实效段（外部数据集/历史 Run）→ None。
+    """
+    manifest = load_snapshot(run_dir)
+    if manifest is None:
+        return None
+    effective = manifest.get("effective")
+    if not isinstance(effective, dict):
+        return None
+    names = list(effective.get("train") or []) + list(effective.get("val") or [])
+    return {n for n in names if n}

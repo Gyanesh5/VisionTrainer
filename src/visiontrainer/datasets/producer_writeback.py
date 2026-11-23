@@ -18,14 +18,13 @@ detail 人读、已告警留日志；trained 路径失败另发桌面通知（�
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 import httpx
 
 from ..core import producer
-from ..training.snapshot import SNAPSHOT_NAME  # 运行快照文件名唯一真源（训练侧产物）
+from ..training.snapshot import effective_names  # 实效段读侧收口 snapshot（#146 F4-2）
 from . import service as svc
 
 _logger = logging.getLogger(__name__)
@@ -71,23 +70,6 @@ def writeback_trained(base: str, sample_ids: list[str]) -> dict:
 # ---------------------------------------------------------------- 归因：清单 ∩ 实效集
 
 
-def _effective_names(run_dir) -> set[str] | None:
-    """Run 运行快照的实效名单（train+val，相对 source/ 文件名）。
-
-    Returns:
-        文件名集合；快照缺失或无实效段（外部数据集/历史 Run）→ None。
-    """
-    try:
-        manifest = json.loads((Path(run_dir) / SNAPSHOT_NAME).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    effective = manifest.get("effective")
-    if not isinstance(effective, dict):
-        return None
-    names = list(effective.get("train") or []) + list(effective.get("val") or [])
-    return {n for n in names if n}
-
-
 def _source_scope(names: set[str], groups: dict | None) -> set[str]:
     """实效集文件名归约到源图口径（契约 §6.2「切片派生图块按源图归属映射」）。
 
@@ -128,7 +110,7 @@ def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict
     except svc.DatasetError:
         return {"sample_ids": [], "sample_models": []}
     imports = meta.get("producer_imports") or []
-    names = _effective_names(run_dir)
+    names = effective_names(run_dir)
     if not imports or names is None:
         return {"sample_ids": [], "sample_models": []}
     names = _source_scope(names, (meta.get("tiling") or {}).get("groups"))
