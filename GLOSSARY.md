@@ -281,7 +281,7 @@ _Avoid_: 冒烟（特指桌面端加载后的人工终验）
 
 ### 联动域
 
-> 跨系统协议唯一权威=[联动契约](docs/linkage-contract.md)（v1.0）；对端参照实现=vision-monitor（推理端首个实现），本域行文一律用角色词。
+> 跨系统协议唯一权威=ALP（Active Learning Protocol，主动学习协议）=vrtoolkit 仓 [alp/spec.md](https://github.com/Gyanesh5/vrtoolkit/blob/dev/alp/spec.md)（v1.0，2026-11-24 定稿；本仓 [联动契约](docs/linkage-contract.md) 只留升格指针与偏差登记，见 [ADR 0020](docs/adr/0020-linkage-spec-alp-promotion.md)）；对端参照实现=vision-monitor（推理端首个实现），本域行文一律用角色词。
 
 **主动学习环（Active learning loop）**:
 产线样本回流、标注复训、新模型再下发的闭环：推理端按筛选规则产出样本，经导出包由训练平台拉取入库、标注复核后训练，新模型经模型发布回接产线。人工在环，各环节确认门保留。
