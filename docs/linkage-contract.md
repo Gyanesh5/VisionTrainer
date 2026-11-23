@@ -160,7 +160,7 @@ sha256 前 8 位；只算字节内容，与文件名/路径/mtime 无关；样�
 | 9 | 训练平台 | 拉取 ZIP 暂存+幂等重导缺失 | 已完成（实施票 #132：下载成功且结构校验通过即落暂存 `producer_pulls/`（成功即焚+超期 14 天清扫）；逐文件幂等以词干为单位前置预检——同词干同内容跳过/异内容拒收登记进导入报告与 meta 落账，只作用拉取导入器；`GET producer-pulls/staged` + `POST producer-pulls/reimport` 从暂存重导，成功照常回写 ingested） |
 | 10 | 训练平台 | 发布面尚未携带血缘字段（baseline_sha8/sample_models，§5.4 v1.1 增补） | 待实施（架构评审 2026-11-23 候选 T1：metadata/发布行/清单三处带出） |
 | 11 | 训练平台 | 清单 download_url 签发死绑首发 url_expires_at，过期无重签路径（§5.4 现签语义） | 待实施（同评审候选 T3：清单响应读时现签） |
-| 12 | 训练平台 | §6.2「切片派生图块按源图归属映射」未实现——切片链 trained 回写整段静默失效（producer_imports 不随切片传播、归因 join 为 basename 精确匹配永不命中图块名） | 待实施（同评审候选 T2：图块→源图归约 + 账目随切片传播） |
+| 12 | 训练平台 | §6.2「切片派生图块按源图归属映射」未实现——切片链 trained 回写整段静默失效（producer_imports 不随切片传播、归因 join 为 basename 精确匹配永不命中图块名） | 已完成（实施票 #146：producer_imports 随切片快照性拷贝进切片集 meta；trained 归因实效集图块名先经 tiling.groups 归约回源图口径再匹配 manifest；归因查询重构为共享函数 trained_attribution，富化命中批次 models 并集供发布面 sample_models 消费——ADR 0018 Decision 5） |
 
 适配完成后逐条勾销；新增偏差随实施登记。
 
