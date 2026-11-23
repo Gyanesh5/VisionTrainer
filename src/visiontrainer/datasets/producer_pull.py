@@ -371,20 +371,6 @@ def _append_manifest_meta(ds_dir: Path, manifest: dict, *, mode: str, base: str,
     svc._write_meta(ds_dir, meta)
 
 
-# ---------------------------------------------------------------- 出站：状态回写
-
-
-def writeback_ingested(base: str, sample_ids: list[str]) -> dict:
-    """回写推理端样本状态 ingested（``POST {base}/api/samples/status``）。
-
-    出站契约与失败降级口径见 `datasets.producer_writeback`（票 125 提取为共享单一
-    实现，ingested/trained 两态共用）：body ``{"status": "ingested", "sample_ids":
-    [...]}``。失败只告警不阻断导入主流程（通知域同口径降级）：返回
-    ``{ok, detail, sample_ids}``，ok=False 时 detail 人读、已告警留日志。
-    """
-    return producer_writeback.writeback_ingested(base, sample_ids)
-
-
 # ---------------------------------------------------------------- 主流程
 
 
@@ -522,12 +508,15 @@ def _ingest_unpack(unpack: Path, manifest: dict, *, mode: str, name: str,
 
 
 def _writeback_best_effort(base: str, sample_ids: list[str]) -> dict:
-    """ingested 回写尽力而为（通知域同口径降级）；基址缺失时记一条 ok=False 不外呼。"""
+    """ingested 回写尽力而为（通知域同口径降级）；基址缺失时记一条 ok=False 不外呼。
+
+    出站契约与失败降级口径见 `datasets.producer_writeback`（票 125 提取为共享单一
+    实现，ingested/trained 两态共用），此处直呼不再转发。"""
     if not base:
         return {"ok": False,
                 "detail": "推理端连接地址未配置——回写未执行（配置后可经重导/重拉幂等补写）",
                 "sample_ids": sample_ids}
-    return writeback_ingested(base, sample_ids)
+    return producer_writeback.writeback_ingested(base, sample_ids)
 
 
 def _finish_import(*, name: str, base: str, ingested: dict, root: Path | None,
