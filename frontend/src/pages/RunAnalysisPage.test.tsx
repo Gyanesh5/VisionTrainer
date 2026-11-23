@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { RunAnalysisPage } from "./RunAnalysisPage";
-import { analysisApi, signThumbUrls, type ErrorAnalysisResult } from "../api/client";
+import { analysisApi, runsApi, signThumbUrls, type ErrorAnalysisResult, type RunDetail } from "../api/client";
 
 vi.mock("../api/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api/client")>();
@@ -21,6 +21,7 @@ vi.mock("../api/client", async (importOriginal) => {
       ...actual.datasetsApi,
       xalOpen: vi.fn(),
     },
+    runsApi: { get: vi.fn() },
     signThumbUrls: vi.fn(),
   };
 });
@@ -31,6 +32,10 @@ const getCell = vi.mocked(analysisApi.cell);
 const getCellOverlay = vi.mocked(analysisApi.cellOverlay);
 const exportRelabel = vi.mocked(analysisApi.exportRelabel);
 const signThumbs = vi.mocked(signThumbUrls);
+const getRun = vi.mocked(runsApi.get);
+
+/** Run 详情桩：页面只用到 task_type（决定逐图 / 逐框口径与措辞） */
+const runStub = (taskType: string | null) => ({ task_type: taskType }) as RunDetail;
 
 /** jsdom 无 canvas：图表 stub 成空块，混淆矩阵经触发按钮透传 onPointClick（cell 切换语义另测） */
 let lastMatrixClick: ((p: unknown) => void) | null = null;
@@ -114,6 +119,7 @@ function renderPage(uid = "runaaa11") {
 
 beforeEach(() => {
   lastMatrixClick = null;
+  getRun.mockResolvedValue(runStub("detect"));
   getAnalysis.mockResolvedValue(analysisStub);
   getCell.mockResolvedValue(cellStub);
   signThumbs.mockResolvedValue(new Map([["/tmp/runs/x/analysis/overlays/img0.jpg:0", { path: "/tmp/runs/x/analysis/overlays/img0.jpg", box: 0, url: "/thumb?signed=1" }]]));
@@ -247,5 +253,55 @@ describe("RunAnalysisPage 叠加与导出", () => {
     await user.click(screen.getByTestId("export-relabel"));
     expect(await screen.findByTestId("export-result").then((el) => el.textContent))
       .toContain("relabel_list.md（1 项）");
+  });
+});
+
+describe("RunAnalysisPage 对账口径随任务类型（#157）", () => {
+  const headers = (table: HTMLElement) =>
+    within(table).getAllByRole("columnheader").map((th) => th.textContent);
+
+  it("box_run_keeps_per_box_wording_and_iou_column", async () => {
+    renderPage();
+    const head = await screen.findByTestId("detail-head-full");
+    expect(head.textContent).toContain("错框数降序");
+    expect(screen.getByTestId("analysis-conf-line").textContent).toContain("预测框视同未检出");
+    expect(headers(screen.getByTestId("per-image-table"))).toContain("错框");
+    fireEvent.click(screen.getByTestId("matrix-cell-fire"));
+    expect(headers(await screen.findByTestId("cell-table"))).toContain("IoU");
+    expect(screen.getByTestId("export-relabel").textContent).toContain("导出 FN/FP 改标清单");
+  });
+
+  it("unanalyzed_classify_run_states_per_image_accounting", async () => {
+    getRun.mockResolvedValue(runStub("classify"));
+    getAnalysis.mockResolvedValueOnce(null);
+    renderPage();
+    expect((await screen.findByTestId("analysis-empty")).textContent).toContain("逐图记 TP/混淆");
+    expect(screen.getByTestId("analysis-run")).toHaveAttribute("title", "低置信度全量推理 + 逐图对账");
+  });
+
+  it("analyzed_classify_run_counts_by_image_and_points_to_review_page", async () => {
+    const user = userEvent.setup();
+    getRun.mockResolvedValue(runStub("classify"));
+    exportRelabel.mockResolvedValue({
+      path: "/tmp/runs/x/analysis/relabel_list.md",
+      entries: [{ image: "a", kind: "confusion", cls: "ng", conf: 0.57 }],
+    });
+    renderPage();
+    const head = await screen.findByTestId("detail-head-full");
+    expect(head.textContent).toContain("错图数降序");
+    expect(head.textContent).not.toContain("逐框");
+    expect(screen.getByTestId("analysis-conf-line").textContent).toContain("低于它的预测视同未检出");
+    expect(headers(screen.getByTestId("per-image-table"))).toContain("错图");
+    // 格内表：classify 没有框 → 不出 IoU 列
+    fireEvent.click(screen.getByTestId("matrix-cell-fire"));
+    const cellHeaders = headers(await screen.findByTestId("cell-table"));
+    expect(cellHeaders).toContain("conf");
+    expect(cellHeaders).not.toContain("IoU");
+    // 改类入口：按钮与导出提示指向数据集标注审查页
+    const exportBtn = screen.getByTestId("export-relabel");
+    expect(exportBtn.textContent).toContain("导出改类清单");
+    expect(exportBtn).toHaveAttribute("title", expect.stringContaining("标注审查页"));
+    await user.click(exportBtn);
+    expect((await screen.findByTestId("export-result")).textContent).toContain("改类请到数据集的标注审查页");
   });
 });

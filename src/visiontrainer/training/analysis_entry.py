@@ -2,13 +2,16 @@
 
 用法：python analysis_entry.py <payload_path>
 payload：{"run_dir", "best_pt", "val_images": [绝对路径...], "labels_dir", "classes": [...],
-          "imgsz": 640, "conf_min": 0.01}
+          "imgsz": 640, "conf_min": 0.01, "task_type"?}
 
 产出（M8 01 号票）：
 - <run_dir>/analysis/predictions.jsonl：每图一行 {image, w, h, gt:[{cls, xyxy}], pred:[{cls, conf, xyxy}]}
   （低置信度全量采集——平台侧据此做贪心匹配与全阈值扫描，匹配算法留在平台以便单测）
 - progress 行 {"progress": {cur, total}} 前置写出，平台线程轮询显示进度
 - exit 0；推理对单图失败跳过并在行内记 {"error": ...}，不炸整体
+
+task_type == "classify"（#157）：推理结果只有 probs、没有框——GT 读 labels_dir/classes.json
+（图文件名 → 类名，启动时冻结），gt 至多一项 {cls}，pred = top-1 一项 {cls, conf}。
 """
 
 from __future__ import annotations
@@ -76,6 +79,17 @@ def _extract_pred(res, classes: list[str]) -> list[dict]:
     return out
 
 
+def _extract_pred_classify(res) -> list[dict]:
+    """classify 推理结果 → top-1 一项 [{cls, conf}]（分类没有框，故无 xyxy）。
+    类名取模型自己的 names：classify 的模型 id 是类目录字母序（ADR 0017），与类别表行序无关。"""
+    probs = res.probs
+    top1 = int(probs.top1)
+    names = getattr(res, "names", None)
+    cls = (names.get(top1) if isinstance(names, dict)
+           else names[top1] if isinstance(names, list) and top1 < len(names) else None)
+    return [{"cls": cls if cls is not None else str(top1), "conf": round(float(probs.top1conf), 4)}]
+
+
 def main() -> None:
     payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     from ultralytics import YOLO
@@ -92,6 +106,10 @@ def main() -> None:
     imgsz = int(payload.get("imgsz") or 640)
     conf_min = float(payload.get("conf_min") or 0.01)
     images = payload.get("val_images") or []
+    # classify 的 GT 冻结副本：图文件名 → 类名（启动时落 labels_frozen/val/classes.json）
+    is_classify = payload.get("task_type") == "classify"
+    frozen_classes = (json.loads((labels_dir / "classes.json").read_text(encoding="utf-8"))
+                      if is_classify else {})
     t0 = time.time()
 
     with out_path.open("a", encoding="utf-8") as f:
@@ -101,9 +119,14 @@ def main() -> None:
                 f.flush()
             try:
                 res = model.predict(image, imgsz=imgsz, conf=conf_min, verbose=False)[0]
-                pred = _extract_pred(res, classes)
+                pred = (_extract_pred_classify(res) if is_classify
+                        else _extract_pred(res, classes))
                 w, h = int(res.orig_shape[1]), int(res.orig_shape[0])
-                gt = _read_gt(labels_dir / (Path(image).stem + ".txt"), w, h, classes)
+                if is_classify:
+                    truth = frozen_classes.get(Path(image).name)
+                    gt = [{"cls": truth}] if truth in classes else []   # 类外真值不计（同 _read_gt 口径）
+                else:
+                    gt = _read_gt(labels_dir / (Path(image).stem + ".txt"), w, h, classes)
                 f.write(json.dumps({"image": image, "w": w, "h": h, "gt": gt, "pred": pred},
                                    ensure_ascii=False) + "\n")
             except Exception as exc:  # noqa: BLE001 — 单图失败跳过

@@ -11,7 +11,7 @@ from pathlib import Path
 
 from ..datasets.formats import DEFAULT_FORMAT_ID
 from . import naming
-from .manager import SubprocessHandle, task_inputs
+from .manager import SubprocessHandle, backfill_classify_frozen, task_inputs
 from .snapshot import load_snapshot
 from ..datasets import service as ds
 from ..datasets.service import DatasetError
@@ -776,8 +776,20 @@ def _source_images(ds_dir: Path, names: list[str]) -> list[str]:
     return out
 
 
-def _analysis_payload(manager, run) -> dict:
-    """错误分析的输入包：一切从运行快照取（票 05 起 GT 名单 = 快照 `effective.val`）。"""
+def _run_task_type(s, run, snap: dict | None) -> str | None:
+    """Run 的任务类型：运行快照优先（启动时冻结，数据集此后回收 / 改名不影响）；快照没有这一段的
+    旧 Run（classify 错误分析上线前训练）回读任务所属数据集的元数据，读不到即 None（按逐框走）。"""
+    from visiontrainer.db.models import Task
+
+    task = s.get(Task, run.task_id) if getattr(run, "task_id", None) else None
+    return (snap or {}).get("task_type") or _dataset_meta_of_task(task).get("task_type") or None
+
+
+def _analysis_payload(manager, run, task_type: str | None = None) -> dict:
+    """错误分析的输入包：一切从运行快照取（票 05 起 GT 名单 = 快照 `effective.val`）。
+
+    task_type 由调用方解析（快照 → 数据集元数据，见 _run_task_type）：classify 的 GT 冻结副本是
+    「图 → 类」映射 classes.json（#157），其余任务是逐图标签目录。"""
     snap = load_snapshot(run.run_dir) if run.run_dir else None
     eff = (snap or {}).get("effective") or {}
     val_names = eff.get("val") or []
@@ -791,14 +803,21 @@ def _analysis_payload(manager, run) -> dict:
     # GT 口径（spec §2.2）：恒读 Run 启动时冻结的 val 标签副本（labels_frozen）——此后
     # 数据集改标/池重建不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）
     labels_dir = Path(run.run_dir) / "labels_frozen" / "val" if run.run_dir else None
-    if not labels_dir or not labels_dir.is_dir():
-        raise _http_err("state_conflict",
-                        "Run 缺 val 标签冻结副本（labels_frozen）——重跑训练后再分析", 409)
+    if task_type == "classify":
+        # classify 没有逐图标签：冻结的是「图 → 类」映射（与入口 val 链接树同源，启动时落盘）
+        labels_ok = bool(labels_dir and (labels_dir / "classes.json").is_file())
+        missing = ("Run 缺 val 类别冻结副本（labels_frozen/val/classes.json）——"
+                   "重跑训练后再分析")
+    else:
+        labels_ok = bool(labels_dir and labels_dir.is_dir())
+        missing = "Run 缺 val 标签冻结副本（labels_frozen）——重跑训练后再分析"
+    if not labels_ok:
+        raise _http_err("state_conflict", missing, 409)
     classes = ((snap or {}).get("classes") or {}).get("list") or []
     if not classes:
         raise _http_err("state_conflict", "快照缺类别表，无法分析", 409)
     return {"run_dir": run.run_dir, "best_pt": str(best), "val_images": val_images,
-            "labels_dir": str(labels_dir), "classes": classes,
+            "labels_dir": str(labels_dir), "classes": classes, "task_type": task_type,
             "imgsz": int(((snap or {}).get("train_args") or {}).get("imgsz") or 640),
             "conf_min": 0.01}  # 低置信度采集：阈值后验扫描（04 号票）依赖全量框
 
@@ -809,8 +828,10 @@ def run_error_analysis(manager, uid: str, conf: float = 0.25, progress=None) -> 
     conf：分析口径的置信度阈值（pred 低于阈值的框视同未检出，不参与匹配——低 conf 噪声
     FP 不再淹没错误榜）。推理恒按 0.01 全量采集且落盘复用——同一 Run 内权重与 val 清单
     不变，重算只做平台侧匹配/渲染（秒级），换 conf 不必重推理。阈值扫描（sweep）始终
-    用全量匹配：后验扫描的意义就是看任意 conf 下的 P/R/F1。"""
-    from .error_analysis import greedy_match, render_overlay, run_analysis_subprocess, summarize, sweep_thresholds
+    用全量匹配：后验扫描的意义就是看任意 conf 下的 P/R/F1。
+    classify（#157）没有框，改逐图对账（classify_records）：记录同构，入库 / 汇总 / 扫描不分叉。"""
+    from .error_analysis import (classify_records, greedy_match, render_overlay,
+                                 run_analysis_subprocess, summarize, sweep_thresholds)
     from visiontrainer.db.models import RunSampleError
 
     conf = float(conf)
@@ -825,7 +846,14 @@ def run_error_analysis(manager, uid: str, conf: float = 0.25, progress=None) -> 
             raise _http_err("not_found", f"Run 不存在：{uid}", 404)
         if run.status != "done":
             raise _http_err("state_conflict", f"仅已完成的 Run 可分析（当前 {run.status}）", 409)
-        payload = _analysis_payload(manager, run)
+        snap = load_snapshot(run.run_dir) if run.run_dir else None
+        task_type = _run_task_type(s, run, snap)
+        if task_type == "classify" and run.run_dir:
+            # 旧 Run 补写冻结副本（#157）：classify 错误分析上线前训练的 Run 没有类别冻结副本——
+            # 从逐 Run 入口的 val 链接树补写（启动时归档产物，同源同时点）；补不出照常 409
+            backfill_classify_frozen(run.run_dir,
+                                     ((snap or {}).get("classes") or {}).get("list") or [])
+        payload = _analysis_payload(manager, run, task_type)
         rid = run.id
 
     analysis_dir = Path(payload["run_dir"]) / "analysis"
@@ -834,6 +862,9 @@ def run_error_analysis(manager, uid: str, conf: float = 0.25, progress=None) -> 
                                 analysis_dir / "entry.log")
 
     # ingest：predictions.jsonl → 匹配 → 入库 + 叠加渲染 + 汇总
+    # 对账口径：classify 逐图（一图一条，无框）、其余逐框 IoU 贪心——记录同构，下游零分叉
+    is_classify = payload.get("task_type") == "classify"
+    match = classify_records if is_classify else greedy_match
     preds_path = analysis_dir / "predictions.jsonl"
     rows, overlays, all_records, full_records = [], [], [], []
     gt_areas: list[float] = []
@@ -844,17 +875,22 @@ def run_error_analysis(manager, uid: str, conf: float = 0.25, progress=None) -> 
         rec = json.loads(line)
         if "progress" in rec or rec.get("error"):
             continue
-        full_records.extend({"image": rec["image"], **r}
-                            for r in greedy_match(rec["gt"], rec["pred"]))
+        full = match(rec["gt"], rec["pred"])
+        full_records.extend({"image": rec["image"], **r} for r in full)
         kept = [p for p in rec["pred"] if (p.get("conf") or 0) >= conf]
-        records = greedy_match(rec["gt"], kept)
+        records = match(rec["gt"], kept)
         all_records.extend({"image": rec["image"], **r} for r in records)
-        for g in rec["gt"]:
-            x0, y0, x1, y1 = g["xyxy"]
-            gt_areas.append(max((x1 - x0) * (y1 - y0), 0.0))
+        if is_classify:
+            # 叠加图取口径前的全量记录：低于口径的预测照标并注明（这类图恰是模型拿不准的样本）
+            shown = [{**r, "below_conf": (r.get("conf") or 0) < conf} for r in full]
+        else:
+            shown = records
+            for g in rec["gt"]:
+                x0, y0, x1, y1 = g["xyxy"]
+                gt_areas.append(max((x1 - x0) * (y1 - y0), 0.0))
         try:
             overlays.append((rec["image"], str(render_overlay(
-                rec["image"], records,
+                rec["image"], shown,
                 analysis_dir / "overlays" / f"{Path(rec['image']).stem}.jpg"))))
         except OSError:
             pass
@@ -868,7 +904,7 @@ def run_error_analysis(manager, uid: str, conf: float = 0.25, progress=None) -> 
         s.commit()
     summary = summarize(all_records, payload["classes"], gt_areas)
     summary["conf"] = conf
-    sweep = sweep_thresholds(full_records)
+    sweep = sweep_thresholds(full_records, "逐图对账" if is_classify else None)
     analysis_dir.mkdir(parents=True, exist_ok=True)
     (analysis_dir / "summary.json").write_text(
         json.dumps({"summary": summary, "sweep": sweep}, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -995,6 +1031,7 @@ def export_relabel_list(manager, uid: str) -> dict:
                 .filter(RunSampleError.run_id == run.id, RunSampleError.kind.in_(("fn", "fp", "confusion")))
                 .order_by(RunSampleError.image).all())
         run_dir = run.run_dir
+        task_type = _run_task_type(s, run, load_snapshot(run_dir) if run_dir else None)
     if not run_dir:
         raise _http_err("state_conflict", "Run 无运行目录", 409)
     entries = []
@@ -1002,18 +1039,31 @@ def export_relabel_list(manager, uid: str) -> dict:
         entries.append({"image": r.image, "kind": r.kind,
                         "cls": r.cls_gt if r.kind == "fn" else r.cls_pred,
                         "conf": r.conf})
-    lines = ["# FN/FP 改标清单", "",
-             f"- Run：{uid} · 共 {len(entries)} 项（FN=漏标/该标未标，FP=多检/误检，混淆=类别标错）",
-             "- 修法：在 X-AnyLabeling 中打开对应图片，按类型补框/删框/改类别", ""]
-    cur = None
-    for e in entries:
-        if e["image"] != cur:
-            cur = e["image"]
-            lines.append(f"## {Path(cur).name}")
-            lines.append(f"路径：{cur}")
-            lines.append("")
-        conf = f"（conf {e['conf']:.2f}）" if e.get("conf") is not None else ""
-        lines.append(f"- [{e['kind'].upper()}] {e['cls']}{conf}")
+    if task_type == "classify":
+        # classify 改类清单（#157）：一图一条，改类入口是标注审查页（#131 改类即判定），不走 XAL 补框删框
+        lines = ["# classify 改类清单", "",
+                 f"- Run：{uid} · 共 {len(entries)} 项（混淆=判成别的类，FN=置信度未达口径，"
+                 "FP=无真值而有预测）",
+                 "- 修法：到数据集的标注审查页对对应图片改类（改类即判定）", ""]
+        for r in rows:
+            conf = f"（conf {r.conf:.2f}）" if r.conf is not None else ""
+            pred = (f" → 预测 {r.cls_pred}{conf}" if r.cls_pred is not None
+                    else "（预测置信度未达口径）")
+            lines += [f"## {Path(r.image).name}", f"路径：{r.image}", "",
+                      f"- [{r.kind.upper()}] 真值 {r.cls_gt or '无'}{pred}", ""]
+    else:
+        lines = ["# FN/FP 改标清单", "",
+                 f"- Run：{uid} · 共 {len(entries)} 项（FN=漏标/该标未标，FP=多检/误检，混淆=类别标错）",
+                 "- 修法：在 X-AnyLabeling 中打开对应图片，按类型补框/删框/改类别", ""]
+        cur = None
+        for e in entries:
+            if e["image"] != cur:
+                cur = e["image"]
+                lines.append(f"## {Path(cur).name}")
+                lines.append(f"路径：{cur}")
+                lines.append("")
+            conf = f"（conf {e['conf']:.2f}）" if e.get("conf") is not None else ""
+            lines.append(f"- [{e['kind'].upper()}] {e['cls']}{conf}")
     out = Path(run_dir) / "analysis" / "relabel_list.md"
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text("\n".join(lines), encoding="utf-8")

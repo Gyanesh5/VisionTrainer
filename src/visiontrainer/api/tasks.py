@@ -235,6 +235,8 @@ def get_analysis(uid: str, request: Request):
 def run_analysis(uid: str, request: Request, body: dict | None = None):
     """跑错误分析（M8 01）：训练 venv 低置信度全量推理 + IoU 贪心匹配入库；body `{conf?}`
     设分析口径（低于该 conf 的预测框视同未检出；已推理过则复用结果只做平台侧重算）。
+    classify 改逐图对账（#157）：一图一条记录、无框；缺类别冻结副本的旧 Run 先从入口 val 链接树
+    补写，补不出 409。
     长操作：登记 `run:{uid}:analysis`（tick 为 (cur,total) 口径）。"""
     body = body or {}
     with long_op(f"run:{uid}:analysis", f"错误分析 · {uid}", scope=uid) as op:

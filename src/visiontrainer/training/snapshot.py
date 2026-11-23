@@ -12,7 +12,9 @@
   entry_path}`（票 07）：本次实际生效的格式与类别映射——错误分析与部署回查类别以
   class_map 为准，不回读当前类别表
 - 类别表：内容 + sha256（此后改名/重排不影响旧 Run 查证）
-- 派生标签：逐文件 sha256 的聚合哈希（val 副本另落 run_dir/labels_frozen/，错误分析 GT 对账用）
+- 派生标签：逐文件 sha256 的聚合哈希（val 副本另落 run_dir/labels_frozen/，错误分析 GT 对账用；
+  classify 无逐图标签，val 副本是「图 → 类」映射 classes.json）
+- 任务类型 `task_type`：错误分析据此选对账口径（classify 逐图，其余逐框）
 
 外部数据集无切分实体：`split` / `effective` 两段为 null，训练入口沿用其自带 data.yaml。
 
@@ -66,13 +68,15 @@ def _effective_segment(effective: dict | None) -> dict | None:
 def build_snapshot(*, run_uid: str, round_no: int, base_model: str, train_args: dict,
                    data_yaml: str, dataset_dir: str,
                    split: dict | None = None, effective: dict | None = None,
-                   fmt: dict | None = None, labels_dir: str | None = None) -> dict:
+                   fmt: dict | None = None, labels_dir: str | None = None,
+                   task_type: str | None = None) -> dict:
     """组装快照。
 
     - `data_yaml`：本次逐 Run 训练入口（托管集 = `<ds>/derived/<split_uid>/data.yaml`，
       派生目录形态票 07 换格式池；外部集 = 其自带 data.yaml）；
     - `dataset_dir`：数据集目录（类别表 classes.txt 的唯一真源所在）；
-    - `split` / `effective`：出队门解析出的切分实体与实效集（外部集为 None）。
+    - `split` / `effective`：出队门解析出的切分实体与实效集（外部集为 None）；
+    - `task_type`：数据集任务类型（随出队门解析链 task_inputs 给出）。
     """
     derived = Path(data_yaml).parent
 
@@ -105,6 +109,7 @@ def build_snapshot(*, run_uid: str, round_no: int, base_model: str, train_args: 
         "frozen_at": datetime.now().isoformat(timespec="seconds"),
         "train_args": train_args,
         "base_model": base_model,
+        "task_type": task_type,
         "weight": weight_identity,
         "data_yaml": str(data_yaml),
         "dataset_dir": str(dataset_dir),
