@@ -19,8 +19,9 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image as PILImage
 
-from conftest import build_split_dataset  # noqa: F401（实效集交集场景用）
+from conftest import build_dataset, build_split_dataset  # noqa: F401（实效集交集场景用）
 
 from test_producer_pull import (
     TASK,
@@ -31,6 +32,7 @@ from test_producer_pull import (
 )
 
 from visiontrainer import progress as ops
+from visiontrainer.datasets import producer_writeback
 from visiontrainer.main import create_app
 
 STUB = str(Path(__file__).parent / "stub_trainer.py")
@@ -298,6 +300,93 @@ def test_writeback_failure_alerts_not_blocks(wb_client, fake_producer, datasets_
     assert any("不可达" in body for _, body in alerted)
     assert any("trained 回写失败" in rec.message for rec in caplog.records), \
         "回写失败应有日志留痕"
+
+
+# ---------------------------------------------------------------- 共享归因查询（#146，契约 §6.2 / ADR 0018 Decision 5）
+
+def _unit_src(tmp_path: Path) -> Path:
+    """两图 detect 源（a/b 各一矩形）：归因单元测试的受管数据集底座。"""
+    src = tmp_path / "unit-src"
+    src.mkdir()
+    for name in ("a", "b"):
+        PILImage.new("RGB", (100, 100), (90, 90, 90)).save(src / f"{name}.png")
+        (src / f"{name}.json").write_text(json.dumps({
+            "version": "5.x", "flags": {},
+            "shapes": [{"label": "car", "shape_type": "rectangle", "group_id": None,
+                        "difficult": False, "points": [[5, 5], [95, 95]]}],
+            "imagePath": f"{name}.png", "imageData": None, "imageWidth": 100, "imageHeight": 100,
+        }, ensure_ascii=False), encoding="utf-8")
+    return src
+
+
+def _inject_meta(datasets_root: Path, name: str, **fields) -> None:
+    """直改 dataset.json 注入归因输入（落账/tiling 键格式按契约冻结形态手造）。"""
+    meta_path = datasets_root / name / "dataset.json"
+    raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    raw.update(fields)
+    meta_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _import_batch(models: list[dict], files_by_sample: dict[str, str]) -> dict:
+    return {"at": "2026-11-23T10:00:00", "mode": "create", "base_url": "http://p:9000",
+            "models": models,
+            "samples": [{"sample_id": sid, "images": [{"file": f"images/{f}"}]}
+                        for sid, f in files_by_sample.items()]}
+
+
+def _write_snapshot(run_dir: Path, train: list[str], val: list[str],
+                    excluded: list[str] | None = None) -> Path:
+    """手写运行快照实效段（相对 source/ 文件名口径，v1.4 冻结三段格式）。"""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run_manifest.json").write_text(json.dumps({
+        "effective": {"train": train, "val": val,
+                      "dropped": {"missing": [], "excluded": excluded or []}}},
+        ensure_ascii=False), encoding="utf-8")
+    return run_dir
+
+
+def test_attribution_reduces_tiles_to_source_images(datasets_root, tmp_path):
+    """切片链归约（契约 §6.2「图块按源图归属映射」）：实效集图块名先经 tiling.groups
+    归约回源图口径，再匹配 manifest 样本清单——图块名与源图名永不直接命中。"""
+    build_dataset("u-ds", "detect", str(_unit_src(tmp_path)))
+    _inject_meta(datasets_root, "u-ds",
+                 producer_imports=[_import_batch(
+                     [{"model_id": "m1", "model_sha8": "aa11"}],
+                     {"s-a": "a.png", "s-b": "b.png"})],
+                 tiling={"source": "src-of-u-ds", "rows": 2, "cols": 2, "overlap": 0.0,
+                         "keep_empty": True,
+                         "groups": {"a.png": ["a_r0c0.png", "a_r1c1.png"],
+                                    "b.png": ["b_r1c1.png"]}})
+    run_dir = _write_snapshot(tmp_path / "run", train=["a_r0c0.png"], val=["b_r1c1.png"],
+                              excluded=["a_r1c1.png"])
+
+    result = producer_writeback.trained_attribution("u-ds", run_dir)
+    assert result["sample_ids"] == ["s-a", "s-b"]  # 图块归约回 a.png/b.png → 两样本皆命中
+
+
+def test_attribution_direct_chain_is_plain_basename_join(datasets_root, tmp_path):
+    """直训链回归（无 tiling 段）：实效集文件名与 manifest basename 精确匹配，行为不变。"""
+    build_dataset("u-ds2", "detect", str(_unit_src(tmp_path)))
+    _inject_meta(datasets_root, "u-ds2",
+                 producer_imports=[_import_batch(
+                     [{"model_id": "m1", "model_sha8": "aa11"}],
+                     {"s-a": "a.png", "s-b": "b.png"})])
+    run_dir = _write_snapshot(tmp_path / "run2", train=["a.png"], val=[])
+
+    result = producer_writeback.trained_attribution("u-ds2", run_dir)
+    assert result["sample_ids"] == ["s-a"]
+
+
+def test_attribution_empty_when_no_imports_or_no_snapshot(datasets_root, tmp_path):
+    """无联动账目或无实效快照 → 零命中不回写（无从归因，与既有 skipped 口径一致）。"""
+    build_dataset("u-ds3", "detect", str(_unit_src(tmp_path)))
+    run_dir = _write_snapshot(tmp_path / "run3", train=["a.png"], val=[])
+    assert producer_writeback.trained_attribution("u-ds3", run_dir)["sample_ids"] == []
+
+    _inject_meta(datasets_root, "u-ds3",
+                 producer_imports=[_import_batch([], {"s-a": "a.png"})])
+    assert producer_writeback.trained_attribution("u-ds3", tmp_path / "no-such-run")[
+        "sample_ids"] == []
 
 
 # ---------------------------------------------------------------- 改名兼容：旧 meta 键归因不断（#129 验收③）

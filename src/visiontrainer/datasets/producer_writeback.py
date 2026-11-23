@@ -88,23 +88,48 @@ def _effective_names(run_dir) -> set[str] | None:
     return {n for n in names if n}
 
 
-def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[str]:
-    """归因：dataset meta ``producer_imports`` 样本清单 ∩ 该 Run 实效名单。
+def _source_scope(names: set[str], groups: dict | None) -> set[str]:
+    """实效集文件名归约到源图口径（契约 §6.2「切片派生图块按源图归属映射」）。
 
-    样本图片（manifest ``images[].file`` 的 basename）落在实效名单内才计入该
-    ``sample_id``——images 条目键按契约 §4.4 冻结格式读 ``file``；顺序沿导入批次
-    落账序，去重保序。数据集无联动导入记录或 Run 无实效快照 → 空清单（无从归因，
-    不回写）。#129 改名兼容：meta 读侧已把旧键记录并入 ``producer_imports``（见
-    `datasets.service._read_meta`），旧 dataset.json 归因不断链。
+    图块名经 ``tiling.groups``（``{源图名: [图块名,...]}``）反查源图名；数据集无
+    tiling/groups（直训链）恒等返回。未入映射的名字保持原样——它与 manifest 源图名
+    不匹配，自然零命中，不误归。
+    """
+    if not groups:
+        return names
+    tile_to_src = {tile: src for src, tiles in groups.items() if isinstance(tiles, list)
+                   for tile in tiles}
+    return {tile_to_src.get(n, n) for n in names}
+
+
+def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict:
+    """共享归因查询（契约 §6.2 trained 回写口径 + ADR 0018 Decision 5）：dataset meta
+    ``producer_imports`` 样本清单 ∩ 该 Run 实效名单（实效集文件名先经 tiling.groups
+    归约到源图口径再匹配）。
+
+    样本图片（manifest ``images[].file`` 的 basename）落在归约后的源图口径名单内才
+    计入该 ``sample_id``——images 条目键按契约 §4.4 冻结格式读 ``file``。切片派生
+    数据集的实效名单是图块名（``{源图stem}_r{r}c{c}``），归约把它映回源图名；直训链
+    无 tiling 段，行为与 basename 精确匹配一致。#129 改名兼容：meta 读侧已把旧键记录
+    并入 ``producer_imports``（见 `datasets.service._read_meta`），旧 dataset.json
+    归因不断链。
+
+    Returns:
+        ``{"sample_ids": [...], "sample_models": [...]}``——
+        - ``sample_ids``：命中样本 id，顺序沿导入批次落账序、去重保序；
+        - ``sample_models``：命中批次（≥1 样本命中的导入记录）manifest.models 并集
+          （形态见下）。
+        数据集无联动导入记录、Run 无实效快照或零命中 → 两键均空清单。
     """
     try:
         meta = svc.get_dataset(dataset, root)
     except svc.DatasetError:
-        return []
+        return {"sample_ids": [], "sample_models": []}
     imports = meta.get("producer_imports") or []
     names = _effective_names(run_dir)
     if not imports or names is None:
-        return []
+        return {"sample_ids": [], "sample_models": []}
+    names = _source_scope(names, (meta.get("tiling") or {}).get("groups"))
     ids: list[str] = []
     for rec in imports:
         for sample in rec.get("samples") or []:
@@ -115,7 +140,12 @@ def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[
                 if Path(str(img.get("file") or "")).name in names:
                     ids.append(sid)
                     break
-    return ids
+    return {"sample_ids": ids, "sample_models": []}
+
+
+def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[str]:
+    """归因样本 id 清单（`trained_attribution` 的 sample_ids 投影，回写路径沿用）。"""
+    return trained_attribution(dataset, run_dir, root)["sample_ids"]
 
 
 # ---------------------------------------------------------------- 终态钩子入口
