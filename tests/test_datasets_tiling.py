@@ -248,6 +248,35 @@ def test_tile_failures_and_cleanup(datasets_root, tmp_path):
     assert e.value.code == "invalid_args"
 
 
+# ---------------------------------------------------------------- 联动账目传播（#146，契约 §6.2）
+
+def test_tile_propagates_producer_imports(datasets_root, tmp_path):
+    """切片把源集 producer_imports 账目快照性拷贝到切片数据集 meta——切片链
+    trained 归因的账目前提（契约 §6.2 图块按源图归属映射，账目不随切片丢失）。"""
+    src = _mk_source(tmp_path)
+    build_dataset("src-ds", "detect", str(src))
+    batch = {"at": "2026-11-23T10:00:00", "mode": "create", "base_url": "http://p:9000",
+             "models": [{"model_id": "m1", "model_sha8": "deadbeef"}],
+             "samples": [{"sample_id": "s-a", "images": [{"file": "images/a_1_000000.jpg"}]}]}
+    meta_path = datasets_root / "src-ds" / "dataset.json"
+    raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    raw["producer_imports"] = [batch]
+    meta_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    svc.tile_dataset("src-ds", 2, 2, 0.0, "tiled", False)
+    tiled = svc.get_dataset("tiled")
+    assert tiled["producer_imports"] == [batch]  # 快照性拷贝，逐字不变形
+    assert svc.get_dataset("src-ds")["producer_imports"] == [batch]  # 源集账目不受影响
+
+
+def test_tile_without_producer_imports_leaves_key_absent(datasets_root, tmp_path):
+    """无联动导入的源集：切片 meta 不伪造空账目键（缺键=无联动，归因自然跳过）。"""
+    src = _mk_source(tmp_path)
+    build_dataset("src-ds", "detect", str(src))
+    svc.tile_dataset("src-ds", 2, 2, 0.0, "tiled", False)
+    assert "producer_imports" not in svc.get_dataset("tiled")
+
+
 # ---------------------------------------------------------------- REST
 
 def test_api_tile_endpoints(datasets_root, tmp_path, client):
