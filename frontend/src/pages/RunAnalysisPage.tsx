@@ -22,7 +22,7 @@ import { fmtMetric } from "../components/training/domain";
  * - 格内聚焦叠加（眼睛按钮）：该图只画本格记录——看图若带全量标注，本格错在哪反被淹没；
  * - conf 口径可设：POST 重算复用已推理结果（秒级），阈值扫描恒基于全量匹配；
  * - 导出 FN/FP 改标清单入口（修法在 X-AnyLabeling，XAL 打开按钮挂在 Viewer 工具栏）。
- * - classify 逐图口径（#157）：一图一条记录、没有框——措辞按「图」计，格内表不出 IoU 列，
+ * - classify 逐图对账（#157）：一图一条记录、没有框——措辞按「图」计，格内表不出 IoU 列，
  *   改类入口是数据集的标注审查页（改类即判定），叠加图为文字标注。
  */
 
@@ -105,8 +105,7 @@ export function RunAnalysisPage() {
     setActionError(null);
     try {
       const r = await analysisApi.exportRelabel(uid);
-      setExportNote(`清单已导出：${r.path}（${r.entries.length} 项）`
-        + (isClassify ? "　·　改类请到数据集的标注审查页" : ""));
+      setExportNote(`清单已导出：${r.path}（${r.entries.length} 项）`);
     } catch (e) {
       setActionError(`导出失败：${e instanceof Error ? e.message : "未知错误"}`);
     } finally {
@@ -114,13 +113,15 @@ export function RunAnalysisPage() {
     }
   }
 
-  /** Viewer 工具栏 XAL 按钮：修法在 X-AnyLabeling，直接打开原图（改标） */
+  /** Viewer 工具栏 XAL 按钮：修法在 X-AnyLabeling，直接打开原图（改标）。
+   *  classify 的修法是到标注审查页改类，不挂 XAL 按钮（#157）。 */
   function openOverlayImage(signedPath: string, imagePath: string, title: string) {
     openZoom({
       url: signedPath,
       title,
-      xal: true,
+      xal: !isClassify,
     });
+    if (isClassify) return;
     // holder 由 openZoom 同步创建：挂 XAL 按钮回调（每次打开新 holder，once 即弃）
     document.getElementById("vt-zoom-holder")?.addEventListener(
       "vtxal",
@@ -221,8 +222,7 @@ export function RunAnalysisPage() {
         <h2 className="card-title">错误分析 · Run {uid}</h2>
         {!analysis || !summary || !counts ? (
           <p className="placeholder-note" data-testid="analysis-empty">
-            尚未分析——best.pt 对 val 集逐图推理，{isClassify ? "逐图记 TP/混淆" : "逐框记 TP/FP/FN"}，
-            回答「错在哪」。
+            尚未分析——best.pt 对 val 集逐图推理，{isClassify ? "逐图记 TP/混淆" : "逐框记 TP/FP/FN"}，回答「错在哪」。
           </p>
         ) : (
           <>

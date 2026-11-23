@@ -72,8 +72,8 @@ def classify_records(gts: list[dict], preds: list[dict]) -> list[dict]:
     恒 None），汇总 / 混淆矩阵 / 阈值扫描 / 明细下钻 / 清单导出零改动复用。
 
     gts = 该图真值类（至多一项，冻结副本一图一类）；preds = 已按分析口径过滤的 top-1 预测
-    （至多一项，低于口径者已被滤掉 = 视同未检出）。有 GT 有预测：同类 TP、异类混淆；
-    有 GT 无预测 → FN；无 GT 有预测 → FP；两者皆无 → 无记录（该图不入明细）。"""
+    （至多一项，低于口径者已被滤掉 = 视同未检出）。有 GT 有预测：同类 TP、异类混淆。
+    有 GT 无预测 → FN；无 GT 有预测 → FP。两者皆无 → 无记录（该图不入明细）。"""
     g = gts[0]["cls"] if gts else None
     p = preds[0] if preds else None
     if g is None and p is None:

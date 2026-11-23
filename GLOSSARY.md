@@ -21,7 +21,7 @@ _Avoid_: 基模型、基础权重、初始权重
 _Avoid_: 轮次；勿与 ultralytics 的 epoch 混用
 
 **运行快照（Run snapshot）**:
-Run 启动时冻结的全量训练输入：切分标识与参数、实效集、实际类别映射、格式与转换版本、增强参数、预训练权重标识、任务类型；val 标签另落冻结副本供错误分析对账（classify 落「图 → 类」映射）。保证历史 Run 可复现。
+Run 启动时冻结的全量训练输入：切分标识与参数、实效集、实际类别映射；另含格式与转换版本、增强参数、预训练权重标识、任务类型。val 标签另落冻结副本供错误分析对账（classify 落「图 → 类」映射）。保证历史 Run 可复现。
 _Avoid_: 版本、快照清单
 
 **派生新鲜度门（Derivation freshness gate）**:
@@ -262,7 +262,7 @@ _Avoid_: 输出文件、结果文件
 _Avoid_: AI 报告、总结
 
 **错误分析（Error analysis）**:
-运行完成后逐样本级的对错归因：以 best 权重对验证集逐图推理，逐框任务按 IoU 匹配把每个框记为 TP/FP/FN；classify 没有框，按图记（top-1 预测类对真值类：同类 TP、异类混淆，置信度低于口径视同未检出）。产出样本错误明细（全部 val 图逐图统计，点混淆矩阵格切该格记录）、叠加图（逐框画框，classify 文字标注）与改标清单（classify 为改类清单）；classify 口径定案见 [ADR 0019](docs/adr/0019-classify-error-analysis-per-image-accounting.md)。勿与训前的校验、质量审计混用。
+运行完成后逐样本级的对错归因：以 best 权重对验证集逐图推理，逐框任务按 IoU 匹配把每个框记为 TP/FP/FN；classify 没有框，逐图对账（top-1 预测类对真值类：同类 TP、异类混淆；置信度低于口径视同未检出）。产出样本错误明细（全部 val 图逐图统计，点混淆矩阵格切该格记录）、叠加图（逐框画框，classify 文字标注）与改标清单（classify 为改类清单）；classify 口径定案见 [ADR 0019](docs/adr/0019-classify-error-analysis-per-image-accounting.md)。勿与训前的校验、质量审计混用。
 _Avoid_: 逐样本评估、模型测试
 
 **进行中操作（In-flight operation）**:

@@ -1,8 +1,8 @@
-# 0019 - classify 错误分析按图对账，GT 冻结「图 → 类」映射
+# 0019 - classify 错误分析逐图对账，GT 冻结「图 → 类」映射
 
 Status: accepted（2026-11-23，用户裁决；源自 #157）
 
-错误分析此前只有逐框口径（IoU 匹配逐框记 TP/FP/FN，GT 读 Run 启动时冻结的 val 标签副本）；classify 没有框、推理结果只有各类概率，所以 classify Run 点「运行错误分析」恒报 409「缺 val 标签冻结副本」，重训也无效。classify 改按图对账，并与逐框同构：一图至多一条记录写入 `run_sample_errors`，`kind` 沿用 tp/fp/fn/confusion 四态，GT 读 Run 启动时冻结的「图 → 类」映射 `labels_frozen/val/classes.json`。缺映射的旧 Run 首次分析时，从逐 Run 入口的 val 链接树（`<run_dir>/data/val/<类别名>/`，启动时落盘、此后不改写）补写——这是「缺冻结副本直接 409、不设回退分支」的唯一例外。
+错误分析此前只有逐框口径（IoU 匹配逐框记 TP/FP/FN，GT 读 Run 启动时冻结的 val 标签副本）；classify 没有框、推理结果只有各类概率，所以 classify Run 点「运行错误分析」恒报 409「缺 val 标签冻结副本」，重训也无效。classify 改逐图对账，并与逐框同构：一图至多一条记录写入 `run_sample_errors`，`kind` 沿用 tp/fp/fn/confusion 四态，GT 读 Run 启动时冻结的「图 → 类」映射 `labels_frozen/val/classes.json`。缺映射的旧 Run 首次分析时，从逐 Run 入口的 val 链接树（`<run_dir>/data/val/<类别名>/`，启动时落盘、此后不改写）补写——这是「缺冻结副本直接 409、不设回退分支」的唯一例外。
 
 ## Considered Options
 
@@ -16,7 +16,7 @@ Status: accepted（2026-11-23，用户裁决；源自 #157）
 
 ## Consequences
 
-- classify 与逐框任务共用 `run_sample_errors` 与整条分析链路。classify 记录的 `box` 为空、`iou` 为 null，读这些字段的消费方须容忍空值（现有消费方已容忍）。
+- classify 与逐框任务共用 `run_sample_errors` 与整条分析链路。classify 记录的 `box` 四键全空（gt / pred / gt_poly / pred_poly 皆 null）、`iou` 为 null，读这些字段的消费方须容忍空值（现有消费方已容忍）。
 - 运行快照新增 `task_type`，错误分析据此选口径；早于该字段的 Run 回读任务所属数据集的元数据。
 - 「缺冻结副本 409、不设回退分支」多了一个限定例外：仅 classify、仅读 Run 自己归档的 val 链接树、仅认类别真名目录。其它任务与其它来源不得援引。
 - 叠加图对 classify 退化为左上角文字标注。注记只用 ASCII：Pillow 内置字体没有中文字形，类名为中文时同样渲染成占位方框（既有局限）。

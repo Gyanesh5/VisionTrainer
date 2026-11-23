@@ -297,11 +297,12 @@ describe("RunAnalysisPage 对账口径随任务类型（#157）", () => {
     const cellHeaders = headers(await screen.findByTestId("cell-table"));
     expect(cellHeaders).toContain("conf");
     expect(cellHeaders).not.toContain("IoU");
-    // 改类入口：按钮与导出提示指向数据集标注审查页
+    // 改类入口：按钮与悬停说明指向数据集标注审查页（提示行只报导出结果，不重复教学）
     const exportBtn = screen.getByTestId("export-relabel");
     expect(exportBtn.textContent).toContain("导出改类清单");
     expect(exportBtn).toHaveAttribute("title", expect.stringContaining("标注审查页"));
     await user.click(exportBtn);
-    expect((await screen.findByTestId("export-result")).textContent).toContain("改类请到数据集的标注审查页");
+    expect((await screen.findByTestId("export-result")).textContent)
+      .toContain("relabel_list.md（1 项）");
   });
 });

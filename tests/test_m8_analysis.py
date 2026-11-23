@@ -656,7 +656,7 @@ def test_analysis_requires_frozen_labels(tmp_path: Path):
     run = type("R", (), {"run_dir": str(tmp_path),
                          "best_pt": str(tmp_path / "weights" / "best.pt")})()
     with pytest.raises(tsvc.TaskError) as ei:
-        tsvc._analysis_payload(None, run)
+        tsvc._analysis_payload(run)
     assert ei.value.status == 409 and "labels_frozen" in ei.value.message
 
 
@@ -831,7 +831,7 @@ def test_classify_analysis_requires_frozen_classes(tmp_path: Path):
     run = type("R", (), {"run_dir": str(tmp_path),
                          "best_pt": str(tmp_path / "weights" / "best.pt")})()
     with pytest.raises(tsvc.TaskError) as ei:
-        tsvc._analysis_payload(None, run, "classify")
+        tsvc._analysis_payload(run, "classify")
     assert ei.value.status == 409 and "classes.json" in ei.value.message
 
 
