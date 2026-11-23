@@ -17,7 +17,7 @@ import hmac
 import logging
 import time
 
-logger = logging.getLogger(__name__)
+_logger = logging.getLogger(__name__)
 
 ROUTE = "/api/v1/releases/download"
 _TTL = 24 * 3600
@@ -40,7 +40,7 @@ def _secret() -> str:
         server = load_config().get("server", {})
         secret = server.get("release_secret") or server.get("thumb_secret")
         if not secret:
-            logger.warning(
+            _logger.warning(
                 "签名密钥未配置（server.release_secret / server.thumb_secret 均缺省）："
                 "模型发布下载面回退公开缺省密钥——知道 release_id 即可伪造下载 URL，生产环境须配置")
             secret = _DEFAULT_SECRET

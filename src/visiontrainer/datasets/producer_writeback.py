@@ -142,7 +142,7 @@ def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict
             if hit and key not in seen_models:
                 seen_models.add(key)
                 models.append({"model_id": m["model_id"], "model_sha8": m["model_sha8"]})
-    return {"sample_ids": ids, "sample_models": models}
+    return {"sample_ids": ids, "sample_models": models, "skip_reason": None}
 
 
 # ---------------------------------------------------------------- 终态钩子入口

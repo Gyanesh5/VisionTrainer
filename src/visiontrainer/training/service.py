@@ -1681,9 +1681,9 @@ def list_releases(manager) -> dict:
                 .outerjoin(Run, ModelRelease.run_id == Run.id)
                 .outerjoin(Task, Run.task_id == Task.id)
                 .order_by(ModelRelease.id.desc()).all())
+    issued = rel.expiry()  # 本次签发过期时刻（读时现算，now+TTL；清单级一次，全行同刻一致）
     items = []
     for m, r, t in rows:
-        issued = rel.expiry()  # 本次签发过期时刻（读时现算，now+TTL）
         items.append({"release_id": m.id, "run_uid": r.uid if r else m.run_uid,
                       "task_id": t.id if t else None, "task_name": t.name if t else None,
                       "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,

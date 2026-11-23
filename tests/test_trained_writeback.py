@@ -571,6 +571,28 @@ def test_replay_skipped_no_imports(wb_client, datasets_root, tmp_path):
     _assert_no_trained()
 
 
+def test_replay_skipped_zero_intersection(wb_client, fake_producer, datasets_root):
+    """在册有导入 + 有快照但实效集与 manifest 零交集（契约归因口径的第四分支）：
+    重放 200 且 skipped=no_attribution、零出站载荷——命中路径 skip_reason=None 由
+    writeback_trained_for_run 兜底码收口（修复前该路径漏 skip_reason 键，直接索引
+    即 KeyError → 500）。"""
+    run_uid = _done_run(wb_client, fake_producer, "mfd-zero", "wb-zero")
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-bbbb"]}])  # 首次后台回写落场
+
+    # 账目改指实效集外图片名：在册导入与快照都在场，仅交集为空
+    _inject_meta(datasets_root, "mfd-zero", producer_imports=[
+        _import_batch([{"model_id": "m1", "model_sha8": "aa11"}], {"s-other": "zz.png"})])
+
+    FakeProducerHandler.writeback_bodies = []
+    r = wb_client.post(f"/api/v1/runs/{run_uid}/writeback-trained")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["ok"] is None
+    assert body["skipped"] == "no_attribution"
+    assert body["sample_ids"] == []
+    _assert_no_trained()
+
+
 def test_replay_requires_done_run(wb_client, fake_producer, datasets_root, tmp_path):
     """重放资格门：仅 done Run——cancelled 409 state_conflict、Run 不存在 404。"""
     build_dataset("wb-gate", "detect", str(_unit_src(tmp_path)))
