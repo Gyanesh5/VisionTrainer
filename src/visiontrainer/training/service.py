@@ -1606,10 +1606,12 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
 
 
 def list_releases(manager) -> dict:
-    """发布记录清单（票 123）：只增不改账目，新在前；URL 状态读时计算（过期标记）。
+    """发布记录清单（票 123）：只增不改账目，新在前；签发随清单响应现算（票 148）。
 
-    每条带 `download_url`（契约 §5.4 模型发布面，VM #146 拉取台轮询消费）：签名
-    URL 的 exp 取记录的 url_expires_at——有效期与账目字段一致，对端不用自拼 HMAC。
+    每条带 `download_url`（契约 §5.4 模型发布面，VM #146 拉取台轮询消费）：
+    exp 按响应时刻现算（now+TTL），download_url / url_expires_at / url_expired
+    三者同刻一致——账目行 url_expires_at 保留首发时刻（只增不改），不约束响应
+    视图（契约 §5.4 v1.1 澄清），记录不因过期成死链（重取清单即得新鲜 URL）。
     """
     from .. import releases as rel
     from visiontrainer.db.models import ModelRelease, Run, Task
@@ -1621,19 +1623,22 @@ def list_releases(manager) -> dict:
                 .outerjoin(Task, Run.task_id == Task.id)
                 .order_by(ModelRelease.id.desc()).all())
     now = datetime.now()
-    items = [{"release_id": m.id, "run_uid": r.uid if r else m.run_uid,
-              "task_id": t.id if t else None, "task_name": t.name if t else None,
-              "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,
-              "version": (m.payload or {}).get("version", m.fingerprint),
-              "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
-              "invalidated": m.invalidated_at is not None,
-              "dir_cleared": m.cleared_at is not None,
-              "created_at": m.created_at.isoformat(timespec="seconds"),
-              "url_expires_at": m.url_expires_at.isoformat(timespec="seconds"),
-              "url_expired": m.url_expires_at < now,
-              "download_url": rel.release_url(m.id, int(m.url_expires_at.timestamp())),
-              "recommended_conf": (m.payload or {}).get("recommended_conf"),
-              "classes": (m.payload or {}).get("classes") or []} for m, r, t in rows]
+    items = []
+    for m, r, t in rows:
+        issued = rel.expiry()  # 本次签发过期时刻（读时现算，now+TTL）
+        items.append({"release_id": m.id, "run_uid": r.uid if r else m.run_uid,
+                      "task_id": t.id if t else None, "task_name": t.name if t else None,
+                      "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,
+                      "version": (m.payload or {}).get("version", m.fingerprint),
+                      "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
+                      "invalidated": m.invalidated_at is not None,
+                      "dir_cleared": m.cleared_at is not None,
+                      "created_at": m.created_at.isoformat(timespec="seconds"),
+                      "url_expires_at": issued.isoformat(timespec="seconds"),
+                      "url_expired": issued <= now,
+                      "download_url": rel.release_url(m.id, int(issued.timestamp())),
+                      "recommended_conf": (m.payload or {}).get("recommended_conf"),
+                      "classes": (m.payload or {}).get("classes") or []})
     return {"releases": items}
 
 
