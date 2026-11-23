@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import sys
 import time
@@ -167,8 +168,10 @@ def test_release_signed_url_download_and_expiry(release_client):
 
 
 def test_release_list_rows_carry_signed_download_url(release_client):
-    """清单面带签名下载 URL（契约 §5.4，VM #146 拉取台）：exp 与账目 url_expires_at
-    一致、凭清单 URL 可直接拉取（对端不用自拼 HMAC）；过期记录 URL 如实 403。"""
+    """清单面带签名下载 URL（契约 §5.4，VM #146 拉取台）：签发随清单响应现算（票 148）——
+    download_url / url_expires_at / url_expired 三者按响应时刻一致计算（now+TTL），
+    凭清单 URL 可直接拉取（对端不用自拼 HMAC）；TTL 过后重取清单即得新鲜 URL
+    （现行为死绑账目行首发时刻，会 403 死链），账目行首发时刻留档不动。"""
     from datetime import datetime, timedelta
 
     from visiontrainer.db.models import ModelRelease
@@ -181,24 +184,32 @@ def test_release_list_rows_carry_signed_download_url(release_client):
                if r["release_id"] == out["release_id"])
     assert row["download_url"].startswith("/api/v1/releases/download?")
     assert f"rid={out['release_id']}" in row["download_url"]
-    # token exp 与记录 url_expires_at 一致（epoch 秒）
+    # 三字段同刻一致：token exp = 清单 url_expires_at = 本次签发过期时刻（epoch 秒）
     token = row["download_url"].rsplit("t=", 1)[1]
     assert int(token[:11]) == int(datetime.fromisoformat(row["url_expires_at"]).timestamp())
+    assert row["url_expired"] is False
 
     # 未过期：清单 URL 直接可拉（zip 发布包）
     r = c.get(row["download_url"])
     assert r.status_code == 200, r.text
     assert r.headers["content-type"].startswith("application/zip")
 
-    # 记录过期（账目留档）：url_expired 翻真，清单 URL 拉取如实 403
+    # TTL 过后（模拟 24h：账目行首发时刻翻过去时）：重取清单现签新鲜 URL，仍可下载
+    stale = datetime.now() - timedelta(seconds=60)
     with app.state.manager.Session() as s:
         rec = s.get(ModelRelease, out["release_id"])
-        rec.url_expires_at = datetime.now() - timedelta(seconds=60)
+        rec.url_expires_at = stale
         s.commit()
     row = next(r for r in c.get("/api/v1/releases").json()["releases"]
                if r["release_id"] == out["release_id"])
-    assert row["url_expired"] is True
-    assert c.get(row["download_url"]).status_code == 403
+    token = row["download_url"].rsplit("t=", 1)[1]
+    assert int(token[:11]) > time.time()  # 现签：exp 在未来，不再死绑账目行
+    assert int(datetime.fromisoformat(row["url_expires_at"]).timestamp()) == int(token[:11])
+    assert row["url_expired"] is False  # 响应视图新鲜（账目行过期不约束视图）
+    assert c.get(row["download_url"]).status_code == 200  # 现行为此处 403（死链）
+    # 账目行 url_expires_at 保留首发时刻（只增不改），清单读不回写
+    with app.state.manager.Session() as s:
+        assert s.get(ModelRelease, out["release_id"]).url_expires_at == stale
 
 
 def test_release_records_append_only_and_row_history(release_client):
@@ -269,6 +280,81 @@ def test_release_eligibility_by_weight_on_disk(release_client):
 
 def _run_uid(client: TestClient, task_id: int) -> str:
     return client.get(f"/api/v1/tasks/{task_id}").json()["runs"][0]["uid"]
+
+
+def _forge_release_token(secret: str, rid: int, exp: int) -> str:
+    """按文档化 token 格式手铸（known-answer：{exp:011d}{hmac[:20]}，消息域 release|rid|exp）——
+    独立来源验证签名密钥选择，不经过被测 _secret()。"""
+    mac = hmac.new(secret.encode(), f"release|{rid}|{exp}".encode(), hashlib.sha256).hexdigest()[:20]
+    return f"{exp:011d}{mac}"
+
+
+@pytest.fixture()
+def install_server_cfg(monkeypatch: pytest.MonkeyPatch):
+    """换装 server 节配置并复位签名密钥缓存（模块级缓存的测试隔离）。"""
+    from visiontrainer import config as config_module
+    from visiontrainer import releases as rel
+
+    def _install(server_cfg: dict) -> None:
+        monkeypatch.setattr(config_module, "load_config",
+                            lambda path=None: {"server": dict(server_cfg)})
+        rel._reset_secret_cache()
+
+    yield _install
+    rel._reset_secret_cache()  # 还原缓存：后续测试走各自配置
+
+
+def test_release_secret_independent_with_thumb_fallback(install_server_cfg):
+    """密钥独立（票 148）：server.release_secret 配置后发布面用它签名，不再吃
+    thumb_secret（单点泄漏两面齐破的老问题）；未配置 release_secret 时回退
+    thumb_secret（读兼容，既有环境不断签）。"""
+    from visiontrainer import releases as rel
+
+    rid, exp = 7, int(time.time()) + 3600
+
+    # 只有 thumb_secret：回退生效，thumb 密钥手铸 token 可验
+    install_server_cfg({"thumb_secret": "thumb-key"})
+    assert rel.verify(rid, _forge_release_token("thumb-key", rid, exp)) is True
+
+    # release_secret 在场：发布面切独立密钥——thumb token 拒验，release token 可验
+    install_server_cfg({"thumb_secret": "thumb-key", "release_secret": "release-key"})
+    assert rel.verify(rid, _forge_release_token("thumb-key", rid, exp)) is False
+    assert rel.verify(rid, _forge_release_token("release-key", rid, exp)) is True
+
+
+def test_release_secret_default_warns_when_unconfigured(install_server_cfg, caplog):
+    """两密钥均未配置：回退公开缺省密钥（开发可用），运行时告警提示生产须配置。"""
+    import logging
+
+    from visiontrainer import releases as rel
+
+    install_server_cfg({})
+    with caplog.at_level(logging.WARNING, logger="visiontrainer.releases"):
+        token = rel.sign(42)
+    assert rel.verify(42, token) is True  # 缺省密钥下仍自洽可用
+    assert any("release_secret" in rec.message for rec in caplog.records)
+
+
+def test_release_secret_cached_single_disk_read(monkeypatch):
+    """_secret() 模块级懒加载（票 148）：签名多次只读盘一次（清单 N 行不再 N 次读 config）。"""
+    import visiontrainer.config as cfg_mod
+    from visiontrainer import releases as rel
+
+    calls = {"n": 0}
+
+    def counting_load_config(path=None):
+        calls["n"] += 1
+        return {"server": {"release_secret": "cached-key"}}
+
+    monkeypatch.setattr(cfg_mod, "load_config", counting_load_config)
+    rel._reset_secret_cache()
+    try:
+        rel.sign(1)
+        rel.sign(2)
+        rel.verify(1, rel.sign(1))
+    finally:
+        rel._reset_secret_cache()  # 缓存清回：后续测试不受本测配置污染
+    assert calls["n"] == 1  # 现行为每次 _secret() 重读 config：3 次
 
 
 def test_migration_creates_model_releases_on_stamp_path(tmp_path):
