@@ -1549,6 +1549,12 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         family = parse_model_family(task.base_model)
         task_type = ds_meta.get("task_type", "detect")
         fingerprint = _weight_fingerprint(Path(best_pt))
+        # 血缘字段（票 147，契约 v1.1 §5.4，ADR 0018）：起训权重指纹，快照 weight 段
+        # 冻结口径——本地文件 → sha256[:8]；官方名（resolved_by_trainer）/无快照 → null
+        # （null=开新族候选，合法值；宁缺勿错，不从 Task.base_model 现算）
+        weight_seg = ((load_snapshot(run.run_dir) if run.run_dir else None) or {}).get("weight") or {}
+        _sha = weight_seg.get("sha256") if weight_seg.get("kind") == "file" else None
+        baseline_sha8 = _sha[:8] if _sha else None
         # 序号 = 该 Run 既有发布数 + 1：重复发布生成新目录新记录（只增不改，不覆盖旧包）
         seq = s.query(ModelRelease).filter(ModelRelease.run_id == run.id).count() + 1
         target = root / f"{family}_{task_type}_{run.uid}_{seq}"
@@ -1575,6 +1581,7 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
             "round_no": run.round_no,
             "primary_metric": run.primary_metric,
             "base_model": task.base_model if task else None,
+            "baseline_sha8": baseline_sha8,
             "task_type": task_type,
             "classes": _model_class_order(task_type, classes),
             "recommended_conf": conf,
@@ -1595,7 +1602,8 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
 
         record = ModelRelease(run_id=run.id, run_uid=uid, fingerprint=fingerprint,
                               release_dir=str(target), bundle_path=str(bundle),
-                              url_expires_at=rel.expiry(), payload=meta)
+                              url_expires_at=rel.expiry(), baseline_sha8=baseline_sha8,
+                              payload=meta)
         s.add(record)
         s.commit()
         rid = record.id
@@ -1625,6 +1633,7 @@ def list_releases(manager) -> dict:
               "task_id": t.id if t else None, "task_name": t.name if t else None,
               "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,
               "version": (m.payload or {}).get("version", m.fingerprint),
+              "baseline_sha8": m.baseline_sha8,  # 血缘（票 147，ADR 0018）：官方名/无快照 → null
               "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
               "invalidated": m.invalidated_at is not None,
               "dir_cleared": m.cleared_at is not None,

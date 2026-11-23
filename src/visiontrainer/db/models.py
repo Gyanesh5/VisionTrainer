@@ -214,6 +214,9 @@ class ModelRelease(Base):
     release_dir: Mapped[str] = mapped_column(String(1024), nullable=False)
     bundle_path: Mapped[str] = mapped_column(String(1024), nullable=False)
     url_expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # 血缘字段（票 147，契约 v1.1 §5.4，ADR 0018）：该 Run 起训权重内容指纹 sha256[:8]，
+    # 快照 weight 段冻结口径；官方名/无快照 → None（null=开新族候选，合法值，宁缺勿错）
+    baseline_sha8: Mapped[str | None] = mapped_column(String(8), nullable=True)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     # 失效标注（票 126）：所属 Run 被放行删除的时刻；None=在账有效
     invalidated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
