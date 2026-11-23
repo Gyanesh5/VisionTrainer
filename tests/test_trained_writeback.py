@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import sys
 import time
@@ -210,6 +211,51 @@ def test_writeback_attribution_is_effective_set_intersection(wb_client, fake_pro
     assert len(effective.get("train", []) + effective.get("val", [])) == 2
 
     _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-cccc"]}])
+
+
+# ---------------------------------------------------------------- 切片链端到端（#146，契约 §6.2 偏差 12）
+
+
+def _real_jpeg(w: int = 640, h: int = 480) -> bytes:
+    """真实可解码 JPEG（切片要 PIL 开图像素，假 JPEG 头体会被 unreadable_image 跳过）。"""
+    buf = io.BytesIO()
+    PILImage.new("RGB", (w, h), (90, 90, 90)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+def test_tiled_dataset_chain_writes_back_trained(wb_client, fake_producer, datasets_root):
+    """拉取导入 → 切片 → 切分 → 短训 done → 图块样本按源图归属回写 trained：
+    实效集是图块名，归因先归约回源图口径再匹配 manifest——对端只收 sample_ids，
+    零感知切片发生（修复前该链零回写，与「无联动导入」不可分辨）。"""
+    FakeProducerHandler.bundle = build_bundle(_two_samples(), ["car", "person"],
+                                              jpeg=_real_jpeg())
+    r = _pull(wb_client, fake_producer, name="mfd-tiling")
+    assert r.status_code == 200, r.text
+    r = wb_client.post("/api/v1/datasets/mfd-tiling/tile",
+                       json={"name": "mfd-tiled", "rows": 2, "cols": 2, "keep_empty": True})
+    assert r.status_code == 200, r.text
+    tiled = wb_client.get("/api/v1/datasets/mfd-tiled").json()
+    assert [s["sample_id"] for s in tiled["producer_imports"][0]["samples"]] \
+        == ["s-aaaa", "s-bbbb"]  # 账目随切片传播（切片链归因的前提）
+    assert set(tiled["tiling"]["groups"]) == {"s-aaaa_1_000000.jpg", "s-bbbb_1_000001.jpg"}
+
+    FakeProducerHandler.writeback_bodies = []
+    assert wb_client.put("/api/v1/system/producer",
+                         json={"base_url": fake_producer}).status_code == 200
+    assert wb_client.post("/api/v1/datasets/mfd-tiled/splits",
+                          json={"mode": "fresh", "seed": 42, "ratio": 0.8}).status_code == 200
+    r = wb_client.post("/api/v1/tasks", json={
+        "name": "wb-tiled", "base_model": "stub-model", "dataset": "mfd-tiled", "epochs": 1})
+    assert r.status_code == 200, r.text
+    task = _wait_task(wb_client, r.json()["uid"], {"done"})
+    run = _wait_status(wb_client, task["runs"][0]["uid"], {"done"})
+    effective = (run.get("snapshot") or {}).get("effective") or {}
+    names = effective.get("train", []) + effective.get("val", [])
+    assert names and all(
+        n.rsplit(".", 1)[0].endswith(("r0c0", "r0c1", "r1c0", "r1c1")) for n in names
+    ), f"实效集应为图块名：{names}"
+
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-bbbb"]}])
 
 
 # ---------------------------------------------------------------- 非 done 终态（验收③）
