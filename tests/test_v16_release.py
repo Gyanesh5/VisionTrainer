@@ -87,6 +87,58 @@ def test_release_packaging_and_metadata(release_client):
     assert classes_txt == ["car", "person"]
 
 
+def test_release_baseline_sha8_local_file_weight(release_client):
+    """血缘字段三形态之一（契约 v1.1 §5.4，ADR 0018 Decision 2）：本地文件起训 →
+    快照 weight 段 sha256[:8]，发布响应 / metadata.json / 清单行三处带出。"""
+    c, tmp_path, _app = release_client
+    base_pt = tmp_path / "base-local.pt"
+    base_pt.write_bytes(b"BASE-PT")
+    expect = hashlib.sha256(b"BASE-PT").hexdigest()[:8]  # 独立真源：已知内容的指纹
+    task_id = c.post("/api/v1/tasks", json={"name": "local-base", "base_model": str(base_pt),
+                                            "dataset": "plate", "epochs": 2}).json()["id"]
+    uid = _wait_done(c, task_id)
+
+    out = c.post(f"/api/v1/runs/{uid}/release").json()
+    assert out["baseline_sha8"] == expect  # 发布响应
+    meta = json.loads((Path(out["release_dir"]) / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["baseline_sha8"] == expect  # metadata.json（契约 §5.4）
+    row = next(r for r in c.get("/api/v1/releases").json()["releases"]
+               if r["release_id"] == out["release_id"])
+    assert row["baseline_sha8"] == expect  # 清单行
+
+
+def test_release_baseline_sha8_null_for_official_model(release_client):
+    """血缘字段三形态之二（ADR 0018 Decision 2）：官方名起训（快照 weight 段
+    resolved_by_trainer）→ null——null 是合法值（推理端开新族候选），字段必须在场。"""
+    c, tmp_path, _app = release_client
+    uid = _train_one(c, "official-base")
+
+    out = c.post(f"/api/v1/runs/{uid}/release").json()
+    assert out["baseline_sha8"] is None
+    meta = json.loads((Path(out["release_dir"]) / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["baseline_sha8"] is None
+    row = next(r for r in c.get("/api/v1/releases").json()["releases"]
+               if r["release_id"] == out["release_id"])
+    assert row["baseline_sha8"] is None
+
+
+def test_release_baseline_sha8_null_without_snapshot(release_client):
+    """血缘字段三形态之三（ADR 0018 Decision 3）：无快照旧 Run → null——宁可空不可错，
+    不从 Task.base_model 现算指纹（快照的意义就是冻结）。"""
+    c, tmp_path, app = release_client
+    uid = _train_one(c, "no-snapshot")
+    with app.state.manager.Session() as s:
+        from visiontrainer.db.models import Run
+
+        run = s.query(Run).filter(Run.uid == uid).one()
+        Path(run.run_dir, "run_manifest.json").unlink()
+    out = c.post(f"/api/v1/runs/{uid}/release").json()
+    assert out["baseline_sha8"] is None
+    row = next(r for r in c.get("/api/v1/releases").json()["releases"]
+               if r["release_id"] == out["release_id"])
+    assert row["baseline_sha8"] is None
+
+
 def test_release_signed_url_download_and_expiry(release_client):
     """限时签名 URL（验收 1）：有效签名能下载完整发布包；过期/篡改签名 403 拒绝。"""
     c, tmp_path, _app = release_client
@@ -263,5 +315,5 @@ def test_migration_creates_model_releases_on_stamp_path(tmp_path):
         assert ver  # 已升到 head（b0003 在链上）
         cols = {r[1] for r in s.execute(text("PRAGMA table_info(model_releases)"))}
         assert {"id", "run_id", "fingerprint", "release_dir", "url_expires_at", "payload",
-                "created_at"} <= cols
+                "created_at", "baseline_sha8"} <= cols  # b0006：血缘列随链就位
         assert s.execute(text("SELECT uid FROM runs")).scalar() == "ca11ed00"  # 数据保留
