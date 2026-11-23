@@ -666,6 +666,71 @@ def test_pull_rejected_not_writebacked_attribution_via_file_key(pull_client, fak
         {"status": "ingested", "sample_ids": ["s-att1"]}]
 
 
+def test_pull_source_same_stem_other_suffix_not_rejected(pull_client, fake_producer,
+                                                         datasets_root):
+    """真源同名异后缀文件（如 .txt）不构成「已存在」（#150）：幂等预检的词干收集
+    两侧同按 图后缀+JSON 口径——真源目录里与新词干同名的 .txt 不再把新词干误判成
+    content_mismatch 拒收（真源一字节不动、整词干被拒），新词干照常入库。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-txt0", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="mfds").status_code == 200
+    # 真源混入与新词干同名的异后缀文件（人工放进的旁注文本，非图非 JSON）
+    src = datasets_root / "mfds" / "source"
+    (src / "s-txt1_1_000000.txt").write_text("旁注", encoding="utf-8")
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-txt1", "confirmed",
+                      shapes=[{"label": "car", "shape_type": "rectangle",
+                               "points": [[10, 10], [110, 90]], "flags": {}}])], ["car"])
+    r = _pull(pull_client, fake_producer, mode="add", name="mfds")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 1  # 新词干不因同名 .txt 被误拒
+    assert body["rejected"] == []
+    assert body["skipped"] == []
+    assert pull_client.get("/api/v1/datasets/mfds").json()[
+        "validation_summary"]["total_images"] == 2
+    assert (src / "s-txt1_1_000000.txt").read_text(encoding="utf-8") == "旁注"  # 真源一字节不动
+
+
+def test_pull_manifest_file_key_unreadable_rejected_loud_not_writebacked(
+        pull_client, fake_producer, datasets_root):
+    """manifest images[].file 键读不到（对端格式漂移）fail loud（#150）：无法归因的样本
+    显式登记拒绝段（reason=manifest_key_mismatch，meta 落账同口径）、一律不混进 ingested
+    回写——映射失效不再静默空转（推理端把「拒收」记成「已入库」）；包内新词干照常入库。"""
+    FakeProducerHandler.bundle = build_bundle(
+        [sample_entry("s-mk0", "confirmed")], ["car"])
+    assert _pull(pull_client, fake_producer, name="mfdk").status_code == 200
+    # 第二批：manifest 漂移（images 条目丢 file 键）+ 同词干异内容（s-mk0 须拒收）
+    mutated = sample_entry("s-mk0", "confirmed",
+                           shapes=[{"label": "car", "shape_type": "rectangle",
+                                    "points": [[6, 6], [55, 65]], "flags": {}}])
+    fresh = sample_entry("s-mk1", "confirmed",
+                         shapes=[{"label": "car", "shape_type": "rectangle",
+                                  "points": [[10, 10], [110, 90]], "flags": {}}], idx=1)
+    for s in (mutated, fresh):
+        del s["images"][0]["file"]
+    FakeProducerHandler.bundle = build_bundle(
+        [mutated, fresh], ["car"], jpeg=b"\xff\xd8\xff\xe1" + b"\x44" * 64)
+    FakeProducerHandler.writeback_bodies = []  # 只看第二批的回写载荷
+    r = _pull(pull_client, fake_producer, mode="add", name="mfdk")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["added"] == 1  # 新词干入库不受归因失效拖累
+    # fail loud：两样本都读不出词干 → 拒绝段显式登记（词干拒收 + 键失配并列）
+    assert body["rejected"] == [
+        {"stem": "s-mk0_1_000000", "reason": "content_mismatch",
+         "files": ["s-mk0_1_000000.jpg", "s-mk0_1_000000.json"]},
+        {"sample_id": "s-mk0", "reason": "manifest_key_mismatch"},
+        {"sample_id": "s-mk1", "reason": "manifest_key_mismatch"},
+    ]
+    # 映射失效样本一律剔出回写（拒收 ≠ ingested，载荷恒空）
+    assert FakeProducerHandler.writeback_bodies == [
+        {"status": "ingested", "sample_ids": []}]
+    meta = pull_client.get("/api/v1/datasets/mfdk").json()
+    assert meta["producer_imports"][1]["import_rejected"] == body["rejected"]  # 落账同口径
+    assert meta["validation_summary"]["total_images"] == 2
+
+
 # ---------------------------------------------------------------- 重导入口（#132，契约 §5.5）
 
 STAGED_PATH = "/api/v1/datasets/producer-pulls/staged"
