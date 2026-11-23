@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import threading
 import time
@@ -13,10 +14,12 @@ from ..datasets.formats import DEFAULT_FORMAT_ID
 from . import naming
 from .manager import (FROZEN_CLASSES, FROZEN_SUBDIR, SubprocessHandle,
                       backfill_classify_frozen, task_inputs)
-from .snapshot import load_snapshot
+from .snapshot import load_snapshot, weight_fingerprint
 from ..datasets import service as ds
 from ..datasets.service import DatasetError
 from ..ws import publish_threadsafe
+
+_logger = logging.getLogger(__name__)
 
 
 class TaskError(Exception):
@@ -387,6 +390,36 @@ def get_run(manager, uid: str) -> dict:
                 "artifacts": {"best_pt": r.best_pt, "last_pt": r.last_pt,
                               "training_log": str(run_dir / "training.log") if run_dir else None,
                               "results_csv": str(run_dir / "results.csv") if run_dir else None}}
+
+
+def replay_writeback_trained(manager, uid: str, cfg: dict | None = None) -> dict:
+    """手动重放 trained 回写（票 #149，契约 §5.3）：仅 done Run，其余 409。
+
+    归因上下文（运行快照 effective 冻结段 + dataset meta ``producer_imports`` 联动
+    账目）都是冻结态——重放即重新触发 `producer_writeback.writeback_trained_for_run`，
+    不重算归因，载荷与首次后台回写同态；幂等性靠契约 §5.3 对端同态重复受理。
+    同步执行出站（区别于终态钩子的后台线程）：响应面直接携带回写结果，失败
+    ``ok=false`` 带 detail（尽力而为语义，不构成 REST 5xx），skipped 原因细分见
+    `producer_writeback.trained_attribution`。
+    """
+    from visiontrainer.db.models import Run, Task
+
+    with manager.Session() as s:
+        r = s.query(Run).filter(Run.uid == uid).one_or_none()
+        if r is None:
+            raise _http_err("not_found", f"Run 不存在：{uid}", 404)
+        if r.status != "done":
+            raise _http_err("state_conflict",
+                            f"仅终态成功的 Run 可重放 trained 回写，当前状态 {r.status}", 409)
+        if not r.run_dir:
+            raise _http_err("state_conflict", "Run 无运行目录（无实效快照可归因）", 409)
+        task = s.get(Task, r.task_id)
+        dataset, run_dir = (task.dataset if task else None), r.run_dir
+    if not dataset:
+        raise _http_err("state_conflict", "Run 无关联数据集，无从归因", 409)
+    from ..datasets import producer_writeback
+
+    return producer_writeback.writeback_trained_for_run(dataset, run_dir, cfg=cfg)
 
 
 def clear_last_pt(manager, uid: str) -> dict:
@@ -1549,6 +1582,27 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         family = parse_model_family(task.base_model)
         task_type = ds_meta.get("task_type", "detect")
         fingerprint = _weight_fingerprint(Path(best_pt))
+        # 血缘字段（票 147，契约 v1.1 §5.4，ADR 0018）：起训权重指纹，快照 weight 段
+        # 冻结口径（解读收口 snapshot.weight_fingerprint）——本地文件 → sha256[:8]；
+        # 官方名（resolved_by_trainer）/无快照 → null（null=开新族候选，合法值；
+        # 宁缺勿错，不从 Task.base_model 现算）
+        baseline_sha8 = weight_fingerprint(
+            load_snapshot(run.run_dir) if run.run_dir else None)
+        # 数据血缘（票 147，ADR 0018 Decision 4/5）：实效集命中批次 manifest.models 并集
+        # （[{model_id, model_sha8}] 去重保序）——消费 #146 共享归因查询。两种空数组语义
+        # 有别：无联动导入/无快照 = 契约 §5.4 正常空数组（合法值，非 null）；下方 except
+        # = 归因读取失败降级空——发布不被联动归因失败拖死（同上分析读取的降级口径），
+        # 宁告警不阻断，降级路径写日志留查
+        sample_models: list = []
+        if run.run_dir and task and task.dataset:
+            try:
+                from ..datasets.producer_writeback import trained_attribution
+
+                sample_models = trained_attribution(task.dataset, run.run_dir)["sample_models"]
+            except Exception as exc:  # noqa: BLE001 — 发布不被联动归因失败拖死
+                _logger.warning("sample_models 归因读取失败，降级为空数组（run=%s）：%s: %s",
+                                uid, type(exc).__name__, exc)
+                sample_models = []
         # 序号 = 该 Run 既有发布数 + 1：重复发布生成新目录新记录（只增不改，不覆盖旧包）
         seq = s.query(ModelRelease).filter(ModelRelease.run_id == run.id).count() + 1
         target = root / f"{family}_{task_type}_{run.uid}_{seq}"
@@ -1575,6 +1629,8 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
             "round_no": run.round_no,
             "primary_metric": run.primary_metric,
             "base_model": task.base_model if task else None,
+            "baseline_sha8": baseline_sha8,
+            "sample_models": sample_models,
             "task_type": task_type,
             "classes": _model_class_order(task_type, classes),
             "recommended_conf": conf,
@@ -1595,7 +1651,8 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
 
         record = ModelRelease(run_id=run.id, run_uid=uid, fingerprint=fingerprint,
                               release_dir=str(target), bundle_path=str(bundle),
-                              url_expires_at=rel.expiry(), payload=meta)
+                              url_expires_at=rel.expiry(), baseline_sha8=baseline_sha8,
+                              sample_models=sample_models, payload=meta)
         s.add(record)
         s.commit()
         rid = record.id
@@ -1606,10 +1663,14 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
 
 
 def list_releases(manager) -> dict:
-    """发布记录清单（票 123）：只增不改账目，新在前；URL 状态读时计算（过期标记）。
+    """发布记录清单（票 123）：只增不改账目，新在前；签发随清单响应现算（票 148）。
 
-    每条带 `download_url`（契约 §5.4 模型发布面，VM #146 拉取台轮询消费）：签名
-    URL 的 exp 取记录的 url_expires_at——有效期与账目字段一致，对端不用自拼 HMAC。
+    每条带 `download_url`（契约 §5.4 模型发布面，VM #146 拉取台轮询消费）：
+    exp 按响应时刻现算（now+TTL），download_url / url_expires_at 两者同刻一致——
+    账目行 url_expires_at 保留首发时刻（只增不改），不约束响应视图（契约 §5.4
+    v1.1 澄清），记录不因过期成死链（重取清单即得新鲜 URL）。响应视图恒新鲜，
+    不带 url_expired 标注（review 修复：现签语义下该字段恒 False 无信息量，
+    已随现签语义移除；账目行首发签名的过期标注见 run-weights 发布历史）。
     """
     from .. import releases as rel
     from visiontrainer.db.models import ModelRelease, Run, Task
@@ -1620,20 +1681,23 @@ def list_releases(manager) -> dict:
                 .outerjoin(Run, ModelRelease.run_id == Run.id)
                 .outerjoin(Task, Run.task_id == Task.id)
                 .order_by(ModelRelease.id.desc()).all())
-    now = datetime.now()
-    items = [{"release_id": m.id, "run_uid": r.uid if r else m.run_uid,
-              "task_id": t.id if t else None, "task_name": t.name if t else None,
-              "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,
-              "version": (m.payload or {}).get("version", m.fingerprint),
-              "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
-              "invalidated": m.invalidated_at is not None,
-              "dir_cleared": m.cleared_at is not None,
-              "created_at": m.created_at.isoformat(timespec="seconds"),
-              "url_expires_at": m.url_expires_at.isoformat(timespec="seconds"),
-              "url_expired": m.url_expires_at < now,
-              "download_url": rel.release_url(m.id, int(m.url_expires_at.timestamp())),
-              "recommended_conf": (m.payload or {}).get("recommended_conf"),
-              "classes": (m.payload or {}).get("classes") or []} for m, r, t in rows]
+    issued = rel.expiry()  # 本次签发过期时刻（读时现算，now+TTL；清单级一次，全行同刻一致）
+    items = []
+    for m, r, t in rows:
+        items.append({"release_id": m.id, "run_uid": r.uid if r else m.run_uid,
+                      "task_id": t.id if t else None, "task_name": t.name if t else None,
+                      "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,
+                      "version": (m.payload or {}).get("version", m.fingerprint),
+                      "baseline_sha8": m.baseline_sha8,  # 血缘（票 147，ADR 0018）：官方名/无快照 → null
+                      "sample_models": m.sample_models,  # 血缘（票 147，ADR 0018 D4）：命中批次 models 并集；b0007 前历史行 → null
+                      "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
+                      "invalidated": m.invalidated_at is not None,
+                      "dir_cleared": m.cleared_at is not None,
+                      "created_at": m.created_at.isoformat(timespec="seconds"),
+                      "url_expires_at": issued.isoformat(timespec="seconds"),
+                      "download_url": rel.release_url(m.id, int(issued.timestamp())),
+                      "recommended_conf": (m.payload or {}).get("recommended_conf"),
+                      "classes": (m.payload or {}).get("classes") or []})
     return {"releases": items}
 
 

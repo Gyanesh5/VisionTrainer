@@ -16,7 +16,7 @@ grilling（2026-11-23）定案血缘声明口径。
 2. **null 语义三分支**：本地文件起训 → 指纹；官方预训练权重或无快照 Run → null（**null 是合法值**=无血缘声明，推理端作开新族候选、走人工确认门）；字段缺失（旧版平台发布）→ 推理端拒绝。null ≠ 缺失——从官方预训练起训是合法常态，不得被硬校验拦截。
 3. **无快照旧 Run 取 null**：宁可空不可错——Task.base_model 本地路径现算可得更早 Run 的指纹，但文件若已变更则血缘失真，快照的意义就是冻结。
 4. **sample_models 实效集口径、同形同名列**：取数与契约 §6.2 trained 归因同构（manifest 样本清单 ∩ 实效集），字段形态与导出包 manifest.models 一致（`[{model_id, model_sha8}]` 去重保序），对端对账零翻译。
-5. **实现分工（T2 产查询、T1 消费）**：数据血缘取数与 trained 归因是同一个 join（producer_writeback.trained_sample_ids）——切片链归因修复票（评审候选 T2）顺带把归因查询重构为共享函数（返回 sample_ids + 命中批次 models 并集），发布面票（候选 T1）消费；baseline_sha8 部分只读快照、不受阻塞可先行。
+5. **实现分工（T2 产查询、T1 消费）**：数据血缘取数与 trained 归因是同一个 join（producer_writeback.trained_attribution；实施时先命名 trained_sample_ids，保留为兼容投影后经 review 判死代码删除，定名 trained_attribution）——切片链归因修复票（评审候选 T2）顺带把归因查询重构为共享函数（返回 sample_ids + 命中批次 models 并集），发布面票（候选 T1）消费；baseline_sha8 部分只读快照、不受阻塞可先行。
 6. **契约先行**：契约 v1.1 修订（§5.4 增字段+勘误+现签语义、§9/§10 同步）先于实现票落定，推理端 #190 凭定稿字段解除阻塞。
 
 ## Consequences

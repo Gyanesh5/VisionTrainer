@@ -201,6 +201,20 @@ def resume_run(uid: str, request: Request):
     return {"new_run_uid": tsvc.resume_run(_manager(request), uid)}
 
 
+@router.post("/runs/{uid}/writeback-trained")
+@_maps_errors
+def replay_writeback_trained(uid: str, request: Request):
+    """手动重放 trained 回写（票 #149，契约 §5.3）：仅 done Run（其余 409）。
+
+    归因上下文都是冻结态（快照实效集 + meta 联动账目），重放发与首次后台回写
+    同态载荷，幂等性靠对端同态重复受理；同步出站直接返回回写结果——
+    ``{ok: true/false, detail, sample_ids}`` 或 ``{ok: null, skipped: 原因,
+    sample_ids}``（skipped 细分：dataset_deleted / no_imports /
+    producer_not_configured / no_attribution）。出站失败 ok=false 不构成 5xx。"""
+    cfg = getattr(request.app.state, "cfg", None)
+    return tsvc.replay_writeback_trained(_manager(request), uid, cfg=cfg)
+
+
 @router.post("/runs/{uid}/retry")
 @_maps_errors
 def retry_run(uid: str, request: Request):

@@ -62,7 +62,11 @@ def _migrate_legacy_producer_section(cfg: dict, file_cfg: dict) -> None:
 
     新节显式在场则旧节不并入（新键优先）；旧节本身原样保留在 cfg（GET /config
     展示可见，deprecated）。旧节名字面量受 #129 grep 验收限制，取自 core.producer
-    兼容常量。"""
+    兼容常量。
+
+    退役条件（#150 注记）：存量部署的 config.toml 旧节清零后，本迁移连同
+    core.producer 旧键兼容层一并删除——完整范围与触发判据见 core/producer.py
+    兼容段注记。"""
     from .core.producer import LEGACY_CONFIG_SECTION
 
     legacy = file_cfg.get(LEGACY_CONFIG_SECTION)

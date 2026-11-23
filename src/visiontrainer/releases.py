@@ -1,27 +1,51 @@
 """模型发布签名 URL：限时 HMAC 签名（票 123，ADR 0015 Decision 1）。
 
 复用缩略图签名管线模式（thumbs.py：exp 前置 + HMAC 截断 + 无凭据 URL），
-token 消息域带 `release` 前缀——与缩略图 token 不互通；密钥同源
-`server.thumb_secret`（同一把 HMAC 密钥管两类签名面）。
+token 消息域带 `release` 前缀——与缩略图 token 不互通；密钥独立
+`server.release_secret`（票 148：与缩略图签名面分立，单点泄漏不两面齐破；
+未配置回退 `thumb_secret` 读兼容，两密钥均缺省用公开 dev 值并告警）。
 
-发布记录只增不改：URL 过期由验签拒绝（exp 内嵌 token），记录本身留档可回溯。
+签发随清单响应现算（契约 §5.4 v1.1，票 148）：清单 download_url 每次响应按
+now+TTL 重签；发布记录只增不改约束的是账目行 url_expires_at（首发时刻留档），
+不约束响应视图——URL 过期由验签拒绝（exp 内嵌 token），重取清单即得新鲜 URL。
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import time
+
+_logger = logging.getLogger(__name__)
 
 ROUTE = "/api/v1/releases/download"
 _TTL = 24 * 3600
-_DEFAULT_SECRET = "visiontrainer-dev-thumb"  # 与 thumbs 同源：dev 缺省，生产走 config
+_DEFAULT_SECRET = "visiontrainer-dev-thumb"  # 公开缺省：仅两密钥均未配置时兜底（告警），生产走 config
+
+_secret_cache: str | None = None  # 进程内懒加载：server.* 属启动装配节（改动须重启），缓存与热改口径一致
+
+
+def _reset_secret_cache() -> None:
+    """清签名密钥缓存（测试换装用；生产进程生命周期内无需调用）。"""
+    global _secret_cache
+    _secret_cache = None
 
 
 def _secret() -> str:
-    from .config import load_config
+    global _secret_cache
+    if _secret_cache is None:
+        from .config import load_config
 
-    return load_config().get("server", {}).get("thumb_secret", _DEFAULT_SECRET)
+        server = load_config().get("server", {})
+        secret = server.get("release_secret") or server.get("thumb_secret")
+        if not secret:
+            _logger.warning(
+                "签名密钥未配置（server.release_secret / server.thumb_secret 均缺省）："
+                "模型发布下载面回退公开缺省密钥——知道 release_id 即可伪造下载 URL，生产环境须配置")
+            secret = _DEFAULT_SECRET
+        _secret_cache = secret
+    return _secret_cache
 
 
 def sign(release_id: int, exp: int | None = None) -> str:
@@ -54,7 +78,8 @@ def release_url(release_id: int, exp: int | None = None) -> str:
 
 
 def expiry() -> "datetime":
-    """当前签发口径的过期时刻（本地 naive，与库内 created_at 同口径）——记录的 url_expires_at 与之一致。"""
+    """当前签发口径的过期时刻（本地 naive，与库内 created_at 同口径）——发布登记写
+    账目行首发时刻；清单面（契约 §5.4 现签）逐响应重算，账目行不受影响。"""
     from datetime import datetime, timedelta
 
     return datetime.now() + timedelta(seconds=_TTL)

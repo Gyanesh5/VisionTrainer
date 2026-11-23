@@ -897,6 +897,15 @@ export const runsApi = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
     }),
+  /** 手动重放 trained 回写（票 149，契约 §5.3）：仅 done Run；归因上下文冻结态，
+   *  重发与首次后台回写同态载荷，幂等由对端同态受理。ok=false 出站失败（detail 人读）；
+   *  ok=null 跳过（skipped：dataset_deleted / no_imports / producer_not_configured /
+   *  no_attribution） */
+  writebackTrained: (uid: string) =>
+    request<{ ok: boolean | null; detail?: string; skipped?: string; sample_ids: string[] }>(
+      `/api/v1/runs/${encodeURIComponent(uid)}/writeback-trained`,
+      { method: "POST" },
+    ),
 };
 
 // ---------------------------------------------------------------- Agent 调参域
@@ -1319,8 +1328,6 @@ export interface ReleaseItem {
   dir_cleared: boolean;
   created_at: string | null;
   url_expires_at: string;
-  /** 签名 URL 是否已过有效期（读时计算，只增不改账目不受影响） */
-  url_expired: boolean;
   recommended_conf: number | null;
   classes: string[];
 }

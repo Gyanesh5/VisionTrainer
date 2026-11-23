@@ -18,14 +18,13 @@ detail 人读、已告警留日志；trained 路径失败另发桌面通知（�
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 
 import httpx
 
 from ..core import producer
-from ..training.snapshot import SNAPSHOT_NAME  # 运行快照文件名唯一真源（训练侧产物）
+from ..training.snapshot import effective_names  # 实效段读侧收口 snapshot（#146 F4-2）
 from . import service as svc
 
 _logger = logging.getLogger(__name__)
@@ -71,42 +70,60 @@ def writeback_trained(base: str, sample_ids: list[str]) -> dict:
 # ---------------------------------------------------------------- 归因：清单 ∩ 实效集
 
 
-def _effective_names(run_dir) -> set[str] | None:
-    """Run 运行快照的实效名单（train+val，相对 source/ 文件名）。
+def _source_scope(names: set[str], groups: dict | None) -> set[str]:
+    """实效集文件名归约到源图口径（契约 §6.2「切片派生图块按源图归属映射」）。
+
+    图块名经 ``tiling.groups``（``{源图名: [图块名,...]}``）反查源图名；数据集无
+    tiling/groups（直训链）恒等返回。未入映射的名字保持原样——它与 manifest 源图名
+    不匹配，自然零命中，不误归。
+    """
+    if not groups:
+        return names
+    tile_to_src = {tile: src for src, tiles in groups.items() if isinstance(tiles, list)
+                   for tile in tiles}
+    return {tile_to_src.get(n, n) for n in names}
+
+
+def trained_attribution(dataset: str, run_dir, root: Path | None = None) -> dict:
+    """共享归因查询（契约 §6.2 trained 回写口径 + ADR 0018 Decision 5）：dataset meta
+    ``producer_imports`` 样本清单 ∩ 该 Run 实效名单（实效集文件名先经 tiling.groups
+    归约到源图口径再匹配）。
+
+    样本图片（manifest ``images[].file`` 的 basename）落在归约后的源图口径名单内才
+    计入该 ``sample_id``——images 条目键按契约 §4.4 冻结格式读 ``file``。切片派生
+    数据集的实效名单是图块名（``{源图stem}_r{r}c{c}``），归约把它映回源图名；直训链
+    无 tiling 段，行为与 basename 精确匹配一致。#129 改名兼容：meta 读侧已把旧键记录
+    并入 ``producer_imports``（见 `datasets.service._read_meta`），旧 dataset.json
+    归因不断链。
 
     Returns:
-        文件名集合；快照缺失或无实效段（外部数据集/历史 Run）→ None。
-    """
-    try:
-        manifest = json.loads((Path(run_dir) / SNAPSHOT_NAME).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return None
-    effective = manifest.get("effective")
-    if not isinstance(effective, dict):
-        return None
-    names = list(effective.get("train") or []) + list(effective.get("val") or [])
-    return {n for n in names if n}
-
-
-def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[str]:
-    """归因：dataset meta ``producer_imports`` 样本清单 ∩ 该 Run 实效名单。
-
-    样本图片（manifest ``images[].file`` 的 basename）落在实效名单内才计入该
-    ``sample_id``——images 条目键按契约 §4.4 冻结格式读 ``file``；顺序沿导入批次
-    落账序，去重保序。数据集无联动导入记录或 Run 无实效快照 → 空清单（无从归因，
-    不回写）。#129 改名兼容：meta 读侧已把旧键记录并入 ``producer_imports``（见
-    `datasets.service._read_meta`），旧 dataset.json 归因不断链。
+        ``{"sample_ids": [...], "sample_models": [...], "skip_reason": str | None}``——
+        - ``sample_ids``：命中样本 id，顺序沿导入批次落账序、去重保序；
+        - ``sample_models``：命中批次（≥1 样本命中的导入记录）manifest.models 并集，
+          形态与导出包 manifest.models 一致（``[{model_id, model_sha8}]``，按二元组
+          去重保序，ADR 0018 Decision 4）——发布面 ``sample_models`` 字段零翻译取数
+          （票 #147 消费）。
+        - ``skip_reason``（票 #149）：零归因时的原因细分——数据集已删 ``dataset_deleted``、
+          无联动导入 ``no_imports``（原 ``no_attribution`` 一码二义的排障拆分）；命中
+          （含在册但零交集）→ None。
+        零命中 → ``sample_ids``/``sample_models`` 均空清单。
     """
     try:
         meta = svc.get_dataset(dataset, root)
     except svc.DatasetError:
-        return []
+        return {"sample_ids": [], "sample_models": [], "skip_reason": "dataset_deleted"}
     imports = meta.get("producer_imports") or []
-    names = _effective_names(run_dir)
-    if not imports or names is None:
-        return []
+    if not imports:
+        return {"sample_ids": [], "sample_models": [], "skip_reason": "no_imports"}
+    names = effective_names(run_dir)
+    if names is None:
+        return {"sample_ids": [], "sample_models": [], "skip_reason": None}
+    names = _source_scope(names, (meta.get("tiling") or {}).get("groups"))
     ids: list[str] = []
+    models: list[dict] = []
+    seen_models: set[tuple] = set()
     for rec in imports:
+        hit = False
         for sample in rec.get("samples") or []:
             sid = str(sample.get("sample_id") or "")
             if not sid or sid in ids:
@@ -114,8 +131,18 @@ def trained_sample_ids(dataset: str, run_dir, root: Path | None = None) -> list[
             for img in sample.get("images") or []:
                 if Path(str(img.get("file") or "")).name in names:
                     ids.append(sid)
+                    hit = True
                     break
-    return ids
+        for m in rec.get("models") or []:
+            # 契约 §4.4 形态冻结下的极端输入兜底：缺 model_id/model_sha8 的畸形条目
+            # 不进并集（null/空键会让对端对账失真），静默跳过
+            if not isinstance(m, dict) or not m.get("model_id") or not m.get("model_sha8"):
+                continue
+            key = (m["model_id"], m["model_sha8"])
+            if hit and key not in seen_models:
+                seen_models.add(key)
+                models.append({"model_id": m["model_id"], "model_sha8": m["model_sha8"]})
+    return {"sample_ids": ids, "sample_models": models, "skip_reason": None}
 
 
 # ---------------------------------------------------------------- 终态钩子入口
@@ -125,22 +152,27 @@ def writeback_trained_for_run(dataset: str, run_dir, cfg: dict | None = None) ->
     """Run 终态成功后的 trained 回写（`training.manager` 终态钩子调用，票 125）。
 
     归因交集 → 出站回写；失败只告警不阻断训练主流程：日志 warning + 桌面通知
-    （后台回写无 REST 响应面，告警可见性走通知域）。永不抛异常。
+    （后台回写无 REST 响应面，告警可见性走通知域）。永不抛异常。断链兜底走
+    `POST /api/v1/runs/{uid}/writeback-trained` 手动重放（票 #149，契约 §5.3
+    对端同态受理）——重训补不回原 Run 归因，提示语与机制一致。
 
     Returns:
-        回写结果 {ok, detail, sample_ids}；无从归因或推理端地址未配置（联动未启用）
-        时 {ok: None, skipped: 原因, sample_ids}——属正常态，不算失败。
+        回写结果 {ok, detail, sample_ids}；无从归因（skipped 细分见
+        `trained_attribution`，票 #149）或推理端地址未配置（联动未启用）时
+        {ok: None, skipped: 原因, sample_ids}——属正常态，不算失败。
     """
-    ids = trained_sample_ids(dataset, run_dir)
+    attribution = trained_attribution(dataset, run_dir)
+    ids = attribution["sample_ids"]
     if not ids:
-        return {"ok": None, "skipped": "no_attribution", "sample_ids": []}
+        return {"ok": None, "skipped": attribution["skip_reason"] or "no_attribution",
+                "sample_ids": []}
     base = producer.get_producer_base_url(cfg)
     if not base:
         return {"ok": None, "skipped": "producer_not_configured", "sample_ids": ids}
     result = writeback_trained(base, ids)
     if not result["ok"]:
         detail = (f"数据集「{dataset}」的 trained 状态回写失败：{result['detail']}"
-                  "——训练不受影响，可重训或从数据集页重新拉取后补写")
+                  "——训练不受影响，可修复推理端连接后在运行详情页重放回写补写")
         _logger.warning("trained 回写失败（不阻断训练）：%s", detail)
         from ..core.notify import desktop_notify
 

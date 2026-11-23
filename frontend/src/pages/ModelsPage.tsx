@@ -44,11 +44,8 @@ const VERIFY_META: Record<VerifyKind, { label: string; mark: string; cls: string
   unverified: { label: "未验证", mark: "−", cls: "is-unverified" },
 };
 
-/** 发布记录 URL 状态三重编码（票 123）：过期只影响拉取，记录本身留档 */
-const URL_META: Record<"fresh" | "expired", { label: string; mark: string; cls: string }> = {
-  fresh: { label: "URL 有效", mark: "✓", cls: "is-ok" },
-  expired: { label: "URL 过期", mark: "−", cls: "is-unverified" },
-};
+/** 发布记录 URL 徽章（票 123 三重编码：语义色 + 形状标记 + 文字）；票 148 现签语义：清单响应现签，URL 恒新鲜，无过期态 */
+const URL_META = { label: "URL 有效", mark: "✓", cls: "is-ok" };
 
 type LibKind = "latest" | "verified" | "unverified" | "unregistered";
 
@@ -513,7 +510,6 @@ export function ModelsPage() {
             </thead>
             <tbody data-testid="release-rows">
               {releases.map((m) => {
-                const meta = URL_META[m.url_expired ? "expired" : "fresh"];
                 return (
                   <tr key={m.release_id}>
                     <td className="tnum">{formatTs(m.created_at)}</td>
@@ -549,11 +545,11 @@ export function ModelsPage() {
                     </td>
                     <td>
                       <span
-                        className={`badge ${meta.cls}`}
+                        className={`badge ${URL_META.cls}`}
                         data-testid={`release-url-${m.release_id}`}
                         title={`过期时刻 ${m.url_expires_at}`}
                       >
-                        <span aria-hidden="true">{meta.mark}</span> {meta.label}
+                        <span aria-hidden="true">{URL_META.mark}</span> {URL_META.label}
                       </span>
                     </td>
                     <td>

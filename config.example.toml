@@ -3,6 +3,10 @@
 [server]
 host = "127.0.0.1"
 port = 8600
+# 模型发布下载面的独立签名密钥（票 148）：限时签名 URL 的 HMAC 凭证，与缩略图签名面
+# 分立（单点泄漏不两面齐破）。生产环境必配随机长串；未配置时回退 thumb_secret，
+# 两者都未配置则用公开缺省密钥（签名时告警，仅限开发）。
+# release_secret = "改成随机长串"
 
 [training]
 # 训练/导出子进程使用的 python 解释器（torch/ultralytics 所在环境；平台自身 venv 无 torch）。

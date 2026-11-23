@@ -1421,6 +1421,10 @@ def tile_dataset(name: str, rows: int = 2, cols: int = 2, overlap: float = 0.2,
                        "groups": {Path(g["source"]).name: [Path(en["image"]).name for en in g["entries"]]
                                   for g in groups if g["entries"]}},
         }
+        # 联动账目随切片传播（#146，契约 §6.2）：快照性拷贝到切片集 meta——归因读的是
+        # 消费数据集自身账目，账目在切片时丢失会让整条切片链静默断链；源集账目不动。
+        if meta.get("producer_imports"):
+            meta_new["producer_imports"] = list(meta["producer_imports"])
         _write_meta(ds_dir, meta_new)
         return {"meta": _compose_managed(meta_new, ds_dir), "summary": summary}
     except Exception:
