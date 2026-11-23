@@ -213,6 +213,37 @@ def test_writeback_attribution_is_effective_set_intersection(wb_client, fake_pro
     _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-cccc"]}])
 
 
+def test_writeback_excluded_sample_not_attributed(wb_client, fake_producer, datasets_root):
+    """排除在册剔除路径（与上测 missing 互补，契约 §6.2「被实效集剔除的样本保持
+    ingested」）：排除在册的样本不进实效集 → 不回写 trained。"""
+    samples = _two_samples() + [sample_entry("s-cccc", "confirmed", idx=2)]
+    FakeProducerHandler.bundle = build_bundle(samples, ["car", "person"])
+    r = _pull(wb_client, fake_producer, name="mfd-exc")
+    assert r.status_code == 200, r.text
+
+    # 先切分、后排除：剔除发生在出队门，实效段 dropped.excluded 记账（与 missing 各计一次）
+    assert wb_client.post("/api/v1/datasets/mfd-exc/splits",
+                          json={"mode": "fresh", "seed": 42, "ratio": 0.8}).status_code == 200
+    assert wb_client.post("/api/v1/datasets/mfd-exc/exclude",
+                          json={"files": ["s-bbbb_1_000001.jpg"],
+                                "reason": "审查丢弃"}).status_code == 200
+
+    FakeProducerHandler.writeback_bodies = []
+    assert wb_client.put("/api/v1/system/producer",
+                         json={"base_url": fake_producer}).status_code == 200
+    r = wb_client.post("/api/v1/tasks", json={
+        "name": "wb-exc", "base_model": "stub-model", "dataset": "mfd-exc", "epochs": 1})
+    assert r.status_code == 200, r.text
+    task = _wait_task(wb_client, r.json()["uid"], {"done"})
+    run = _wait_status(wb_client, task["runs"][0]["uid"], {"done"})
+    effective = (run.get("snapshot") or {}).get("effective") or {}
+    names = effective.get("train", []) + effective.get("val", [])
+    assert names and "s-bbbb_1_000001.jpg" not in names  # 排除样本不进实效集
+    assert "s-bbbb_1_000001.jpg" in ((effective.get("dropped") or {}).get("excluded") or [])
+
+    _wait_trained([{"status": TRAINED, "sample_ids": ["s-aaaa", "s-cccc"]}])
+
+
 # ---------------------------------------------------------------- 切片链端到端（#146，契约 §6.2 偏差 12）
 
 
