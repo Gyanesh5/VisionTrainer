@@ -1,6 +1,6 @@
 # 联动契约（Linkage Contract）
 
-契约版本：v1.0（2026-11-19 定稿）
+契约版本：v1.1（2026-11-23 修订：§5.4 增血缘声明字段与勘误，见 §9；§6.2 行文用词勘误「瓦片→图块」，训练平台 GLOSSARY 定名；v1.0 2026-11-19 定稿）
 事实源：本文档为两系统对接的唯一权威契约，双方仓内与之冲突的描述以本文为准；变更纪律见 §9。
 参照实现：推理端=vision-monitor（首个实现）；训练平台=VisionTrainer。本文行文一律使用角色词，参照实现专名只在本节与 §10 出现。
 
@@ -92,9 +92,12 @@ samples 逐条：`sample_id, status, created_ts, site, task_id, task_type, frame
 
 ### 5.4 模型发布面（推理端 → 训练平台拉取）
 
-- 发布：训练平台把某次训练的 best 权重+metadata.json（run_uid、模型指纹、任务类型、类别表、建议置信度、发布时间）+classes.txt 打包为发布 bundle；发布记录只增不改。
-- 列表：`GET {训练平台基址}/api/v1/releases`（对外形状含：rid、模型指纹、任务、指标摘要、发布时间、下载 URL）。
-- 下载：限时签名 URL（HMAC，内嵌过期时间）；推理端义务=下载后校验模型指纹与发布 metadata 一致；落盘后不自动切换任务指向（人工验证后放行）。
+- 发布：训练平台把某次训练的 best 权重+metadata.json（run_uid、模型指纹、任务类型、类别表、建议置信度、发布时间、源基线指纹、样本溯源模型清单）+classes.txt 打包为发布 bundle；发布记录只增不改。
+- 血缘声明（v1.1 增补，2026-11-23 定案，训练平台 ADR 0018）：
+  - `baseline_sha8`（源基线指纹）=该 Run 起训权重的内容指纹（运行快照 weight 段冻结口径：本地文件记 sha256，取前 8 位）；起训自官方预训练权重（无本地文件）或 Run 无快照 → null。**null 是合法值**，语义=无权重血缘声明，推理端作开新族候选处置（走人工确认门）；仅字段缺失（旧版训练平台发布）才构成拉取拒绝理由。
+  - `sample_models`（样本溯源模型清单）=该 Run 实效集命中的各导出批次 manifest.models 并集（§4.4 models 形态，去重保序）；数据集无联动导入 → 空数组。取数与 §6.2 trained 归因同构（实效集口径）。
+- 列表：`GET {训练平台基址}/api/v1/releases`（对外形状含：release_id、run_uid、模型指纹、baseline_sha8、sample_models、任务、指标摘要、发布时间、下载 URL）。v1.0 所记 `rid` 系笔误，勘误对齐实现字段名 release_id。
+- 下载：限时签名 URL（HMAC，内嵌过期时间）；**签发随清单响应现算**（有效期与响应时刻一致，清单每次重取即得新鲜 URL）——发布记录只增不改约束的是账目行，不约束响应视图；推理端义务=下载后校验模型指纹与发布 metadata 一致；落盘后不自动切换任务指向（人工验证后放行）。
 - 字节纪律：训练产物字节级拷贝分发；任何 load+save 往返都会改变指纹。
 
 ### 5.5 导入失败恢复
@@ -111,7 +114,7 @@ samples 逐条：`sample_id, status, created_ts, site, task_id, task_type, frame
 
 ### 6.2 trained 回写口径
 
-trained 归因=导出 manifest 样本清单 ∩ 该次训练 Run 冻结实效集（effective.train/val 文件清单）；切片派生瓦片按源图归属映射；被实效集剔除（排除/缺失）的样本保持 ingested。
+trained 归因=导出 manifest 样本清单 ∩ 该次训练 Run 冻结实效集（effective.train/val 文件清单）；切片派生图块按源图归属映射；被实效集剔除（排除/缺失）的样本保持 ingested。
 
 ### 6.3 模型指纹
 
@@ -139,8 +142,8 @@ sha256 前 8 位；只算字节内容，与文件名/路径/mtime 无关；样�
 ## 9. 版本与变更纪律
 
 - 本契约独立版本化；破坏性变更 bump 主版本，双方各记一条 ADR。
-- 导出包 manifest 的 schema_version 独立自增（当前 1）；映射关系：契约 v1.0 ↔ manifest schema_version=1。
-- 兼容承诺：新增可选字段不 bump 主版本；删除/改义字段 bump。
+- 导出包 manifest 的 schema_version 独立自增（当前 1）；映射关系：契约 v1.0/v1.1 ↔ manifest schema_version=1（v1.1 未动导出包）。
+- 兼容承诺：新增可选字段不 bump 主版本；删除/改义字段 bump。v1.1 的 baseline_sha8/sample_models 为新增可选字段，`rid`→release_id 为勘误（v1.0 无实现消费过 `rid`），均不 bump 主版本。
 
 ## 10. 实现偏差登记（实然 vs 应然）
 
@@ -155,6 +158,9 @@ sha256 前 8 位；只算字节内容，与文件名/路径/mtime 无关；样�
 | 7 | 训练平台 | 平台内以 monitor 类词命名对端（连接配置键、/monitor-pull、monitor_pull.py、monitor_writeback.py、monitor_imports meta、UI 文案） | 已完成（实施票 #129：代码 token=`producer`、中文=推理端；旧 runtime_settings 键/config.toml 旧节/meta 旧键读兼容，写恒新键） |
 | 8 | 训练平台 | classify 消费面缺失（审查页渲染态/改类动作/批量通过/label→flags 投影） | 已完成（实施票 #131：pull 解包后顶层 label→flags 真键投影+classes.txt 登记、审查页 classify 渲染分支、改类即判定（review/relabel）、批量通过（review/approve-batch）；validate 对 classify 按 flags 定类计数） |
 | 9 | 训练平台 | 拉取 ZIP 暂存+幂等重导缺失 | 已完成（实施票 #132：下载成功且结构校验通过即落暂存 `producer_pulls/`（成功即焚+超期 14 天清扫）；逐文件幂等以词干为单位前置预检——同词干同内容跳过/异内容拒收登记进导入报告与 meta 落账，只作用拉取导入器；`GET producer-pulls/staged` + `POST producer-pulls/reimport` 从暂存重导，成功照常回写 ingested） |
+| 10 | 训练平台 | 发布面尚未携带血缘字段（baseline_sha8/sample_models，§5.4 v1.1 增补） | 待实施（架构评审 2026-11-23 候选 T1：metadata/发布行/清单三处带出） |
+| 11 | 训练平台 | 清单 download_url 签发死绑首发 url_expires_at，过期无重签路径（§5.4 现签语义） | 待实施（同评审候选 T3：清单响应读时现签） |
+| 12 | 训练平台 | §6.2「切片派生图块按源图归属映射」未实现——切片链 trained 回写整段静默失效（producer_imports 不随切片传播、归因 join 为 basename 精确匹配永不命中图块名） | 待实施（同评审候选 T2：图块→源图归约 + 账目随切片传播） |
 
 适配完成后逐条勾销；新增偏差随实施登记。
 
