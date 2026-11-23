@@ -4,6 +4,7 @@ import { keepPreviousData, useQuery, useQueryClient } from "@tanstack/react-quer
 import {
   analysisApi,
   datasetsApi,
+  runsApi,
   signThumbUrls,
   type AnalysisCellEntry,
   type AnalysisPerImage,
@@ -21,6 +22,8 @@ import { fmtMetric } from "../components/training/domain";
  * - 格内聚焦叠加（眼睛按钮）：该图只画本格记录——看图若带全量标注，本格错在哪反被淹没；
  * - conf 口径可设：POST 重算复用已推理结果（秒级），阈值扫描恒基于全量匹配；
  * - 导出 FN/FP 改标清单入口（修法在 X-AnyLabeling，XAL 打开按钮挂在 Viewer 工具栏）。
+ * - classify 逐图对账（#157）：一图一条记录、没有框——措辞按「图」计，格内表不出 IoU 列，
+ *   改类入口是数据集的标注审查页（改类即判定），叠加图为文字标注。
  */
 
 const DEFAULT_CONF = 0.25;
@@ -49,6 +52,16 @@ export function RunAnalysisPage() {
   });
   const analysis = analysisQ.data ?? null;
   const summary = analysis?.summary ?? null;
+
+  // 对账口径随任务类型：classify 逐图（一图一条、无框），其余逐框——复用 Run 详情页的查询
+  // 缓存（同 key），从详情页进来通常不发新请求；Run 读取失败时按逐框走
+  const runQ = useQuery({
+    queryKey: ["run", uid],
+    queryFn: () => runsApi.get(uid),
+    enabled: uid !== "",
+  });
+  const isClassify = runQ.data?.task_type === "classify";
+  const unit = isClassify ? "图" : "框";
 
   // conf 口径输入：未分析态默认 0.25，已分析态跟随上次口径
   const [confInput, setConfInput] = useState<string>("");
@@ -100,13 +113,15 @@ export function RunAnalysisPage() {
     }
   }
 
-  /** Viewer 工具栏 XAL 按钮：修法在 X-AnyLabeling，直接打开原图（改标） */
+  /** Viewer 工具栏 XAL 按钮：修法在 X-AnyLabeling，直接打开原图（改标）。
+   *  classify 的修法是到标注审查页改类，不挂 XAL 按钮（#157）。 */
   function openOverlayImage(signedPath: string, imagePath: string, title: string) {
     openZoom({
       url: signedPath,
       title,
-      xal: true,
+      xal: !isClassify,
     });
+    if (isClassify) return;
     // holder 由 openZoom 同步创建：挂 XAL 按钮回调（每次打开新 holder，once 即弃）
     document.getElementById("vt-zoom-holder")?.addEventListener(
       "vtxal",
@@ -129,7 +144,7 @@ export function RunAnalysisPage() {
       openOverlayImage(
         hit.url,
         row.image,
-        `${row.image.split("/").pop()} · 错框 ${row.score}（FP ${row.fp} / FN ${row.fn} / 混淆 ${row.confusion}）　·　绿 = GT（真值类别）｜红 = Pred（预测类别 + 置信度）`,
+        `${row.image.split("/").pop()} · 错${unit} ${row.score}（FP ${row.fp} / FN ${row.fn} / 混淆 ${row.confusion}）　·　绿 = GT（真值类别）｜红 = Pred（预测类别 + 置信度${isClassify ? "；<conf = 低于分析口径，按未检出计" : ""}）`,
       );
     } catch (e) {
       setActionError(`叠加图打开失败：${e instanceof Error ? e.message : "未知错误"}`);
@@ -207,7 +222,7 @@ export function RunAnalysisPage() {
         <h2 className="card-title">错误分析 · Run {uid}</h2>
         {!analysis || !summary || !counts ? (
           <p className="placeholder-note" data-testid="analysis-empty">
-            尚未分析——best.pt 对 val 集逐图推理，逐框记 TP/FP/FN，回答「错在哪」。
+            尚未分析——best.pt 对 val 集逐图推理，{isClassify ? "逐图记 TP/混淆" : "逐框记 TP/FP/FN"}，回答「错在哪」。
           </p>
         ) : (
           <>
@@ -234,7 +249,7 @@ export function RunAnalysisPage() {
               )}
             </div>
             <p className="meta-line tnum" data-testid="analysis-conf-line">
-              分析口径 conf {summary.conf ?? "—"}（低于它的预测框视同未检出）
+              分析口径 conf {summary.conf ?? "—"}（低于它的预测{isClassify ? "" : "框"}视同未检出）
               {sweep?.recommended_conf !== null && sweep?.recommended_conf !== undefined && (
                 <> · 建议 conf <span>{sweep.recommended_conf}</span>（F1 {fmtMetric(sweep.recommended_f1)}）</>
               )}
@@ -269,7 +284,8 @@ export function RunAnalysisPage() {
             type="button"
             className="btn btn-primary"
             disabled={busy !== ""}
-            title={analysis ? "重算复用已推理结果（秒级）；阈值扫描恒基于全量匹配" : "低置信度全量推理 + IoU 贪心匹配"}
+            title={analysis ? "重算复用已推理结果（秒级）；阈值扫描恒基于全量匹配"
+              : isClassify ? "低置信度全量推理 + 逐图对账" : "低置信度全量推理 + IoU 贪心匹配"}
             onClick={() => void runAnalysis(confValue)}
             data-testid="analysis-run"
           >
@@ -280,11 +296,13 @@ export function RunAnalysisPage() {
               type="button"
               className="btn"
               disabled={busy !== ""}
-              title="导出 FN/FP/混淆改标清单 markdown 至 Run 目录；修法在 X-AnyLabeling 打开原图改"
+              title={isClassify
+                ? "导出改类清单 markdown 至 Run 目录；修法在数据集的标注审查页改类"
+                : "导出 FN/FP/混淆改标清单 markdown 至 Run 目录；修法在 X-AnyLabeling 打开原图改"}
               onClick={() => void exportRelabel()}
               data-testid="export-relabel"
             >
-              导出 FN/FP 改标清单
+              {isClassify ? "导出改类清单" : "导出 FN/FP 改标清单"}
             </button>
           )}
         </div>
@@ -304,7 +322,7 @@ export function RunAnalysisPage() {
                 <OperChart option={buildSweepOption(sweep ?? { curve: [], recommended_conf: null, recommended_f1: null })} height={210} testId="analysis-sweep-chart" />
               </div>
               <div className="chart-cell">
-                <p className="section-title">混淆矩阵（行 GT · 列 Pred · 含背景；点格筛选明细表）</p>
+                <p className="section-title">混淆矩阵（行 GT · 列 Pred · 含背景{isClassify ? "；背景列 = 未达口径" : ""}；点格筛选明细表）</p>
                 <OperChart
                   option={buildMatrixOption(analysis.matrix)}
                   height={230}
@@ -320,7 +338,7 @@ export function RunAnalysisPage() {
             <div className="panel-head" ref={tableHeadRef}>
               {cell === null ? (
                 <p className="section-title" data-testid="detail-head-full">
-                  样本错误明细 · {perImage.length} 张（错框数降序；点混淆矩阵格切到该格逐框记录）
+                  样本错误明细 · {perImage.length} 张（错{unit}数降序；点混淆矩阵格切到该格逐{unit}记录）
                 </p>
               ) : (
                 <p className="section-title" data-testid="detail-head-cell">
@@ -339,14 +357,14 @@ export function RunAnalysisPage() {
             </div>
             {cell === null ? (
               perImage.length === 0 ? (
-                <p className="placeholder-note" data-testid="detail-empty">val 集无逐框记录——没有可复盘样本。</p>
+                <p className="placeholder-note" data-testid="detail-empty">val 集无逐{unit}记录——没有可复盘样本。</p>
               ) : (
                 <div className="table-scroll">
                   <table className="data-table" data-testid="per-image-table">
                     <thead>
                       <tr>
                         <th>图片</th>
-                        <th className="num">错框</th>
+                        <th className="num">错{unit}</th>
                         <th className="num">FP</th>
                         <th className="num">FN</th>
                         <th className="num">混淆</th>
@@ -381,7 +399,7 @@ export function RunAnalysisPage() {
                 </div>
               )
             ) : cellEntries.length === 0 ? (
-              <p className="placeholder-note" data-testid="cell-empty">该格无逐框记录。</p>
+              <p className="placeholder-note" data-testid="cell-empty">该格无逐{unit}记录。</p>
             ) : (
               <div className="table-scroll">
                 <table className="data-table" data-testid="cell-table">
@@ -392,7 +410,8 @@ export function RunAnalysisPage() {
                       <th>GT 类</th>
                       <th>Pred 类</th>
                       <th className="num">conf</th>
-                      <th className="num">IoU</th>
+                      {/* classify 逐图对账没有框：不出 IoU 列 */}
+                      {!isClassify && <th className="num">IoU</th>}
                       <th>操作</th>
                     </tr>
                   </thead>
@@ -410,7 +429,9 @@ export function RunAnalysisPage() {
                           <td>{en.cls_gt ?? "—"}</td>
                           <td>{en.cls_pred ?? "—"}</td>
                           <td className="num tnum">{en.conf !== null ? en.conf.toFixed(2) : "—"}</td>
-                          <td className="num tnum">{en.iou ? en.iou.toFixed(2) : "—"}</td>
+                          {!isClassify && (
+                            <td className="num tnum">{en.iou ? en.iou.toFixed(2) : "—"}</td>
+                          )}
                           <td>
                             <button
                               type="button"

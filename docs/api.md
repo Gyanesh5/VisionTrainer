@@ -142,11 +142,11 @@
 
 | 方法 | 路径 | 说明 |
 | :--- | :--- | :--- |
-| GET | `/api/v1/runs/{uid}/analysis` | 错误分析读（M8 01/02）：`{summary(P/R/F1/计数/Top混淆/小目标), sweep(阈值曲线+建议conf), per_image[逐图错误明细：全部含逐框记录的 val 图（image/tp/fp/fn/confusion/score 错框数降序/overlay），无 Top10 截断], matrix(axis+cells 含背景)}`；未分析返回 null |
-| POST | `/api/v1/runs/{uid}/analysis` | 跑错误分析：训练 venv 低置信度全量推理 + IoU 贪心匹配入 run_sample_errors；仅 done Run；重复触发覆盖。body `{conf?}`（默认 0.25）设分析口径——低于该 conf 的预测框视同未检出，summary 回填 `conf`；同 Run 已推理过（predictions.jsonl 与 _done 在）则复用结果仅平台侧重算；阈值扫描恒基于全量匹配。segment/obb 任务 GT 与预测另采归一化 `poly`（预测取 masks.xyn）——匹配仍按外接矩形 IoU，叠加图与 `box` 字段绘/存多边形本体 |
+| GET | `/api/v1/runs/{uid}/analysis` | 错误分析读（M8 01/02）：`{summary(P/R/F1/计数/Top混淆/小目标), sweep(阈值曲线+建议conf), per_image[逐图错误明细：全部含逐框记录的 val 图（image/tp/fp/fn/confusion/score 错框数降序/overlay），无 Top10 截断], matrix(axis+cells 含背景)}`；classify Run 同构（逐图记录、一图一条，`small_objects` 为 null）；未分析返回 null |
+| POST | `/api/v1/runs/{uid}/analysis` | 跑错误分析：训练 venv 低置信度全量推理 + IoU 贪心匹配入 run_sample_errors；仅 done Run；重复触发覆盖。body `{conf?}`（默认 0.25）设分析口径——低于该 conf 的预测框视同未检出，summary 回填 `conf`；同 Run 已推理过（predictions.jsonl 与 _done 在）则复用结果仅平台侧重算；阈值扫描恒基于全量匹配。segment/obb 任务 GT 与预测另采归一化 `poly`（预测取 masks.xyn）——匹配仍按外接矩形 IoU，叠加图与 `box` 字段绘/存多边形本体。classify 改逐图对账（#157）：预测取 top-1 类（类名取模型 `names`——模型 id 为字母序）及其置信度，达口径同类 TP、异类混淆，低于口径视同未检出；记录 `box` 四键（gt / pred / gt_poly / pred_poly）皆 null、`iou` null；GT 读 `labels_frozen/val/classes.json`，旧 Run 缺该文件时先从逐 Run 入口的 val 链接树补写，补不出 409 |
 | GET | `/api/v1/runs/{uid}/analysis/cell?gt=&pred=` | 混淆矩阵点格筛选：该 (GT,Pred) 格逐框记录（UI 明细表点格后整表切换为此数据；眼睛按钮据此渲染**格内聚焦叠加**——该图只画本格记录，按格缓存于 analysis/overlays_cells/，随重算失效） |
 | GET | `/api/v1/runs/{uid}/analysis/cell/overlay?gt=&pred=&image=` | 格内单图聚焦叠加（阶段 1c）：只画该格在该图的记录，产物按格缓存 `analysis/overlays_cells/<gt>__<pred>/`，随重算失效；返回 `{path}`（字节经 `POST /thumb/sign` 签名展示）；该图该格无记录 404、Run 无运行目录 409 |
-| POST | `/api/v1/runs/{uid}/analysis/export` | 导出 FN/FP 改标清单 markdown 至 Run 目录 |
+| POST | `/api/v1/runs/{uid}/analysis/export` | 导出 FN/FP 改标清单 markdown 至 Run 目录（classify Run 为改类清单：真值 → 预测，修法指路标注审查页） |
 | POST | `/api/v1/runs/{uid}/test-infer` | 训后试跑（M8 05）：body `{image, conf?, iou?}`；image 支持单图/图片目录（递归取前 30 张，响应附 `dir_total` 供截断提示）/视频（抽帧）；按需导出 ONNX 缓存 + 叠框图 |
 | GET | `/api/v1/model-library` | 模型库目录视图（M8 07）：items[{name,size_mb,mtime,run_uid,verified,is_latest}] |
 | DELETE | `/api/v1/model-library/{name}` | 清理模型库派生目录（防穿越校验）；票 126 对齐派生语义：只删派生物，deployments 记录（真源账目）保留，返回 `{deleted, kept_deployments}`（保留的记录条数），事件 `deployment.updated action=dir_removed` |
@@ -176,7 +176,7 @@ M7 同批契约变化：`GET /runs/{uid}` 与任务详情 runs 增加 `pruned`�
 | POST | `/api/v1/tasks/{id}/preapproval` | 批量预审授权（ADR 0007）：body `{rounds: N}`——接下来 N 轮一次放行，流水留档可审计 |
 | DELETE | `/api/v1/tasks/{id}/preapproval` | 撤销批量预审：下一轮立即回到逐轮审批 |
 | POST | `/api/v1/tasks/{id}/agent-mode` | 自主档位切换（ADR 0007）：body `{approval: "autonomous" \| "supervised"}`，下一轮生效 |
-| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照，v1.4 冻结三段：`split{uid,params,memo,grouped}` / `effective{train[],val[],dropped{missing[],excluded[]}}` / `format{format_id,converter_version,projection_version,class_map,entry_path}`，连同当轮参数、权重标识、类别表哈希与标签聚合哈希 `labels`；早于该功能的 Run 为 null）；失败原因在 `error` 字段行内展示（阶段 3c）；出队新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
+| GET | `/api/v1/runs/{uid}` | Run 详情：epoch_metrics 全量（断线补齐源）、产物清单、LLM 决策记录、`snapshot`（M6 06 运行快照，v1.4 冻结三段：`split{uid,params,memo,grouped}` / `effective{train[],val[],dropped{missing[],excluded[]}}` / `format{format_id,converter_version,projection_version,class_map,entry_path}`，连同当轮参数、权重标识、任务类型 `task_type`（#157）、类别表哈希与标签聚合哈希 `labels`；早于该功能的 Run 为 null）；失败原因在 `error` 字段行内展示（阶段 3c）；出队新鲜度门拦截的 Run status=failed、error 指路校验页、无 run_dir |
 | DELETE | `/api/v1/runs/{uid}?delete_files=&force=` | 删除单条训练记录（2026-10-31）：仅终态（done/failed/cancelled）可删，queued/running/stopping 409；只删该轮，其余轮次不受影响；子表数据（epoch 指标/GPU 采样/逐框错误/Agent 决策）一并清理；任务被删空时连任务移除，存余轮次时 Task 聚合按剩余轮回落（删最新终态轮回落前一轮）；`delete_files=true` 另删该轮 run_dir（删空任务时整任务目录）；磁盘默认保留。票 126：已部署/已发布的 Run 默认 409 `delete_conflict`（可读提示列出部署目录与发布指纹要点），`force=true` 显式放行——部署/发布记录保留并标注失效（`invalidated_at` + 冗余 `run_uid` 可对账），物理拷贝留在模型库/发布目录，响应 `{deleted, invalidated:{deployments, releases}}` |
 | GET | `/api/v1/runs/{uid}/logs?tail=200` | 日志尾读（配合日志页轮询） |
 | POST | `/api/v1/runs/{uid}/stop` | 优雅停止：SIGTERM → trainer.stop → killpg（04） |

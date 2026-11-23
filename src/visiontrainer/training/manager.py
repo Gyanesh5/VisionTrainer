@@ -27,6 +27,7 @@ from pathlib import Path
 from ..datasets import service as ds
 from ..datasets.formats import DEFAULT_FORMAT_ID
 from ..datasets import producer_writeback
+from ..datasets import pool as pool_lib
 from ..datasets import split as split_ent
 from ..datasets.service import DatasetError
 from . import naming
@@ -158,6 +159,51 @@ class CurrentRun:
     watchdog: threading.Thread | None = field(default=None, repr=False)
 
 
+# ---------------------------------------------------------------- val GT 冻结副本（错误分析对账口径）
+
+FROZEN_SUBDIR = Path("labels_frozen") / "val"   # 相对 run_dir：本次实效 val 的 GT 副本恒落这里
+FROZEN_CLASSES = "classes.json"           # classify 的副本形态：图文件名 → 类名
+
+
+def freeze_val_gt(run_dir: Path, label_files: list[str], val_classes: dict[str, str] | None = None) -> Path:
+    """把本次实效 val 的 GT 冻结进 `<run_dir>/labels_frozen/val/`——错误分析恒读这里。
+
+    - 逐图标签形态（detect/segment/obb/pose）：照单复制 `label_files`（托管 = 池标签，
+      外部 = 自带目录；取数清单由 datasets 侧给齐，本函数不摸池路径）；
+    - classify：分类没有逐图标签，写 `classes.json`（图文件名 → 类名）。
+    目录恒建：清单为空不再连带漏建目录（classify 此前正因清单为空漏建，分析恒 409）。
+    """
+    frozen_val = Path(run_dir) / FROZEN_SUBDIR
+    frozen_val.mkdir(parents=True, exist_ok=True)
+    for lbl in label_files or []:
+        shutil.copy2(lbl, frozen_val / Path(lbl).name)
+    if val_classes:
+        (frozen_val / FROZEN_CLASSES).write_text(
+            json.dumps(val_classes, ensure_ascii=False, indent=2), encoding="utf-8")
+    return frozen_val
+
+
+def backfill_classify_frozen(run_dir: str | Path, classes: list[str]) -> bool:
+    """旧 classify Run 补写冻结副本：缺 classes.json 时，从逐 Run 入口的 val 链接树补写「图 → 类」。
+
+    val 链接树是出队⑤落盘即归档的启动时产物（此后不改写），与启动冻结同源同时点——GT 口径
+    仍是「Run 启动时点」。spec「缺副本 409、不设回退分支」防的是随改标漂移的旧派生目录，
+    本路径读的是 Run 自己的归档产物，不在其列。补不出（无链接树，或目录名不在类别表——
+    ADR 0017 前的 `{NN}_` 前缀时代）返回 False，调用方照常 409 指路重训。
+    """
+    run_dir = Path(run_dir)
+    if (run_dir / FROZEN_SUBDIR / FROZEN_CLASSES).is_file():
+        return True
+    val_classes = pool_lib.entry_val_classes(run_dir, classes)
+    if not val_classes:
+        return False
+    freeze_val_gt(run_dir, [], val_classes)
+    logging.getLogger(__name__).info(
+        "classify Run 补写冻结副本：%s（%d 张，取数自入口 val 链接树）",
+        run_dir / FROZEN_SUBDIR / FROZEN_CLASSES, len(val_classes))
+    return True
+
+
 # ---------------------------------------------------------------- 任务输入解析（票 05：三列 → 切分实体 → 实效集）
 
 
@@ -214,7 +260,7 @@ def task_inputs(name: str, split_uid: str | None) -> dict:
     外部数据集不出切分选择、不进实效集计算：`split`/`effective` 为 null，入口用其自带 data.yaml。
 
     Returns:
-        {"form", "dataset", "split_uid", "split", "effective", "data_yaml", "dataset_dir"}
+        {"form", "dataset", "task_type", "split_uid", "split", "effective", "data_yaml", "dataset_dir"}
     Raises:
         DatasetError: not_found（数据集不可用、显式 uid 的切分实体不在）、
             invalid_args（外部集缺 data.yaml）、
@@ -229,7 +275,8 @@ def task_inputs(name: str, split_uid: str | None) -> dict:
         labels_val = entry.parent / "labels" / "val"   # 外部目录自带布局（v1.3 起不变量）
         val_labels = ([str(p) for p in sorted(labels_val.iterdir()) if p.is_file()]
                       if labels_val.is_dir() else [])
-        return {"form": "external", "dataset": name, "split_uid": None, "split": None,
+        return {"form": "external", "dataset": name, "task_type": meta.get("task_type"),
+                "split_uid": None, "split": None,
                 "effective": None, "data_yaml": str(entry), "dataset_dir": str(ds_dir),
                 "val_labels": val_labels}
 
@@ -250,7 +297,8 @@ def task_inputs(name: str, split_uid: str | None) -> dict:
     eff = split_ent.effective_set(ds_dir, split)
     if not (eff.get("train") or []) or not (eff.get("val") or []):
         raise DatasetError("state_conflict", _empty_effective_reason(name, split, eff))
-    return {"form": "managed", "dataset": name, "split_uid": uid, "split": split,
+    return {"form": "managed", "dataset": name, "task_type": meta.get("task_type"), "split_uid": uid,
+            "split": split,
             "effective": {"train": list(eff.get("train") or []), "val": list(eff.get("val") or []),
                           "dropped": {"missing": list((eff.get("dropped") or {}).get("missing") or []),
                                       "excluded": list((eff.get("dropped") or {}).get("excluded") or [])}},
@@ -460,17 +508,15 @@ class TrainingManager:
             run_uid=run.uid, round_no=run.round_no, base_model=task.base_model,
             train_args=task.train_args or {}, data_yaml=str(data_yaml),
             dataset_dir=str(ds_dir), split=split, effective=effective,
-            fmt=(entry or {}).get("format"), labels_dir=(entry or {}).get("labels_dir")))
+            fmt=(entry or {}).get("format"), labels_dir=(entry or {}).get("labels_dir"),
+            task_type=inputs.get("task_type")))
 
-        # 冻结 val 标签副本：错误分析逐框对账永远对启动时点——只冻本次实效 val；
-        # 取数清单由 datasets 侧给齐（托管=池标签，外部=自带目录，见 task_inputs），
-        # manager 照单复制不摸池路径，池此后重建不影响旧 Run 口径（架构复审候选 5）
-        frozen_val = run_dir / "labels_frozen" / "val"
+        # 冻结 val GT 副本：错误分析对账永远对启动时点——只冻本次实效 val；取数清单由
+        # datasets 侧给齐（托管=池标签 / classify 的「图 → 类」，外部=自带目录，见 task_inputs），
+        # manager 照单落盘不摸池路径，池此后重建不影响旧 Run 口径（架构复审候选 5）
         frozen_srcs = ((entry or {}).get("val_labels") if inputs["form"] == "managed"
                        else inputs.get("val_labels")) or []
-        for lbl in frozen_srcs:
-            frozen_val.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(lbl, frozen_val / Path(lbl).name)
+        freeze_val_gt(run_dir, frozen_srcs, (entry or {}).get("val_classes"))
 
         log_f = (run_dir / "training.log").open("wb")
         proc = SubprocessHandle([self.s.training_python, self.s.trainer_entry, str(payload_path)], log_f)

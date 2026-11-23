@@ -202,6 +202,8 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
 
     Returns: {"data_yaml", "train_txt", "val_txt", "labels_dir", "format": {…快照段…}}；
     `data_yaml` 语义 = 训练 `data` 参数（txt-list 为 yaml 路径，classify 为入口目录）。
+    labels_frozen 冻结取数清单随返回：txt-list 给 `val_labels`（池标签绝对路径），classify 给
+    `val_classes`（实效 val 的「图文件名 → 类名」——分类没有逐图标签，类别在链接落位上表达）。
     """
     adapter = adapter_for(format_id)
     pool = pool_dir(ds_dir, format_id)
@@ -216,6 +218,7 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
     meta.pop("nc", None)   # _yaml_text 统一写 nc，避免重复键
 
     if TASK_MODE[task_type] == "classify":
+        val_classes: dict[str, str] = {}
         for side in ("train", "val"):
             for label in class_map:
                 (entry / side / label).mkdir(parents=True, exist_ok=True)
@@ -228,11 +231,14 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
                 flag = _classify_flag_of(ds_dir / "source" / Path(name).name)
                 if flag and flag in class_map:
                     _link(src.resolve(), entry / side / flag / Path(name).name)
+                    if side == "val":
+                        # 冻结取数：与链接落位同一判据、同一时点（无类图不进账，与链接树一致）
+                        val_classes[Path(name).name] = flag
         _atomic_text(entry / "data.yaml", _yaml_text(meta, path=entry, train="train", val="val"))
         # Ultralytics 分类训练的 data 参数必须是目录（check_cls_dataset 拒收 yaml 文件），
         # data.yaml 仅作类别映射存档；返回值语义 = 训练 `data` 参数，classify 即入口目录
         return {"data_yaml": str(entry), "train_txt": None, "val_txt": None,
-                "labels_dir": None, "val_labels": [],
+                "labels_dir": None, "val_labels": [], "val_classes": val_classes,
                 "format": _format_segment(format_id, adapter, class_map, str(entry))}
 
     train_txt = entry / "train.txt"
@@ -252,6 +258,24 @@ def write_run_entry(run_dir: Path, ds_dir: Path, task_type: str, classes: list[s
             "val_txt": str(val_txt), "labels_dir": str(pool / "labels"),
             "val_labels": val_labels,
             "format": _format_segment(format_id, adapter, class_map, str(entry / "data.yaml"))}
+
+
+def entry_val_classes(run_dir: Path, classes: list[str]) -> dict[str, str]:
+    """逐 Run 入口的 val 链接树 → {图文件名: 类名}（旧 classify Run 补写冻结副本的取数源）。
+
+    val 链接树是出队⑤落盘即归档的启动时产物：链接按当时的 flags 真键挂进类目录，此后不改写，
+    与 `write_run_entry` 的 val_classes 同源同时点。只认类别真名目录（ADR 0017：`{NN}_` 前缀
+    不兼容，前缀时代的 Run 重训）；断链图照记——GT 是启动时的账，不随真源删图改写。
+    """
+    tree = run_dir / "data" / "val"
+    if not tree.is_dir():
+        return {}
+    known = set(classes)
+    out: dict[str, str] = {}
+    for class_dir in sorted(p for p in tree.iterdir() if p.is_dir() and p.name in known):
+        for img in sorted(class_dir.iterdir()):
+            out[img.name] = class_dir.name
+    return out
 
 
 def _yaml_text(meta: dict, path: Path, train: str, val: str) -> str:

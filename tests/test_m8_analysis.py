@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -10,7 +11,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from conftest import build_dataset
+from conftest import build_dataset, build_split_dataset
 
 from visiontrainer.datasets import service as svc
 from visiontrainer.main import create_app
@@ -62,9 +63,46 @@ def m8_client(tmp_path: Path, datasets_root, m8_src):
         yield c
 
 
-def _done_task(client: TestClient, name: str, epochs: int = 1) -> tuple[int, str]:
+@pytest.fixture()
+def m8cls_src(tmp_path: Path) -> Path:
+    """classify 真源（#157）：shapes 恒空、判类 = flags 布尔真键；d_neg 无标注 JSON（无真值图的 FP 注入位）。"""
+    import json as _json
+
+    from PIL import Image
+
+    src = tmp_path / "m8cls"
+    src.mkdir()
+    for stem, flag in (("a_ok", "ok"), ("b_ng", "ng"), ("c_ok", "ok"),
+                       ("e_ng", "ng"), ("f_ok", "ok")):
+        Image.new("RGB", (64, 64), (120, 90, 60)).save(src / f"{stem}.png")
+        (src / f"{stem}.json").write_text(_json.dumps(
+            {"imageWidth": 64, "imageHeight": 64, "shapes": [], "flags": {flag: True}}),
+            encoding="utf-8")
+    Image.new("RGB", (64, 64), (60, 90, 120)).save(src / "d_neg.png")
+    return src
+
+
+@pytest.fixture()
+def m8cls_client(tmp_path: Path, datasets_root, m8cls_src):
+    """classify 数据集 + 手写切分（val 顺序 a,b,c,d 固定，stub 按下标注入四态）。"""
+    build_split_dataset("m8cls", "classify", m8cls_src,
+                        train=["e_ng.png", "f_ok.png"],
+                        val=["a_ok.png", "b_ng.png", "c_ok.png", "d_neg.png"])
+    cfg = {"training": {"python": sys.executable, "trainer_entry": STUB,
+                        "analysis_entry": STUB_ANA, "test_infer_entry": STUB_TI,
+                        "runs_dir": str(tmp_path / "runs"),
+                        "db_url": f"sqlite:///{tmp_path / 'm8cls.db'}",
+                        "model_lib_dir": str(tmp_path / "models"),
+                        "check_occupancy": False}}
+    app = create_app(cfg=cfg, serve_frontend=False)
+    with TestClient(app) as c:
+        yield c
+
+
+def _done_task(client: TestClient, name: str, epochs: int = 1,
+               dataset: str = "m8") -> tuple[int, str]:
     tid = client.post("/api/v1/tasks", json={"name": name, "base_model": "stub-model",
-                                             "dataset": "m8", "epochs": epochs}).json()["id"]
+                                             "dataset": dataset, "epochs": epochs}).json()["id"]
     deadline = time.time() + 25
     while time.time() < deadline:
         t = client.get(f"/api/v1/tasks/{tid}").json()
@@ -618,5 +656,194 @@ def test_analysis_requires_frozen_labels(tmp_path: Path):
     run = type("R", (), {"run_dir": str(tmp_path),
                          "best_pt": str(tmp_path / "weights" / "best.pt")})()
     with pytest.raises(tsvc.TaskError) as ei:
-        tsvc._analysis_payload(None, run)
+        tsvc._analysis_payload(run)
     assert ei.value.status == 409 and "labels_frozen" in ei.value.message
+
+
+# ---------------------------------------------------------------- classify 逐图对账（#157）
+
+def test_classify_records_semantics():
+    """classify 逐图对账四态：一图一条、无框无 IoU；真值与预测皆无 → 无记录。"""
+    g = [{"cls": "ok"}]
+    tp = ea.classify_records(g, [{"cls": "ok", "conf": 0.9}])
+    cf = ea.classify_records(g, [{"cls": "ng", "conf": 0.6}])
+    fn = ea.classify_records(g, [])                    # 低于口径的预测已被滤掉 = 视同未检出
+    fp = ea.classify_records([], [{"cls": "ng", "conf": 0.8}])
+    assert [r["kind"] for r in tp + cf + fn + fp] == ["tp", "confusion", "fn", "fp"]
+    assert tp[0]["cls_gt"] == "ok" and tp[0]["conf"] == 0.9
+    assert fn[0]["cls_pred"] is None and fn[0]["conf"] is None
+    assert fp[0]["cls_gt"] is None
+    for r in tp + cf + fn + fp:
+        assert r["gt"] is None and r["pred"] is None and r["iou"] is None
+        assert r["gt_poly"] is None and r["pred_poly"] is None
+    assert ea.classify_records([], []) == []
+    # 记录与逐框同构：汇总 / 阈值扫描直接复用，不出小目标统计
+    sm = ea.summarize(tp + cf + fn + fp, ["ng", "ok"])
+    assert sm["counts"] == {"tp": 1, "fp": 1, "fn": 1, "confusion": 1}
+    assert sm["small_objects"] is None
+    assert sm["top_confusions"] == [{"gt": "ok", "pred": "ng", "count": 1}]
+    sw = ea.sweep_thresholds(tp + cf + fn + fp, "逐图对账")
+    assert sw["curve"] and "逐图对账" in sw["note"] and "IoU" not in sw["note"]
+    assert f"IoU≥{ea.IOU_TH}" in ea.sweep_thresholds(tp)["note"]   # 逐框缺省口径不变
+
+
+def test_extract_pred_classify_top1_uses_model_names():
+    """classify 预测 = top-1 一项；类名取模型 names（模型 id 是类目录字母序，ADR 0017），
+    不按类别表行序取；names 缺该 id 时退 id 字符串，不炸。"""
+    from visiontrainer.training.analysis_entry import _extract_pred_classify
+
+    res = type("R", (), {"probs": type("P", (), {"top1": 1, "top1conf": 0.5656})(),
+                         "names": {0: "ng", 1: "ok"}})()
+    assert _extract_pred_classify(res) == [{"cls": "ok", "conf": 0.5656}]
+    res2 = type("R", (), {"probs": type("P", (), {"top1": 3, "top1conf": 1.0})(),
+                          "names": None})()
+    assert _extract_pred_classify(res2) == [{"cls": "3", "conf": 1.0}]
+
+
+def test_overlay_renders_text_for_boxless_records(tmp_path: Path):
+    """classify 无框记录：叠加图改文字标注（GT 绿 / Pred 红 + 置信度；below_conf 照标并注明）。"""
+    from PIL import Image
+
+    img = tmp_path / "a.png"
+    Image.new("RGB", (320, 240), (40, 40, 40)).save(img)
+    rec = {"kind": "confusion", "cls_gt": "ok", "cls_pred": "ng", "conf": 0.18,
+           "iou": None, "gt": None, "pred": None, "below_conf": True}
+    blank, texted = tmp_path / "blank.jpg", tmp_path / "text.jpg"
+    ea.render_overlay(str(img), [], blank)
+    ea.render_overlay(str(img), [rec], texted)
+    assert Image.open(texted).size == (320, 240)
+    assert blank.read_bytes() != texted.read_bytes()   # 文字确实画上去了
+
+
+def test_classify_error_analysis_e2e(m8cls_client):
+    """classify 端到端：启动冻结 classes.json + 快照 task_type → 逐图对账入库四态 → 叠加图 /
+    矩阵 / 点格 / 改类清单 → conf 口径重算（复用已推理结果）。"""
+    c = m8cls_client
+    _tid, uid = _done_task(c, "ana-cls", dataset="m8cls")
+    run = c.get(f"/api/v1/runs/{uid}").json()
+    run_dir = Path(run["run_dir"])
+    assert run["task_type"] == "classify"
+    assert run["snapshot"]["task_type"] == "classify"
+    assert run["snapshot"]["effective"]["val"] == ["a_ok.png", "b_ng.png", "c_ok.png", "d_neg.png"]
+    # 启动冻结：图 → 类（无类图 d_neg 不进账，与链接树一致）
+    frozen = run_dir / "labels_frozen" / "val" / "classes.json"
+    assert json.loads(frozen.read_text(encoding="utf-8")) == {
+        "a_ok.png": "ok", "b_ng.png": "ng", "c_ok.png": "ok"}
+
+    r = c.post(f"/api/v1/runs/{uid}/analysis")
+    assert r.status_code == 200, r.text
+    a = r.json()
+    # stub 注入语义（val 顺序 a,b,c,d）：a 判对、b 判成另一类、c 置信度 0.1 < 0.25、d 无真值
+    assert a["summary"]["counts"] == {"tp": 1, "fp": 1, "fn": 1, "confusion": 1}
+    assert a["summary"]["small_objects"] is None
+    assert "逐图对账" in a["sweep"]["note"]
+    axis, cells = a["matrix"]["axis"], a["matrix"]["cells"]
+    gi, pi = {n: i for i, n in enumerate(axis)}, {n: i for i, n in enumerate(axis)}
+    assert cells[gi["ok"]][pi["ok"]] == 1        # TP 落对角
+    assert cells[gi["ng"]][pi["ok"]] == 1        # 混淆落 gt × pred
+    assert cells[gi["ok"]][pi["背景"]] == 1      # 低于口径 → 视同未检出
+    assert cells[gi["背景"]][pi["ng"]] == 1      # 无真值 → FP 落背景行
+    # 逐图明细四图各一条，错图数降序；classify 无框 → 文字叠加图照常落盘
+    assert [w["score"] for w in a["per_image"]] == [1, 1, 1, 0]
+    assert {Path(w["image"]).name for w in a["per_image"]} == {
+        "a_ok.png", "b_ng.png", "c_ok.png", "d_neg.png"}
+    assert all(Path(w["overlay"]).is_file() for w in a["per_image"])
+    # 点格下钻：混淆格一条，box 空、iou 空
+    r2 = c.get(f"/api/v1/runs/{uid}/analysis/cell", params={"gt": "ng", "pred": "ok"})
+    assert r2.status_code == 200, r2.text
+    entries = r2.json()["entries"]
+    assert len(entries) == 1 and entries[0]["kind"] == "confusion"
+    assert entries[0]["iou"] is None
+    assert entries[0]["box"]["gt"] is None and entries[0]["box"]["pred"] is None
+    # 格内聚焦叠加（无框记录 → 文字标注）
+    r2b = c.get(f"/api/v1/runs/{uid}/analysis/cell/overlay",
+                params={"gt": "ng", "pred": "ok", "image": entries[0]["image"]})
+    assert r2b.status_code == 200, r2b.text
+    assert Path(r2b.json()["path"]).is_file()
+    # 改类清单：classify 文案（真值 → 预测；修法 = 标注审查页改类）
+    r3 = c.post(f"/api/v1/runs/{uid}/analysis/export")
+    assert r3.status_code == 200, r3.text
+    ex = r3.json()
+    assert len(ex["entries"]) == 3                 # fp + fn + confusion
+    md = Path(ex["path"]).read_text(encoding="utf-8")
+    assert "classify 改类清单" in md and "标注审查页" in md
+    assert "真值 ng → 预测 ok（conf 0.60）" in md
+    assert "真值 ok（预测置信度未达口径）" in md
+    # conf 口径重算（复用已推理结果）：0.05 时 c 判对；0.7 时 b 的预测出局
+    r4 = c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": 0.05})
+    assert r4.json()["summary"]["counts"] == {"tp": 2, "fp": 1, "fn": 0, "confusion": 1}
+    r5 = c.post(f"/api/v1/runs/{uid}/analysis", json={"conf": 0.7})
+    assert r5.json()["summary"]["counts"] == {"tp": 1, "fp": 1, "fn": 2, "confusion": 0}
+
+
+def test_classify_old_run_backfills_frozen_from_entry_tree(m8cls_client):
+    """旧 Run 补写冻结副本：classify 错误分析上线前训练的 Run 没有类别冻结副本、快照也没有
+    task_type——首次分析从入口 val 链接树补写（启动时归档产物），任务类型回读数据集元数据。"""
+    c = m8cls_client
+    _tid, uid = _done_task(c, "ana-cls-old", dataset="m8cls")
+    run_dir = Path(c.get(f"/api/v1/runs/{uid}").json()["run_dir"])
+    # 抹成上线前的形态：冻结副本整目录不在，快照无 task_type
+    shutil.rmtree(run_dir / "labels_frozen")
+    manifest = run_dir / "run_manifest.json"
+    snap = json.loads(manifest.read_text(encoding="utf-8"))
+    snap.pop("task_type")
+    manifest.write_text(json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+
+    r = c.post(f"/api/v1/runs/{uid}/analysis")
+    assert r.status_code == 200, r.text
+    frozen = run_dir / "labels_frozen" / "val" / "classes.json"
+    assert json.loads(frozen.read_text(encoding="utf-8")) == {
+        "a_ok.png": "ok", "b_ng.png": "ng", "c_ok.png": "ok"}
+    assert r.json()["summary"]["counts"] == {"tp": 1, "fp": 1, "fn": 1, "confusion": 1}
+
+
+def test_classify_backfill_only_trusts_table_name_dirs(tmp_path: Path):
+    """补写取数只认类别真名目录：ADR 0017 前的 `{NN}_` 前缀目录不迁就（用户裁决不做向后
+    兼容），表外目录名也不计；无链接树返回 False——调用方照常 409 指路重训。"""
+    from visiontrainer.training.manager import (FROZEN_CLASSES, FROZEN_SUBDIR,
+                                                backfill_classify_frozen)
+
+    assert backfill_classify_frozen(tmp_path, ["ng", "ok"]) is False
+    for class_dir in ("ok", "00_ng", "unknown"):
+        (tmp_path / "data" / "val" / class_dir).mkdir(parents=True)
+        (tmp_path / "data" / "val" / class_dir / "x.png").write_bytes(b"png")
+    assert backfill_classify_frozen(tmp_path, ["ng", "ok"]) is True
+    frozen = tmp_path / FROZEN_SUBDIR / FROZEN_CLASSES
+    assert json.loads(frozen.read_text(encoding="utf-8")) == {"x.png": "ok"}
+    # 已有副本幂等：不覆盖既有文件
+    frozen.write_text("{}", encoding="utf-8")
+    assert backfill_classify_frozen(tmp_path, ["ng", "ok"]) is True
+    assert frozen.read_text(encoding="utf-8") == "{}"
+
+
+def test_classify_analysis_requires_frozen_classes(tmp_path: Path):
+    """classify 缺类别冻结副本（补写也补不出）→ 409，文案点名 classes.json，
+    不再误导成「缺标签目录、重跑训练」。"""
+    from visiontrainer.training import service as tsvc
+
+    (tmp_path / "weights").mkdir()
+    (tmp_path / "weights" / "best.pt").write_bytes(b"pt")
+    (tmp_path / "run_manifest.json").write_text(json.dumps({
+        "task_type": "classify",
+        "effective": {"val": ["a.png"]},
+        "classes": {"list": ["ng", "ok"]},
+    }), encoding="utf-8")
+    run = type("R", (), {"run_dir": str(tmp_path),
+                         "best_pt": str(tmp_path / "weights" / "best.pt")})()
+    with pytest.raises(tsvc.TaskError) as ei:
+        tsvc._analysis_payload(run, "classify")
+    assert ei.value.status == 409 and "classes.json" in ei.value.message
+
+
+def test_run_task_type_snapshot_first(monkeypatch):
+    """任务类型解析：快照 task_type 优先；旧 Run 快照无此段时回读任务所属数据集的元数据；
+    两者皆无（任务已不可查）→ None，按逐框口径走。"""
+    from visiontrainer.training import service as tsvc
+
+    monkeypatch.setattr(tsvc.ds, "get_dataset", lambda name, **kw: {"task_type": "classify"})
+    task = type("T", (), {"dataset": "m8cls"})()
+    run = type("R", (), {"task_id": 7})()
+    s = type("S", (), {"get": staticmethod(lambda model, task_id: task)})()
+    assert tsvc._run_task_type(s, run, {"task_type": "detect"}) == "detect"
+    assert tsvc._run_task_type(s, run, None) == "classify"
+    assert tsvc._run_task_type(s, type("R", (), {})(), None) is None

@@ -72,12 +72,12 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 - **状态机**：queued / running / stopping / done / failed / cancelled；`source: manual|agent`；**队列单元 = Run**，Task↔Run 一对多；Task.status 为聚合冗余（在跑/排队优先，否则取最新一轮终态）。
 - **派生新鲜度门与出队六步** [v1.4-03/04，ADR 0011/0012]：①成员段计算实效集；②检查格式池 `converter_version / projection_version / classes_sha`，任一失配整池重建；③逐实效成员计算 `adapter.encode_image(project(JSON))` 并与池文件**逐字节比对**、不一致即重写并补齐图片链接，`broken` 拒训，投影 drops 按 M9 确认门放行（未确认/账外新丢弃拒训，已确认的丢弃形状不进训练）；④移除真源已不存在者的池链接与标签；⑤写逐 Run 训练入口与 `labels_frozen/`；⑥快照冻结 `format{format_id, converter_version, projection_version, class_map, entry_path}`。改完标注直接开训是唯一正确用法，导出标注不再承重；外部数据集不走平台格式池。
 - **Run 目录命名** [ADR 0013]：`runs/<任务目录>/<Run 目录>` 两级可读——任务级取任务名（清洗非法字符、截 80 字符），Run 级取 `{开训时刻 %Y%m%d_%H%M%S}_r{轮次}`（与 `runs.started_at` 同源）；uid 只作库内与 API 标识，任务重名或同级重名兜底追加 `-{uid}` 后缀。
-- **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**，缺副本的 Run 直接 409（重跑训练后再分析），不设任何旧派生目录回退分支。
+- **val 标签冻结副本**：启动即把本次实效 val 标签拷入 `<run_dir>/labels_frozen/val` 并记录聚合哈希；**错误分析 GT 恒读冻结副本**，缺副本的 Run 直接 409（重跑训练后再分析），不设任何旧派生目录回退分支。classify 例外（ADR 0019，#157）：分类没有逐图标签，冻结的是「图 → 类」映射 `<run_dir>/labels_frozen/val/classes.json`（取数与逐 Run 入口的 val 链接树同源同时点）；旧 classify Run 缺该文件时，首次分析从入口 val 链接树补写（启动时归档产物，落盘后不改写；只认类别真名目录，ADR 0017），补不出照常 409。
 - **训练记录列表**（2026-10-30 重构）：训练页按数据集分组、每 Run 一行；组头折叠状态记忆、单表渲染、取消轮保留、终态显示实际 epoch、任务新在前且轮次升序、点行查看该次运行等既有口径不变。
 - **删除粒度**：单条终态 Run 可独立删除，其余轮次不受影响；queued/running/stopping 409；任务删空连任务移除，存余轮次时聚合状态回落。Run 子表随轮清理，磁盘产物默认保留，勾选后删对应 run_dir；「删除任务」仍整任务删。已部署/已发布的 Run 删除走冲突门（票 126，ADR 0015 Decision 2）：默认 409 `delete_conflict` 列部署/发布记录要点，`force=true` 显式放行——部署/发布记录保留并标注失效（invalidated_at + 冗余 run_uid，清单留档可查），物理拷贝留派生目录；真源账目永不静默消失，派生清理可重建可追溯。
 - **恢复**：**从不自动续训**——崩溃/收养失败 → failed，UI 提供「续训」新 Run；重开与续训钉原 split_uid，实效集按当时真相重算。
 - **预训练权重**：官方模型名或本地 .pt 绝对路径双形态不变；官方名与任务类型不匹配时防呆，本地路径不参与推断，显示处收短为文件名。
-- **运行快照** [M6；v1.4-03/04]：冻结 `split{uid, params, memo, grouped}`、`effective{train[], val[], dropped{missing[], excluded[]}}`、`format{…, class_map}`、类别表哈希、标签聚合哈希、增强参数与预训练权重标识。可复现性来自快照而非钉住的派生目录；错误分析与部署回查类别读 class_map。
+- **运行快照** [M6；v1.4-03/04]：冻结 `split{uid, params, memo, grouped}`、`effective{train[], val[], dropped{missing[], excluded[]}}`、`format{…, class_map}`、类别表哈希、标签聚合哈希、增强参数、预训练权重标识与任务类型 `task_type`（#157：错误分析据此选逐图 / 逐框口径；早于该字段的 Run 回读数据集元数据）。可复现性来自快照而非钉住的派生目录；错误分析与部署回查类别读 class_map。
 - **失败 Retry** [M7]：Failed/Cancelled Run 一键以相同参数重开 Task。
 - **表单工程学** [M7]：超参失焦 clamp 反馈、只存非默认值、「已修改」徽章——超参 diff 天然只剩差异。
 - **预设实验模板** [M8]：尺寸扫描（640/800/960 一键三 Task）/lr 扫描模板 + 少样本快训预设；不做自然语言入口。
@@ -92,7 +92,7 @@ Trainer 子进程（训练 venv：ultralytics/torch）       matplotlib 渲染�
 
 - Run 归档：全量 args、逐 epoch 指标（**入库，单一数据源**）、results.csv、training.log、ultralytics 全套产物图（混淆矩阵/PR/F1/P/R 曲线不自绘）、best/last.pt、Agent 轮 LLM 决策记录（输入摘要/输出/clamp）。
 - 复盘报告：一键生成 markdown（复用 Agent 多模态管线）存 Run 目录；PDF 不做。
-- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标与格式池懒刷新不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；缺副本直接 409，不设旧派生目录回退分支。
+- **错误分析** [M8]：Run 后以 best.pt 对 val 集逐图推理，IoU 匹配逐框记 TP/FP/FN 入库（run_sample_errors）——**样本错误明细**（唯一一张表、两态：默认全部含逐框记录的 val 图逐图统计、错框数降序；点混淆矩阵格切换为该格逐框记录；操作栏含看叠加图与跳 X-AnyLabeling）、GT 绿框/Pred 红框叠加大图、自绘混淆矩阵点格筛选明细表（ultralytics PNG 归档并存：PNG 保真、自绘可交互）、导出 FN/FP 改标清单回 X-AnyLabeling。零新增依赖（核心数学=IoU 贪心匹配）。推理恒按 conf 0.01 全量采集且落盘复用；**分析口径 conf 可设**（低于阈值的预测框视同未检出——低 conf 噪声 FP 不再淹没错误明细；换口径只做平台侧匹配/渲染重算，秒级不重推理；阈值扫描恒基于全量）；点格逐框记录支持**格内聚焦叠加**（眼睛按钮：该图只画本格记录，不被全图全量标注淹没）。**GT 口径 = Run 启动时冻结的 val 标签副本**（labels_frozen，2026-10-31）：此后数据集改标与格式池懒刷新不影响旧 Run 对账（predictions.jsonl 与逐框记录同源同账）；缺副本直接 409，不设旧派生目录回退分支。**classify 逐图对账**（ADR 0019，#157）：分类没有框，一图至多一条记录入 run_sample_errors（`kind` 同四态；`box` 四键全空、`iou` null）。预测取 top-1 类及其置信度：达口径且同类 TP，达口径异类记混淆。低于口径视同未检出，GT 记 FN、矩阵落背景列；图无真值而预测达口径记 FP。混淆矩阵、阈值扫描、逐图明细、点格下钻沿用逐框实现；汇总行沿用 P/R/F1，不出小目标统计；叠加图改为文字标注（GT 绿 / Pred 红 + 置信度，低于口径者标 `<conf`）；改类走标注审查页（#131），导出为改类清单。
 - **复盘升级** [M8]：结构化错误统计（Top 混淆类对/缺数据类/FP-FN 失衡/小目标占比）作 LLM 输入 schema；报告固定加「**下一步实验推荐**」章节（超参改动+理由+预期收益，与审批门共享输出结构）。
 - **对比页六件套** [M8；v1.4-03]：超参 diff 三件套（基准 Run+只看差异+高亮）、指标表 Best/Last/Min/Max 切换+极值高亮、平行坐标（超参轴+主指标轴，按主指标着色）、仅差异列开关+Run 固定颜色、对比视图状态进 URL（复盘报告可回链）、「与当前部署版对比」一键；Run 按 split_uid 分组并标注各轮实效 val 张数，不同切分不暗示直接可比。
 
@@ -202,7 +202,7 @@ ProjectedImage {
 
 **格式池** `<ds>/derived/<format_id>/`：`images/` 平铺符号链接、`labels/` 平铺标签、`derived.json{format_id,converter_version,projection_version,classes_sha,task_type,class_map,counts,updated_at}`。一集每格式一池，与切分无关；可删重建，池清理在出队时。平铺布局要求 stem 唯一。
 
-**逐 Run 入口** `runs/<任务目录>/<Run 目录>/data/`：两级目录按 ADR 0013 可读命名（任务名 / 开训时刻_r 轮次）。`data.yaml + train.txt + val.txt` 指向池内图片与本次实效集，和运行快照、`labels_frozen/` 同地归档。classify 例外为 `data/{train,val}/<类别名>/` 链接树 + 根 data.yaml：目录真名（ADR 0017，Ultralytics 按文件夹字母序编号，模型 id = 字母序），data.yaml 仅作存档且 names 按字母序记模型真实 id 语义，表行序回查以 class_map 为唯一依据；发布面 classes（deploy config / 发布包 classes.txt）由 `_model_class_order` 对 classify 按模型序出。Run 目录仍是 Ultralytics save_dir，training.log/report.md/export/ 同目录。
+**逐 Run 入口** `runs/<任务目录>/<Run 目录>/data/`：两级目录按 ADR 0013 可读命名（任务名 / 开训时刻_r 轮次）。`data.yaml + train.txt + val.txt` 指向池内图片与本次实效集，和运行快照、`labels_frozen/` 同地归档。classify 例外为 `data/{train,val}/<类别名>/` 链接树 + 根 data.yaml：目录真名（ADR 0017，Ultralytics 按文件夹字母序编号，模型 id = 字母序），data.yaml 仅作存档且 names 按字母序记模型真实 id 语义，表行序回查以 class_map 为唯一依据，链接落位与启动冻结的 `labels_frozen/val/classes.json` 同一判据、同一时点（#157）；发布面 classes（deploy config / 发布包 classes.txt）由 `_model_class_order` 对 classify 按模型序出。Run 目录仍是 Ultralytics save_dir，training.log/report.md/export/ 同目录。
 
 **外部导出适配器**：YOLO/COCO/VOC 进 M11；COCO/VOC 由平台以 stdlib 实现，XAL 仅作参考。导出与格式池完全解耦，DOTA/mask/mot 等长尾格式不做。
 

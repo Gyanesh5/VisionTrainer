@@ -4,6 +4,7 @@
 - IoU ≥ iou_th（默认 0.5）按 IoU 降序贪心配对（与类别无关）；
 - 配对且同类 → TP；配对但跨类 → 类混淆（计入 GT 类的 FN 缺口与 Pred 类的 FP 来源，矩阵记 gt×pred 格）；
 - 未配 GT → FN；未配 Pred → FP。
+classify 例外（#157）：分类没有框，逐图对账、一图一条记录，见 classify_records。
 纯函数集中在本模块，平台侧可单测；推理重活在训练 venv（analysis_entry）。
 """
 
@@ -66,6 +67,26 @@ def greedy_match(gts: list[dict], preds: list[dict], iou_th: float = IOU_TH) -> 
     return records
 
 
+def classify_records(gts: list[dict], preds: list[dict]) -> list[dict]:
+    """classify 逐图对账（#157）：一图至多一条记录，形态与逐框记录同构（gt/pred 坐标与 iou
+    恒 None），汇总 / 混淆矩阵 / 阈值扫描 / 明细下钻 / 清单导出零改动复用。
+
+    gts = 该图真值类（至多一项，冻结副本一图一类）；preds = 已按分析口径过滤的 top-1 预测
+    （至多一项，低于口径者已被滤掉 = 视同未检出）。有 GT 有预测：同类 TP、异类混淆。
+    有 GT 无预测 → FN；无 GT 有预测 → FP。两者皆无 → 无记录（该图不入明细）。"""
+    g = gts[0]["cls"] if gts else None
+    p = preds[0] if preds else None
+    if g is None and p is None:
+        return []
+    boxless = {"iou": None, "gt": None, "pred": None, "gt_poly": None, "pred_poly": None}
+    if g is None:
+        return [{"kind": "fp", "cls_gt": None, "cls_pred": p["cls"], "conf": p.get("conf"), **boxless}]
+    if p is None:
+        return [{"kind": "fn", "cls_gt": g, "cls_pred": None, "conf": None, **boxless}]
+    return [{"kind": "tp" if g == p["cls"] else "confusion", "cls_gt": g, "cls_pred": p["cls"],
+             "conf": p.get("conf"), **boxless}]
+
+
 def summarize(records: list[dict], classes: list[str], gt_areas: list[float] | None = None) -> dict:
     """汇总：P/R/F1、逐类 FN/FP、Top 混淆对、小目标占比（供 UI 与 LLM schema 共用）。"""
     tp = sum(1 for r in records if r["kind"] == "tp")
@@ -107,11 +128,12 @@ def summarize(records: list[dict], classes: list[str], gt_areas: list[float] | N
     }
 
 
-def sweep_thresholds(records: list[dict]) -> dict:
+def sweep_thresholds(records: list[dict], matched_by: str | None = None) -> dict:
     """后验全阈值扫描（M8 04 号票）：基于已配对结果按 conf 截断重算 P/R/F1。
 
     口径：跨类配对在任意阈值下都不算 TP（同时计入 FN 与 FP 来源）；低于阈值的 TP 配对
-    其 GT 计 FN、其 Pred 不计（近似——低置信度重配对影响通常很小，报告注明）。
+    其 GT 记 FN、其 Pred 不计（近似——低置信度重配对影响通常很小，报告注明）。
+    `matched_by`：note 里的对账口径说明，缺省 `IoU≥0.5`（逐框）；classify 传「逐图对账」。
     """
     tp_all = [r for r in records if r["kind"] == "tp"]
     confusion = [r for r in records if r["kind"] == "confusion"]
@@ -132,7 +154,8 @@ def sweep_thresholds(records: list[dict]) -> dict:
     best = max(curve, key=lambda x: x["f1"]) if curve else None
     return {"curve": curve, "recommended_conf": best["conf"] if best else None,
             "recommended_f1": best["f1"] if best else None,
-            "note": f"后验扫描（conf {SWEEP_MIN}–{SWEEP_MAX} 步长 {SWEEP_STEP}，IoU≥{IOU_TH}；"
+            "note": f"后验扫描（conf {SWEEP_MIN}–{SWEEP_MAX} 步长 {SWEEP_STEP}，"
+                    f"{matched_by or f'IoU≥{IOU_TH}'}；"
                     f"样本 TP{len(tp_all)}/FP{len(fp_all)}/FN{fn_all}）"}
 
 
@@ -146,6 +169,7 @@ def _overlay_scales(w: int, h: int) -> tuple[int, int, int]:
 def render_overlay(image_path: str, records: list[dict], out_path: Path) -> Path:
     """GT 绿 / Pred 红 叠加大图（PIL 画框，平台零 cv2 依赖）。
     记录带归一化 poly（segment/obb）时绘多边形本体，否则退外接矩形；
+    无框记录（classify 逐图对账）改左上角文字标注；
     线宽与标注字号按图像尺寸动态缩放；标注文字带黑描边（任意底色可读）；
     标签锚点始终用 xyxy（GT 上缘上方 / Pred 下缘下方）。"""
     from PIL import Image, ImageDraw, ImageFont
@@ -179,6 +203,22 @@ def render_overlay(image_path: str, records: list[dict], out_path: Path) -> Path
             _, _, _, y1 = r["pred"]
             conf = f" {r['conf']:.2f}" if r.get("conf") is not None else ""
             _label((r["pred"][0] + off, y1 + off), f"P {r['cls_pred']}{conf}", (239, 68, 68))
+
+    # classify（#157）无框可画：左上角文字标注，沿用 GT 绿 / Pred 红双色与 GT 上、Pred 下的次序。
+    # below_conf = 该预测低于分析口径（按未检出计），照标并注明——这类图恰是模型拿不准的样本。
+    # 注记只用 ASCII：Pillow 内置字体无中文字形，中文会渲染成占位方框。
+    y = off
+    for r in records:
+        if r.get("gt") or r.get("pred") or not (r.get("cls_gt") or r.get("cls_pred")):
+            continue
+        if r.get("cls_gt"):
+            _label((off, y), f"GT {r['cls_gt']}", (34, 197, 94))
+            y += fsize + off
+        if r.get("cls_pred"):
+            conf = f" {r['conf']:.2f}" if r.get("conf") is not None else ""
+            note = " <conf" if r.get("below_conf") else ""
+            _label((off, y), f"P {r['cls_pred']}{conf}{note}", (239, 68, 68))
+            y += fsize + off
     out_path.parent.mkdir(parents=True, exist_ok=True)
     im.save(out_path, quality=88)
     return out_path
