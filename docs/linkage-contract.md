@@ -159,7 +159,7 @@ sha256 前 8 位；只算字节内容，与文件名/路径/mtime 无关；样�
 | 8 | 训练平台 | classify 消费面缺失（审查页渲染态/改类动作/批量通过/label→flags 投影） | 已完成（实施票 #131：pull 解包后顶层 label→flags 真键投影+classes.txt 登记、审查页 classify 渲染分支、改类即判定（review/relabel）、批量通过（review/approve-batch）；validate 对 classify 按 flags 定类计数） |
 | 9 | 训练平台 | 拉取 ZIP 暂存+幂等重导缺失 | 已完成（实施票 #132：下载成功且结构校验通过即落暂存 `producer_pulls/`（成功即焚+超期 14 天清扫）；逐文件幂等以词干为单位前置预检——同词干同内容跳过/异内容拒收登记进导入报告与 meta 落账，只作用拉取导入器；`GET producer-pulls/staged` + `POST producer-pulls/reimport` 从暂存重导，成功照常回写 ingested） |
 | 10 | 训练平台 | 发布面尚未携带血缘字段（baseline_sha8/sample_models，§5.4 v1.1 增补） | 已完成（实施票 #147：release_run 读运行快照 weight 段冻结口径得 baseline_sha8、消费 #146 共享归因查询 trained_attribution 得 sample_models（实效集命中批次 manifest.models 并集），metadata.json/发布记录行/清单行三处带出——官方名/无快照 → null、数据集无联动导入 → 空数组，均为合法值，ADR 0018 Decision 1-5） |
-| 11 | 训练平台 | 清单 download_url 签发死绑首发 url_expires_at，过期无重签路径（§5.4 现签语义） | 待实施（同评审候选 T3：清单响应读时现签） |
+| 11 | 训练平台 | 清单 download_url 签发死绑首发 url_expires_at，过期无重签路径（§5.4 现签语义） | 已完成（feat/linkage-surface 集成：list_releases 读时现签——download_url/url_expires_at/url_expired 三者响应时刻一致计算，账目行留首发时刻；密钥独立 server.release_secret 回退 thumb_secret，缺省告警） |
 | 12 | 训练平台 | §6.2「切片派生图块按源图归属映射」未实现——切片链 trained 回写整段静默失效（producer_imports 不随切片传播、归因 join 为 basename 精确匹配永不命中图块名） | 已完成（实施票 #146：producer_imports 随切片快照性拷贝进切片集 meta；trained 归因实效集图块名先经 tiling.groups 归约回源图口径再匹配 manifest；归因查询重构为共享函数 trained_attribution，富化命中批次 models 并集供发布面 sample_models 消费——ADR 0018 Decision 5） |
 
 适配完成后逐条勾销；新增偏差随实施登记。
