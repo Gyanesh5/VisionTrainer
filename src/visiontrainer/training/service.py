@@ -1555,6 +1555,18 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         weight_seg = ((load_snapshot(run.run_dir) if run.run_dir else None) or {}).get("weight") or {}
         _sha = weight_seg.get("sha256") if weight_seg.get("kind") == "file" else None
         baseline_sha8 = _sha[:8] if _sha else None
+        # 数据血缘（票 147，ADR 0018 Decision 4/5）：实效集命中批次 manifest.models 并集
+        # （[{model_id, model_sha8}] 去重保序）——消费 #146 共享归因查询；无联动导入 /
+        # 无快照 → 空数组（契约 §5.4：合法值，非 null）。发布不被归因读取失败拖死（同上
+        # 分析读取的降级口径），失败如实空数组留账
+        sample_models: list = []
+        if run.run_dir and task and task.dataset:
+            try:
+                from ..datasets.producer_writeback import trained_attribution
+
+                sample_models = trained_attribution(task.dataset, run.run_dir)["sample_models"]
+            except Exception:  # noqa: BLE001 — 发布不被联动归因失败拖死
+                sample_models = []
         # 序号 = 该 Run 既有发布数 + 1：重复发布生成新目录新记录（只增不改，不覆盖旧包）
         seq = s.query(ModelRelease).filter(ModelRelease.run_id == run.id).count() + 1
         target = root / f"{family}_{task_type}_{run.uid}_{seq}"
@@ -1582,6 +1594,7 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
             "primary_metric": run.primary_metric,
             "base_model": task.base_model if task else None,
             "baseline_sha8": baseline_sha8,
+            "sample_models": sample_models,
             "task_type": task_type,
             "classes": _model_class_order(task_type, classes),
             "recommended_conf": conf,
@@ -1603,7 +1616,7 @@ def release_run(manager, uid: str, release_dir: str | None = None) -> dict:
         record = ModelRelease(run_id=run.id, run_uid=uid, fingerprint=fingerprint,
                               release_dir=str(target), bundle_path=str(bundle),
                               url_expires_at=rel.expiry(), baseline_sha8=baseline_sha8,
-                              payload=meta)
+                              sample_models=sample_models, payload=meta)
         s.add(record)
         s.commit()
         rid = record.id
@@ -1639,6 +1652,7 @@ def list_releases(manager) -> dict:
                       "round_no": r.round_no if r else None, "fingerprint": m.fingerprint,
                       "version": (m.payload or {}).get("version", m.fingerprint),
                       "baseline_sha8": m.baseline_sha8,  # 血缘（票 147，ADR 0018）：官方名/无快照 → null
+                      "sample_models": m.sample_models,  # 血缘（票 147，ADR 0018 D4）：命中批次 models 并集；b0007 前历史行 → null
                       "release_dir": m.release_dir, "primary_metric": r.primary_metric if r else None,
                       "invalidated": m.invalidated_at is not None,
                       "dir_cleared": m.cleared_at is not None,

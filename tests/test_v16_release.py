@@ -140,6 +140,66 @@ def test_release_baseline_sha8_null_without_snapshot(release_client):
     assert row["baseline_sha8"] is None
 
 
+def _inject_imports(datasets_root: Path, name: str, batches: list[dict]) -> None:
+    """直改 dataset.json 注入联动导入账目（producer_imports，键格式按契约 §4.4 冻结形态）。"""
+    meta_path = datasets_root / name / "dataset.json"
+    raw = json.loads(meta_path.read_text(encoding="utf-8"))
+    raw["producer_imports"] = batches
+    meta_path.write_text(json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def test_release_sample_models_union_of_hit_batches(release_client, datasets_root):
+    """数据血缘（契约 v1.1 §5.4，ADR 0018 Decision 4）：有联动导入的 Run 发布 →
+    sample_models = 实效集命中批次 manifest.models 并集（按二元组去重保序），发布响应 /
+    metadata.json / 清单行三处带出，形态与导出包 manifest.models 一致，对端对账零翻译。"""
+    c, tmp_path, _app = release_client
+    # 两个导入批次：plate 全量文件被 Run 实效集消费 → 两批皆命中；m1 跨批重复，去重保序
+    _inject_imports(datasets_root, "plate", [
+        {"at": "2026-11-23T10:00:00", "mode": "create", "base_url": "http://p:9000",
+         "models": [{"model_id": "m1", "model_sha8": "aa11"}],
+         "samples": [{"sample_id": "s-a", "images": [{"file": "images/car0.png"}]}]},
+        {"at": "2026-11-23T11:00:00", "mode": "append", "base_url": "http://p:9000",
+         "models": [{"model_id": "m2", "model_sha8": "bb22"},
+                    {"model_id": "m1", "model_sha8": "aa11"}],
+         "samples": [{"sample_id": "s-b", "images": [{"file": "images/person0.png"}]}]},
+    ])
+    uid = _train_one(c, "linkage-run")
+
+    expect = [{"model_id": "m1", "model_sha8": "aa11"},   # m1 首现于批次 1
+              {"model_id": "m2", "model_sha8": "bb22"}]   # 批次 2 只补新面 m2
+    out = c.post(f"/api/v1/runs/{uid}/release").json()
+    assert out["sample_models"] == expect  # 发布响应
+    meta = json.loads((Path(out["release_dir"]) / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["sample_models"] == expect  # metadata.json（契约 §5.4）
+    row = next(r for r in c.get("/api/v1/releases").json()["releases"]
+               if r["release_id"] == out["release_id"])
+    assert row["sample_models"] == expect  # 清单行
+
+
+def test_release_sample_models_empty_without_linkage(release_client):
+    """数据血缘：数据集无联动导入 → 空数组（契约 §5.4：空数组是合法值，非 null）；
+    无快照旧 Run 归因同样无从谈起 → 空数组（宁缺勿错）。"""
+    c, tmp_path, app = release_client
+    uid = _train_one(c, "no-linkage")
+
+    out = c.post(f"/api/v1/runs/{uid}/release").json()
+    assert out["sample_models"] == []
+    meta = json.loads((Path(out["release_dir"]) / "metadata.json").read_text(encoding="utf-8"))
+    assert meta["sample_models"] == []
+    row = next(r for r in c.get("/api/v1/releases").json()["releases"]
+               if r["release_id"] == out["release_id"])
+    assert row["sample_models"] == []
+
+    # 无快照旧 Run 重复发布：实效集缺失 → 依旧空数组，发布不被拖死
+    with app.state.manager.Session() as s:
+        from visiontrainer.db.models import Run
+
+        run = s.query(Run).filter(Run.uid == uid).one()
+        Path(run.run_dir, "run_manifest.json").unlink()
+    out2 = c.post(f"/api/v1/runs/{uid}/release").json()
+    assert out2["sample_models"] == []
+
+
 def test_release_signed_url_download_and_expiry(release_client):
     """限时签名 URL（验收 1）：有效签名能下载完整发布包；过期/篡改签名 403 拒绝。"""
     c, tmp_path, _app = release_client
@@ -401,5 +461,5 @@ def test_migration_creates_model_releases_on_stamp_path(tmp_path):
         assert ver  # 已升到 head（b0003 在链上）
         cols = {r[1] for r in s.execute(text("PRAGMA table_info(model_releases)"))}
         assert {"id", "run_id", "fingerprint", "release_dir", "url_expires_at", "payload",
-                "created_at", "baseline_sha8"} <= cols  # b0006：血缘列随链就位
+                "created_at", "baseline_sha8", "sample_models"} <= cols  # b0006/b0007：血缘列随链就位
         assert s.execute(text("SELECT uid FROM runs")).scalar() == "ca11ed00"  # 数据保留
